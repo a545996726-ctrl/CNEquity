@@ -666,9 +666,17 @@ def _action_terms(config: Config, symbols: list[str], start: date, end: date) ->
     """Per (symbol, ex_date) corporate-action terms over the compared window.
 
     ``action_type`` is part of the primary key, so one ex-date can carry a
-    dividend row and an allotment row. The ratios add; the allotment *price* is
-    not additive, so the cash each row returns to the holder is formed as
-    ``ratio * price`` before aggregation.
+    dividend row and an allotment row. The ratios add *within a source*; the
+    allotment *price* is not additive, so the cash each row returns to the
+    holder is formed as ``ratio * price`` before aggregation.
+
+    Across sources they must not add. Each vendor describes the whole event, and
+    two of them classify 送 vs 转 differently: for 30 stored ex-dates EastMoney
+    files a ``transfer`` row carrying the same ratio TDX files as ``bonus``, so
+    summing the two columns doubled a 0.4 dilution into 0.8 and fired a spurious
+    crosscheck finding. Aggregate per source, then keep the single source with
+    the largest dilution — the most complete view of one event, rather than the
+    sum of two partial ones.
     """
     from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
 
@@ -684,17 +692,44 @@ def _action_terms(config: Config, symbols: list[str], start: date, end: date) ->
     for column in _ACTION_FIELDS:
         if column not in actions.columns:
             actions = actions.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
+    has_source = "source" in actions.columns
     terms = actions.select(
         "symbol",
         "ex_date",
+        *(["source"] if has_source else []),
         *[pl.col(c).cast(pl.Float64).fill_null(0.0).alias(c) for c in _ACTION_FIELDS],
     ).with_columns((pl.col("allotment_ratio") * pl.col("allotment_price")).alias("_allot_cash"))
-    return terms.group_by(["symbol", "ex_date"]).agg(
+    if not has_source:
+        # Older fragments and minimal fixtures carry no provenance column; the
+        # cross-source correction below cannot apply, so keep the plain sum.
+        return terms.group_by(["symbol", "ex_date"]).agg(
+            pl.col("cash_dividend").sum().alias("_dividend"),
+            pl.col("bonus_ratio").sum().alias("_bonus"),
+            pl.col("transfer_ratio").sum().alias("_transfer"),
+            pl.col("allotment_ratio").sum().alias("_allotment"),
+            pl.col("_allot_cash").sum().alias("_allot_cash"),
+        )
+    per_source = terms.group_by(["symbol", "ex_date", "source"]).agg(
         pl.col("cash_dividend").sum().alias("_dividend"),
         pl.col("bonus_ratio").sum().alias("_bonus"),
         pl.col("transfer_ratio").sum().alias("_transfer"),
         pl.col("allotment_ratio").sum().alias("_allotment"),
         pl.col("_allot_cash").sum().alias("_allot_cash"),
+    )
+    # One source per ex-date: the largest dilution, breaking ties toward the
+    # source that also reports the most cash, so the dividend and the dilution
+    # always come from the same vendor's reading of the same event.
+    return (
+        per_source.with_columns(
+            (pl.col("_bonus") + pl.col("_transfer") + pl.col("_allotment")).alias("_dilution")
+        )
+        .sort(
+            ["symbol", "ex_date", "_dilution", "_dividend", "_allot_cash", "source"],
+            descending=[False, False, True, True, True, False],
+        )
+        .group_by(["symbol", "ex_date"], maintain_order=True)
+        .first()
+        .drop("source", "_dilution")
     )
 
 

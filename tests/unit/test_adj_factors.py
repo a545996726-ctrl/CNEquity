@@ -1243,3 +1243,94 @@ def test_compute_adj_factors_surfaces_crosscheck_findings(adj_config, monkeypatc
     result = compute_adj_factors(adj_config)
     checks = {f["check"] for f in result.findings}
     assert "adj_factor_corporate_action_divergence" in checks
+
+
+def _write_actions(cfg, rows: list[dict], ex_date: date):
+    ca_dir = cfg.curated_root / "corporate_actions" / f"ex_date={ex_date.isoformat()}"
+    ca_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        rows,
+        schema={
+            "symbol": pl.Utf8,
+            "ex_date": pl.Date,
+            "action_type": pl.Utf8,
+            "cash_dividend": pl.Float64,
+            "bonus_ratio": pl.Float64,
+            "transfer_ratio": pl.Float64,
+            "allotment_ratio": pl.Float64,
+            "allotment_price": pl.Float64,
+            "source": pl.Utf8,
+        },
+    ).write_parquet(ca_dir / "part-0.parquet")
+
+
+def test_action_terms_do_not_add_two_vendors_readings_of_one_event(adj_config):
+    """EastMoney files 送 as 转; summing both columns doubled the dilution.
+
+    Thirty stored ex-dates carry an EastMoney ``transfer`` row holding the same
+    ratio TDX files as ``bonus``. They are one event seen twice, not two events,
+    so a 0.4 dilution must stay 0.4 rather than becoming 0.8 and firing a
+    spurious crosscheck finding.
+    """
+    from cnequity.derive.adj_factors import _action_terms
+
+    ex = date(2024, 6, 28)
+    _write_actions(
+        adj_config,
+        [
+            {
+                "symbol": "600519.SH", "ex_date": ex, "action_type": "transfer",
+                "cash_dividend": 0.0, "bonus_ratio": 0.0, "transfer_ratio": 0.4,
+                "allotment_ratio": None, "allotment_price": None, "source": "eastmoney",
+            },
+            {
+                "symbol": "600519.SH", "ex_date": ex, "action_type": "bonus",
+                "cash_dividend": 0.0, "bonus_ratio": 0.4, "transfer_ratio": 0.0,
+                "allotment_ratio": None, "allotment_price": None, "source": "tdx_protocol",
+            },
+            {
+                "symbol": "600519.SH", "ex_date": ex, "action_type": "cash_dividend",
+                "cash_dividend": 0.155, "bonus_ratio": 0.0, "transfer_ratio": 0.0,
+                "allotment_ratio": None, "allotment_price": None, "source": "tdx_protocol",
+            },
+        ],
+        ex,
+    )
+
+    out = _action_terms(adj_config, ["600519.SH"], ex, ex)
+
+    assert out.height == 1
+    row = out.to_dicts()[0]
+    assert row["_bonus"] + row["_transfer"] == pytest.approx(0.4)
+    # The tie breaks toward the vendor that also reports the cash, so dividend
+    # and dilution come from one reading of one event.
+    assert row["_dividend"] == pytest.approx(0.155)
+
+
+def test_action_terms_still_add_rows_from_one_vendor(adj_config):
+    """Within a source the ratios genuinely add: one plan, several action rows."""
+    from cnequity.derive.adj_factors import _action_terms
+
+    ex = date(2024, 6, 28)
+    _write_actions(
+        adj_config,
+        [
+            {
+                "symbol": "000001.SZ", "ex_date": ex, "action_type": "bonus",
+                "cash_dividend": 0.0, "bonus_ratio": 0.3, "transfer_ratio": 0.0,
+                "allotment_ratio": None, "allotment_price": None, "source": "eastmoney",
+            },
+            {
+                "symbol": "000001.SZ", "ex_date": ex, "action_type": "transfer",
+                "cash_dividend": 0.0, "bonus_ratio": 0.0, "transfer_ratio": 0.5,
+                "allotment_ratio": None, "allotment_price": None, "source": "eastmoney",
+            },
+        ],
+        ex,
+    )
+
+    out = _action_terms(adj_config, ["000001.SZ"], ex, ex)
+
+    row = out.to_dicts()[0]
+    assert row["_bonus"] == pytest.approx(0.3)
+    assert row["_transfer"] == pytest.approx(0.5)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
@@ -22,6 +22,8 @@ from cnequity.quality.cross_checks import (
     daily_bars_close_crosscheck_findings,
     st_label_crosscheck_findings,
     trading_calendar_horizon_findings,
+    corporate_action_classification_findings,
+    instrument_listing_order_findings,
     universe_survivorship_findings,
     valuation_bars_coverage_findings,
 )
@@ -395,6 +397,12 @@ def _collect_lake_findings(
     )
     findings.extend(adj_factor_coverage_findings(config, trade_date))
     findings.extend(universe_survivorship_findings(config, trade_date))
+    findings.extend(instrument_listing_order_findings(config))
+    findings.extend(
+        corporate_action_classification_findings(
+            config, trade_date - timedelta(days=ADJ_RECON_LOOKBACK_DAYS), trade_date
+        )
+    )
     # Both sides already in curated — costs no requests (issue #10).
     findings.extend(st_label_crosscheck_findings(config, trade_date))
     findings.extend(macro_staleness_findings(config, trade_date))

@@ -1561,3 +1561,138 @@ def st_label_crosscheck_findings(config: Config, trade_date: date) -> list[dict]
             "symbols": (board_only + name_only)[:_SAMPLE],
         }
     ]
+
+
+def instrument_listing_order_findings(config: Config) -> list[dict]:
+    """A security cannot stop trading before it starts.
+
+    The delisting sweep infers a retirement from a Sina probe that answers the
+    same way for a code that stopped trading and for one that was issued but has
+    not opened yet. A fresh listing swept in that window is filed as a delisting,
+    which then feeds ``delisting_events`` and makes the survivorship check above
+    reason about names that never left. Eleven stored rows carried a delist_date
+    earlier than their own list_date — all stamped 2026-09-01 against list dates
+    of 2026-09-02..09-07, and their 'C'/'N' name prefixes mark them as new
+    listings rather than retirements.
+
+    Cheap, exact, and orthogonal to how the bad row arrived, so it holds even if
+    a future source writes the pair some other way.
+    """
+    instruments = _instruments_frame(config)
+    if instruments is None:
+        return []
+    if not {"symbol", "list_date", "delist_date"} <= set(instruments.columns):
+        return []
+
+    inverted = instruments.filter(
+        pl.col("list_date").is_not_null()
+        & pl.col("delist_date").is_not_null()
+        & (pl.col("delist_date") < pl.col("list_date"))
+    )
+    if inverted.is_empty():
+        return []
+
+    sample = inverted.head(5).select("symbol", "list_date", "delist_date").to_dicts()
+    return [
+        {
+            "dataset": "instruments",
+            "severity": "error",
+            "check": "instrument_listing_order",
+            "message": (
+                f"{inverted.height} instrument(s) carry a delist_date earlier than "
+                "their list_date — a delisting was inferred for a security that had "
+                "not started trading yet. These rows also reach delisting_events and "
+                "the survivorship check"
+            ),
+            "rows": inverted.height,
+            "sample": [
+                {
+                    "symbol": row["symbol"],
+                    "list_date": row["list_date"].isoformat(),
+                    "delist_date": row["delist_date"].isoformat(),
+                }
+                for row in sample
+            ],
+        }
+    ]
+
+
+def corporate_action_classification_findings(config: Config, start: date, end: date) -> list[dict]:
+    """Two vendors describing one ex-date as different actions, or at 10x scale.
+
+    ``action_type`` is in the primary key, so EastMoney filing 送 as ``transfer``
+    while TDX files it as ``bonus`` produces two legal rows that describe one
+    event. Thirty stored ex-dates look like that. Three more carry EastMoney at
+    exactly ten times the TDX ratio — 603538.SH and 603585.SH read 0.4 against
+    4.0 on 2026-07-09, 688557.SH 0.45 against 4.5 — a 每10股 / 每股 confusion.
+
+    The unadjusted close settles which side is right: those three fell to 1/1.40,
+    1/1.46 and 1/1.47 of the prior close, exactly a 送0.4/0.45 dilution. A real
+    additional 转4.0 would have taken them to about a fifth.
+    """
+    root = config.curated_root / "corporate_actions"
+    if not dataset_has_parquet(root):
+        return []
+    actions = dedupe_lazy_by_primary_key(
+        scan_parquet_root(root, partition_col="ex_date", start=start, end=end),
+        "corporate_actions",
+    ).collect()
+    needed = {"symbol", "ex_date", "bonus_ratio", "transfer_ratio", "source"}
+    if actions.is_empty() or not needed <= set(actions.columns):
+        return []
+
+    bonus = actions.filter(pl.col("bonus_ratio").fill_null(0.0) > 0).select(
+        "symbol", "ex_date", pl.col("bonus_ratio").alias("_b"), pl.col("source").alias("_b_src")
+    )
+    transfer = actions.filter(pl.col("transfer_ratio").fill_null(0.0) > 0).select(
+        "symbol", "ex_date", pl.col("transfer_ratio").alias("_t"), pl.col("source").alias("_t_src")
+    )
+    paired = bonus.join(transfer, on=["symbol", "ex_date"], how="inner").filter(
+        pl.col("_b_src") != pl.col("_t_src")
+    )
+    if paired.is_empty():
+        return []
+
+    duplicated = paired.filter((pl.col("_b") - pl.col("_t")).abs() < 1e-9)
+    scaled = paired.filter((pl.col("_t") - pl.col("_b") * 10.0).abs() < 1e-9)
+
+    findings: list[dict] = []
+    if not duplicated.is_empty():
+        findings.append(
+            {
+                "dataset": "corporate_actions",
+                "severity": "warning",
+                "check": "corporate_action_duplicate_classification",
+                "message": (
+                    f"{duplicated.height} ex-date(s) carry the same ratio as 送 from one "
+                    "source and 转 from another — one event stored twice. Anything that "
+                    "adds bonus_ratio and transfer_ratio double-counts the dilution"
+                ),
+                "rows": duplicated.height,
+            }
+        )
+    if not scaled.is_empty():
+        findings.append(
+            {
+                "dataset": "corporate_actions",
+                "severity": "error",
+                "check": "corporate_action_ratio_scale",
+                "message": (
+                    f"{scaled.height} ex-date(s) carry a transfer_ratio exactly 10x the "
+                    "bonus_ratio another source reports — a 每10股/每股 unit confusion"
+                ),
+                "rows": scaled.height,
+                "sample": [
+                    {
+                        "symbol": row["symbol"],
+                        "ex_date": row["ex_date"].isoformat(),
+                        "bonus_ratio": row["_b"],
+                        "transfer_ratio": row["_t"],
+                        "bonus_source": row["_b_src"],
+                        "transfer_source": row["_t_src"],
+                    }
+                    for row in scaled.head(5).to_dicts()
+                ],
+            }
+        )
+    return findings

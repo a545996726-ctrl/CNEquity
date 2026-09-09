@@ -254,3 +254,41 @@ def test_backfill_targets_only_genuine_delistings(tmp_path):
     _catalog(cfg, {"920000.BJ": "2026-07-21", "600070.SH": "2025-04-10"})
 
     assert delisted_symbols_in_window(cfg, date(2016, 1, 1)) == ["600070.SH"]
+
+
+def _with_instruments(cfg, rows: list[dict]):
+    root = cfg.curated_root / "instruments"
+    root.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        rows,
+        schema={"symbol": pl.Utf8, "list_date": pl.Date, "delist_date": pl.Date},
+    ).write_parquet(root / "part-merged.parquet")
+
+
+def test_a_code_listing_after_the_probe_terminal_is_not_a_delisting(tmp_path):
+    """A security cannot stop trading before it starts.
+
+    Sina answers the discovery probe the same way for a code that stopped
+    trading and for one that was issued days before its first session, so a
+    fresh listing swept in that window used to be filed as a delisting: eleven
+    stored rows carried a delist_date of 2026-09-01 against list dates of
+    2026-09-02..09-07. The security master settles it.
+    """
+    cfg = _cfg(tmp_path)
+    _with_bars_through(cfg, date(2026, 9, 8))
+    stale = date(2026, 9, 8) - timedelta(days=LIVE_RECENCY_DAYS + 5)
+    _catalog(cfg, {"301688.SZ": stale.isoformat(), "600001.SH": "2009-12-15"})
+    _with_instruments(
+        cfg,
+        [
+            # Listed the day after the probe terminal — a new issue, not a retirement.
+            {"symbol": "301688.SZ", "list_date": stale + timedelta(days=1), "delist_date": None},
+            {"symbol": "600001.SH", "list_date": date(2000, 1, 4), "delist_date": None},
+        ],
+    )
+
+    delisted, live = classify_catalog(cfg)
+
+    assert "301688.SZ" not in delisted
+    assert "301688.SZ" in live
+    assert set(delisted) == {"600001.SH"}

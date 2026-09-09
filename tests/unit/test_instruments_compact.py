@@ -793,3 +793,23 @@ def test_fetch_list_date_map_closes_owned_client_on_error(monkeypatch):
     with pytest.raises(RuntimeError, match="clist failed"):
         em_inst.fetch_list_date_map()
     assert created[0].closed is True
+
+
+def test_tdx_instrument_frame_strips_fixed_width_name_padding():
+    # TDX serves names in a fixed-width field padded with NULs. Left in, they
+    # reach curated ("C格林\x00\x00\x00") and silently break every equality,
+    # join and display on the column — 1,718 stored rows carried them.
+    from cnequity.adapters.tdx_protocol.client import _filter_instrument_frame
+
+    out = _filter_instrument_frame(
+        pl.DataFrame(
+            {
+                "code": ["600519", "603448"],
+                "name": ["贵州茅台\x00\x00", " C天博\x00\x00\x00 "],
+            }
+        ),
+        "SH",
+    )
+    names = dict(zip(out["symbol"].to_list(), out["name"].to_list(), strict=True))
+    assert names == {"600519.SH": "贵州茅台", "603448.SH": "C天博"}
+    assert not any("\x00" in name for name in names.values())

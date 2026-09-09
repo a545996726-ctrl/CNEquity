@@ -210,11 +210,17 @@ def classify_catalog(config: Config) -> tuple[dict[str, date], dict[str, date]]:
     # bar span as a stronger read-time correction so repair and coverage never
     # write a delist_date for a currently trading symbol.
     instrument_dates: dict[str, date | None] = {}
+    instrument_list_dates: dict[str, date | None] = {}
     instruments = load_curated_instruments(config)
     if instruments is not None and {"symbol", "delist_date"} <= set(instruments.columns):
         instrument_dates = {
             row["symbol"]: row["delist_date"]
             for row in instruments.select("symbol", "delist_date").iter_rows(named=True)
+        }
+    if instruments is not None and {"symbol", "list_date"} <= set(instruments.columns):
+        instrument_list_dates = {
+            row["symbol"]: row["list_date"]
+            for row in instruments.select("symbol", "list_date").iter_rows(named=True)
         }
     candidate_symbols = [
         symbol
@@ -233,8 +239,17 @@ def classify_catalog(config: Config) -> tuple[dict[str, date], dict[str, date]]:
     for sym, value in raw.items():
         last = date.fromisoformat(value)
         observed = observed_spans.get(sym)
+        listed_on = instrument_list_dates.get(sym)
         if instrument_dates.get(sym) is None and observed is not None and observed[1] > last:
             live[sym] = observed[1]
+        elif listed_on is not None and listed_on >= last:
+            # A code cannot stop trading before it starts. The Sina probe answers
+            # for an issued-but-not-yet-trading code exactly as it does for one
+            # that stopped, so a fresh listing swept days before its first
+            # session looks delisted: 11 stored rows carried a delist_date
+            # earlier than their own list_date, all stamped 2026-09-01 against
+            # list dates of 2026-09-02..09-07. The security master settles it.
+            live[sym] = last
         else:
             (delisted if last < cutoff else live)[sym] = last
     return delisted, live

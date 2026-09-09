@@ -316,7 +316,12 @@ def _filter_instrument_frame(pdf: pl.DataFrame, exch: str) -> pl.DataFrame:
     rows = []
     for row in filtered.iter_rows(named=True):
         code = str(row[code_col]).strip().zfill(6)
-        name = str(row[name_col])
+        # TDX serves the name in a fixed-width field padded with NULs, which
+        # survive the decode and reach curated as "C格林\x00\x00\x00". Substring
+        # matching (ST detection) happens to be unaffected, but equality, joins
+        # and display are all silently wrong, so clean it at the boundary the
+        # code column is already cleaned at.
+        name = str(row[name_col]).replace("\x00", "").strip()
         if is_subscription_placeholder(name):
             continue
         rows.append(
