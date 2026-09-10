@@ -19,7 +19,7 @@ derive_workers = 4
 # Maximum in-flight requests per source.  Pacing (`min_interval_seconds`) is
 # still the QPS guard; these caps protect upstream connection capacity when
 # independent DAG steps or derives overlap.
-source_concurrency = { eastmoney = 4, ths = 2, ths_pages = 1, ths_bonus = 1, cninfo = 2, pboc = 2, nbs = 2, exchange = 2, sina = 4, sina_bars = 2, bse = 2, baostock = 1, tushare = 2 }
+source_concurrency = { eastmoney = 4, ths = 2, ths_pages = 1, ths_bonus = 1, cninfo = 2, pboc = 2, nbs = 2, exchange = 2, sina = 4, sina_bars = 2, bse = 2, baostock = 1, tushare = 2, ths_official = 2 }
 batch_size = 100
 max_retries = 3
 retry_backoff_seconds = 5
@@ -171,6 +171,22 @@ batch_rest_seconds = 120
 enabled = false
 min_interval_seconds = 1.0
 # token = "..."
+
+# Optional 同花顺 official API (fuyao.aicubes.cn) — a licensed peer source, never
+# a primary. With no key every path that uses it degrades to silence and the lake
+# keeps its existing sources, so leaving this section out costs only the extra
+# cross-checks. Prefer HITHINK_FINANCE_API_KEY so the credential never enters config.
+#
+# `verify` and `backfill` are deliberately separate. Verification writes source
+# snapshots and findings and never touches curated rows, so it is safe whenever a
+# key is present. Backfill changes what the lake holds — the 2016-2024 balance
+# sheet and cash-flow gap — so it stays off until asked for.
+[sources.ths_official]
+enabled = false
+min_interval_seconds = 0.4
+verify = true
+backfill = false
+# api_key = "..."
 
 [margin_trading]
 # "exchange" reads 融资融券 detail from the SSE and SZSE, which compile it from

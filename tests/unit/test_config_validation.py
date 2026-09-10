@@ -438,3 +438,59 @@ def test_rate_limited_sources_are_all_declared_in_the_example_config():
 
     missing = {name: where for name, where in used.items() if name not in declared}
     assert not missing, f"rate_limit() names with no [sources.*] section: {missing}"
+
+
+def _write_config(tmp_path, body: str) -> Path:
+    path = tmp_path / "cnequity.toml"
+    path.write_text(f'[data]\nroot = "{tmp_path / "lake"}"\n\n{body}')
+    return path
+
+
+def test_ths_official_key_loads_from_config_and_never_reaches_repr(tmp_path):
+    cfg = load_config(
+        str(
+            _write_config(
+                tmp_path,
+                '[sources.ths_official]\nenabled = true\napi_key = "sk-not-a-real-key"\n',
+            )
+        )
+    )
+    assert cfg.ths_official_api_key == "sk-not-a-real-key"
+    # The credential must not reach manifests, checkpoints, or provenance, all of
+    # which stringify the config somewhere along the way.
+    assert "sk-not-a-real-key" not in repr(cfg)
+
+
+def test_ths_official_key_falls_back_to_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "sk-from-env")
+    cfg = load_config(str(_write_config(tmp_path, "[sources.ths_official]\nenabled = true\n")))
+    assert cfg.ths_official_api_key == "sk-from-env"
+
+
+def test_ths_official_verification_and_backfill_are_separate_switches(tmp_path):
+    """Verification writes findings; backfill changes what the lake holds.
+
+    Sharing one flag would make "check my data against a licensed peer" also mean
+    "and rewrite nine years of it", so the defaults differ: verify on, backfill off.
+    """
+    cfg = load_config(str(_write_config(tmp_path, "[sources.ths_official]\nenabled = true\n")))
+    assert cfg.ths_official_verify_enabled is True
+    assert cfg.ths_official_backfill_enabled is False
+
+    cfg = load_config(
+        str(
+            _write_config(
+                tmp_path,
+                "[sources.ths_official]\nenabled = true\nverify = false\nbackfill = true\n",
+            )
+        )
+    )
+    assert cfg.ths_official_verify_enabled is False
+    assert cfg.ths_official_backfill_enabled is True
+
+
+def test_ths_official_is_absent_by_default(tmp_path):
+    """No key, no section: the source simply does not exist for this lake."""
+    cfg = load_config(str(_write_config(tmp_path, "")))
+    assert cfg.ths_official_api_key is None
+    assert "ths_official" not in cfg.sources

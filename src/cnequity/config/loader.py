@@ -90,6 +90,18 @@ class Config:
     # to manifests, checkpoints, or provenance.
     tushare_token: str | None = field(default=None, repr=False)
     tushare_timeout_sec: float = 30.0
+    # Optional 同花顺 official API key. Read from [sources.ths_official].api_key
+    # or HITHINK_FINANCE_API_KEY, and never written to manifests, checkpoints,
+    # or provenance. The whole source is optional: with no key every path that
+    # uses it degrades to silence and the lake keeps its existing sources.
+    ths_official_api_key: str | None = field(default=None, repr=False)
+    ths_official_timeout_sec: float = 30.0
+    # Verification (arbitration, cross-checks) is safe to run whenever a key is
+    # present — it writes source snapshots and findings, never curated rows.
+    # Backfilling content is not: it changes what the lake holds, so it stays
+    # off until asked for explicitly. One flag for each, never one for both.
+    ths_official_verify_enabled: bool = True
+    ths_official_backfill_enabled: bool = False
     universe_default: str = "all_a"
     daily_waves: list[WaveConfig] = field(default_factory=list)
     schedule_groups: dict[str, ScheduleGroup] = field(default_factory=dict)
@@ -518,6 +530,10 @@ def load_config(path: str | Path) -> Config:
     baostock_batch_rest_seconds = 120.0
     tushare_token: str | None = os.environ.get("TUSHARE_TOKEN") or None
     tushare_timeout_sec = 30.0
+    ths_official_api_key: str | None = os.environ.get("HITHINK_FINANCE_API_KEY") or None
+    ths_official_timeout_sec = 30.0
+    ths_official_verify_enabled = True
+    ths_official_backfill_enabled = False
     for name, val in sources_raw.items():
         if isinstance(val, dict):
             sources[name] = bool(val.get("enabled", True))
@@ -552,6 +568,15 @@ def load_config(path: str | Path) -> Config:
                     tushare_token = str(val["token"]).strip() or None
                 if val.get("timeout_sec") is not None:
                     tushare_timeout_sec = float(val["timeout_sec"])
+            if name == "ths_official":
+                if val.get("api_key"):
+                    ths_official_api_key = str(val["api_key"]).strip() or None
+                if val.get("timeout_sec") is not None:
+                    ths_official_timeout_sec = float(val["timeout_sec"])
+                if val.get("verify") is not None:
+                    ths_official_verify_enabled = bool(val["verify"])
+                if val.get("backfill") is not None:
+                    ths_official_backfill_enabled = bool(val["backfill"])
         else:
             sources[name] = bool(val)
 
@@ -671,6 +696,10 @@ def load_config(path: str | Path) -> Config:
         baostock_batch_rest_seconds=baostock_batch_rest_seconds,
         tushare_token=tushare_token,
         tushare_timeout_sec=tushare_timeout_sec,
+        ths_official_api_key=ths_official_api_key,
+        ths_official_timeout_sec=ths_official_timeout_sec,
+        ths_official_verify_enabled=ths_official_verify_enabled,
+        ths_official_backfill_enabled=ths_official_backfill_enabled,
         universe_default=str(raw.get("universe", {}).get("default", "all_a")),
         daily_waves=daily_waves,
         schedule_groups=schedule_groups,
