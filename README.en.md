@@ -232,8 +232,10 @@ per dataset); the contract travels in the responses. Details:
 
 ## Glance at the lake
 
-Once the lake is up, `cne serve` shows coverage, freshness, and bytes by tier
-(read-only — it never writes the lake):
+Once the lake is up, `cne serve` is the read-only operations console. The
+overview shows health, Fresh / Stale counts, the coverage heatmap and action
+items; datasets, runs and quality are separate pages. It never writes the
+lake — ingestion, retry and cleanup stay on the CLI.
 
 ```bash
 cne serve     # http://127.0.0.1:8787

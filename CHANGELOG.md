@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Chinese README now introduces the serve console.** The new 数据运维页面
+  section explains what `cne serve` shows and embeds the labelled dashboard
+  illustration.
+
 ## [0.8.0] — 2026-09-06
 
 ### Added

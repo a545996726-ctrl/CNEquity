@@ -245,6 +245,21 @@ roe = load(
 
 架构上的边界比较简单：适配器负责把多源数据取回来；编排层负责 DAG、批次和重试；数据先进入 staging，再压实为 curated 并计算 derived；质量层持续审计；查询和服务层只读消费。展开见[架构说明](docs/architecture/overview.md)。
 
+## 数据运维页面
+
+建好湖之后，日常要确认的是覆盖有没有跟上、哪里断了、上次审计留下了什么。`cne serve` 打开只读控制台：
+
+```bash
+cne serve                 # http://127.0.0.1:8787
+```
+
+<p align="center">
+  <img src="docs/assets/cne-serve-hero-demo.png" alt="cne serve 数据运维页面：湖状态、覆盖热力与行动项" width="1100" />
+</p>
+<p align="center"><sub>示意截图，图中标有 ILLUSTRATIVE DEMO；完整覆盖热力不是对当前生产湖的声明。</sub></p>
+
+概览页给出健康状态、Fresh / Stale 计数、覆盖热力和行动项。另外三个页面分别看数据集契约与水位、跑批时间线，以及审计 findings、跨源比对和隔离区。控制台不写湖：采集、重试和清理仍走 CLI，页面只显示该复制的命令。非回环地址必须加 `--token`。
+
 ## 日常使用与运维
 
 ```bash
@@ -256,7 +271,7 @@ cne retry --run-id <run_id>   # 只重试失败批次
 cne retry --failed-groups     # 重试各 daily 分组最新的失败 run
 ```
 
-单个 step 失败时，系统会记录 failed batch，其他步骤继续落盘；重试不会把整条任务重新跑一遍。浏览器控制台可以查看覆盖、新鲜度、容量、跑批和质量结果。
+单个 step 失败时，系统会记录 failed batch，其他步骤继续落盘；重试不会把整条任务重新跑一遍。覆盖和新鲜度也可以在上一节的数据运维页面里看。
 
 挂入 crontab 即可自动日更：
 

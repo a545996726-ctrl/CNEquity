@@ -1,7 +1,8 @@
 # README assets
 
 READMEs embed the survivorship chart, `cne-demo.png`, the clearly labelled
-illustrative `cne-serve-hero-demo.png`, and the
+illustrative `cne-serve-hero-demo.png` (English hero; Chinese 数据运维页面
+section), and the
 `architecture-diagram-v3.png` architecture diagram. The factual dashboard
 capture remains available as `cne-serve-hero.png` for documentation and QA.
 The previous v2 source and compatibility export remain as
