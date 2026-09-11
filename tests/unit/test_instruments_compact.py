@@ -813,3 +813,58 @@ def test_tdx_instrument_frame_strips_fixed_width_name_padding():
     names = dict(zip(out["symbol"].to_list(), out["name"].to_list(), strict=True))
     assert names == {"600519.SH": "贵州茅台", "603448.SH": "C天博"}
     assert not any("\x00" in name for name in names.values())
+
+
+def test_absence_does_not_delist_a_security_that_never_traded(tmp_path):
+    """TDX lists a new code before its first session, then drops it.
+
+    Two such absences used to earn a delist_date days before the listing — 36
+    rows were stamped that way on 2026-09-10 alone. A security with no bar in
+    the lake has not stopped trading; it has not started.
+    """
+    curated = tmp_path / "curated"
+    staging = tmp_path / "staging"
+    (curated / "instruments").mkdir(parents=True)
+
+    def row(symbol, list_date):
+        return {
+            "symbol": symbol,
+            "name": symbol[:6],
+            "exchange": symbol.split(".")[1],
+            "asset_type": "stock",
+            "list_date": list_date,
+            "delist_date": None,
+            "prev_symbol": None,
+            "source": "tdx_protocol",
+            "data_version": "v1",
+            "fetched_at": datetime(2026, 9, 10, tzinfo=timezone.utc),
+        }
+
+    # A filler universe so the two absences stay under the partial-fetch circuit
+    # breaker, which refuses inference when more than 5% of the lake vanishes.
+    filler = [row(f"6011{i:02d}.SH", date(2010, 1, 4)) for i in range(60)]
+    # Both absent from the incoming snapshot: 600519.SH has traded, 301688.SZ
+    # is a pending listing with no bars.
+    traded = row("600519.SH", date(2001, 8, 27))
+    pending = row("301688.SZ", None)
+    pl.DataFrame([*filler, traded, pending]).write_parquet(
+        curated / "instruments" / "part-merged.parquet"
+    )
+
+    bars = curated / "daily_bars" / "trade_date=2026-09-08"
+    bars.mkdir(parents=True)
+    pl.DataFrame(
+        {"symbol": ["600519.SH"], "trade_date": [date(2026, 9, 8)], "close": [1500.0]}
+    ).write_parquet(bars / "part-merged.parquet")
+
+    writer = StagingWriter(staging)
+    for run in ("run-nt-1", "run-nt-2"):
+        writer.write_batch("instruments", run, "batch-0", pl.DataFrame(filler))
+        compact_instruments(staging, curated, run, date(2026, 9, 10))
+
+    out = pl.read_parquet(curated / "instruments" / "part-merged.parquet")
+    marks = dict(zip(out["symbol"].to_list(), out["delist_date"].to_list(), strict=True))
+    # The traded name is still inferred delisted after two absences.
+    assert marks["600519.SH"] == date(2026, 9, 10)
+    # The pending listing is left alone.
+    assert marks["301688.SZ"] is None

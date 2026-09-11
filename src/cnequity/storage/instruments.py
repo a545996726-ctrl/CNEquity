@@ -25,6 +25,32 @@ ABSENT_DELIST_THRESHOLD = 0.05
 ABSENT_DELIST_CONFIRMATIONS = 2
 
 
+def _symbols_without_bars(curated_root: Path, symbols: list[str]) -> set[str]:
+    """Of *symbols*, those the lake holds no daily bar for.
+
+    Scoped to the handful of codes absent from one snapshot, so this is a
+    targeted read rather than a scan of the bars dataset.
+    """
+    if not symbols:
+        return set()
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    root = curated_root / "daily_bars"
+    if not dataset_has_parquet(root):
+        # No bars at all (a fresh lake, or a fixture): absence proves nothing
+        # either way, so fall back to the caller's existing streak logic.
+        return set()
+    seen = (
+        scan_parquet_root(root, partition_col="trade_date", symbols=sorted(symbols))
+        .select("symbol")
+        .unique()
+        .collect()
+        .get_column("symbol")
+        .to_list()
+    )
+    return set(symbols) - set(seen)
+
+
 def _absence_state_path(curated_root: Path) -> Path:
     return curated_root.parent / "meta" / "instruments_absence_streak.json"
 
@@ -154,10 +180,30 @@ def compact_instruments(
         else:
             inferred: dict[str, date] = {}
             pending = 0
+            never_traded = _symbols_without_bars(
+                curated_root,
+                [
+                    row["symbol"]
+                    for row in absent_live.select("symbol", "delist_date").iter_rows(named=True)
+                    if row["delist_date"] is None
+                ],
+            )
+            skipped_never_traded = 0
             for row in absent_live.select("symbol", "delist_date").iter_rows(named=True):
                 symbol = row["symbol"]
                 if row["delist_date"] is not None:
                     absence_state.pop(symbol, None)
+                    continue
+                if symbol in never_traded:
+                    # A security that has never printed a bar cannot have stopped
+                    # trading — it has not started. TDX lists a new code briefly
+                    # before its first session and then drops it, which reads as
+                    # a run of absences and used to earn a delist_date days
+                    # before the listing: 36 rows were stamped that way on
+                    # 2026-09-10 alone, and 'C'/'N' name prefixes marked them all
+                    # as new issues. Keep the streak so a genuine retirement is
+                    # still inferred once bars exist.
+                    skipped_never_traded += 1
                     continue
                 prior = absence_state.get(symbol, {})
                 count = int(prior.get("count", 0)) + 1
@@ -179,6 +225,19 @@ def compact_instruments(
                         .otherwise(delist_expr)
                     )
                 preserved = preserved.with_columns(delist_expr.alias("delist_date"))
+            if skipped_never_traded:
+                findings.append(
+                    {
+                        "dataset": "instruments",
+                        "severity": "info",
+                        "check": "instruments_delist_skipped_never_traded",
+                        "message": (
+                            f"{skipped_never_traded} absent symbol(s) have no bar in the lake, "
+                            "so absence is a pending listing rather than a delisting"
+                        ),
+                        "symbols": skipped_never_traded,
+                    }
+                )
             if pending:
                 findings.append(
                     {
