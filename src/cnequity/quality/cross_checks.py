@@ -1655,33 +1655,37 @@ def corporate_action_classification_findings(config: Config, start: date, end: d
 
     duplicated = paired.filter((pl.col("_b") - pl.col("_t")).abs() < 1e-9)
     scaled = paired.filter((pl.col("_t") - pl.col("_b") * 10.0).abs() < 1e-9)
+    # ``paired`` is a join, so a third source filing both columns multiplies the
+    # rows for one event. Count events, not pairs.
+    duplicated_events = duplicated.select("symbol", "ex_date").n_unique()
+    scaled_events = scaled.select("symbol", "ex_date").n_unique()
 
     findings: list[dict] = []
-    if not duplicated.is_empty():
+    if duplicated_events:
         findings.append(
             {
                 "dataset": "corporate_actions",
                 "severity": "warning",
                 "check": "corporate_action_duplicate_classification",
                 "message": (
-                    f"{duplicated.height} ex-date(s) carry the same ratio as 送 from one "
+                    f"{duplicated_events} ex-date(s) carry the same ratio as 送 from one "
                     "source and 转 from another — one event stored twice. Anything that "
                     "adds bonus_ratio and transfer_ratio double-counts the dilution"
                 ),
-                "rows": duplicated.height,
+                "rows": duplicated_events,
             }
         )
-    if not scaled.is_empty():
+    if scaled_events:
         findings.append(
             {
                 "dataset": "corporate_actions",
                 "severity": "error",
                 "check": "corporate_action_ratio_scale",
                 "message": (
-                    f"{scaled.height} ex-date(s) carry a transfer_ratio exactly 10x the "
+                    f"{scaled_events} ex-date(s) carry a transfer_ratio exactly 10x the "
                     "bonus_ratio another source reports — a 每10股/每股 unit confusion"
                 ),
-                "rows": scaled.height,
+                "rows": scaled_events,
                 "sample": [
                     {
                         "symbol": row["symbol"],
@@ -1691,7 +1695,10 @@ def corporate_action_classification_findings(config: Config, start: date, end: d
                         "bonus_source": row["_b_src"],
                         "transfer_source": row["_t_src"],
                     }
-                    for row in scaled.head(5).to_dicts()
+                    for row in scaled.unique(subset=["symbol", "ex_date"], keep="first")
+                    .sort("symbol", "ex_date")
+                    .head(5)
+                    .to_dicts()
                 ],
             }
         )

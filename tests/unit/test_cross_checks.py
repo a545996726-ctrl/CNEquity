@@ -4,7 +4,9 @@ import polars as pl
 
 from cnequity.config import Config
 from cnequity.quality.cross_checks import (
+    corporate_action_classification_findings,
     daily_bars_calendar_findings,
+    instrument_listing_order_findings,
     valuation_bars_coverage_findings,
 )
 
@@ -259,3 +261,140 @@ def test_valuation_missing_dataset_no_findings(tmp_path):
     _write_daily(cfg.data_root, "daily_bars", [("A", date(2024, 6, 5))])
     # No valuation_metrics at all.
     assert valuation_bars_coverage_findings(cfg, date(2024, 6, 5)) == []
+
+
+# --- corporate action classification ---------------------------------------
+
+
+def _write_actions(root, ex, rows):
+    """rows: list of (symbol, action_type, bonus, transfer, source)."""
+    part = root / "curated" / "corporate_actions" / f"ex_date={ex.isoformat()}"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": [r[0] for r in rows],
+            "ex_date": [ex] * len(rows),
+            "action_type": [r[1] for r in rows],
+            "bonus_ratio": [r[2] for r in rows],
+            "transfer_ratio": [r[3] for r in rows],
+            "source": [r[4] for r in rows],
+        },
+        schema={
+            "symbol": pl.Utf8,
+            "ex_date": pl.Date,
+            "action_type": pl.Utf8,
+            "bonus_ratio": pl.Float64,
+            "transfer_ratio": pl.Float64,
+            "source": pl.Utf8,
+        },
+    ).write_parquet(part / "part.parquet")
+
+
+def test_duplicate_classification_counts_events_not_join_pairs(tmp_path):
+    """The bonus × transfer join multiplies rows; one event must count once."""
+    cfg = Config(data_root=tmp_path / "data")
+    ex = date(2024, 6, 28)
+    # Two 送 rows and two 转 rows for one ex-date — four cross-source pairs,
+    # one event. action_type is in the primary key, so none are deduped away.
+    _write_actions(
+        cfg.data_root,
+        ex,
+        [
+            ("600519.SH", "bonus", 0.4, 0.0, "tdx_protocol"),
+            ("600519.SH", "bonus_plan", 0.4, 0.0, "baostock"),
+            ("600519.SH", "transfer", 0.0, 0.4, "eastmoney"),
+            ("600519.SH", "transfer_plan", 0.0, 0.4, "sina"),
+        ],
+    )
+
+    findings = corporate_action_classification_findings(cfg, ex, ex)
+
+    assert len(findings) == 1
+    assert findings[0]["check"] == "corporate_action_duplicate_classification"
+    assert findings[0]["rows"] == 1
+    assert "1 ex-date(s)" in findings[0]["message"]
+
+
+def test_ratio_scale_flags_the_ten_times_reading(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    ex = date(2024, 6, 28)
+    _write_actions(
+        cfg.data_root,
+        ex,
+        [
+            ("603538.SH", "bonus", 0.4, 0.0, "tdx_protocol"),
+            ("603538.SH", "transfer", 0.0, 4.0, "eastmoney"),
+        ],
+    )
+
+    findings = corporate_action_classification_findings(cfg, ex, ex)
+
+    assert [f["check"] for f in findings] == ["corporate_action_ratio_scale"]
+    assert findings[0]["rows"] == 1
+    assert findings[0]["sample"][0]["symbol"] == "603538.SH"
+
+
+def test_one_source_filing_both_columns_is_not_a_cross_source_conflict(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    ex = date(2024, 6, 28)
+    _write_actions(
+        cfg.data_root,
+        ex,
+        [
+            ("000001.SZ", "bonus", 0.3, 0.0, "eastmoney"),
+            ("000001.SZ", "transfer", 0.0, 0.3, "eastmoney"),
+        ],
+    )
+
+    assert corporate_action_classification_findings(cfg, ex, ex) == []
+
+
+# --- instrument listing order ----------------------------------------------
+
+
+def _write_instruments(root, rows):
+    """rows: list of (symbol, list_date, delist_date)."""
+    base = root / "curated" / "instruments"
+    base.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": [r[0] for r in rows],
+            "list_date": [r[1] for r in rows],
+            "delist_date": [r[2] for r in rows],
+        },
+        schema={"symbol": pl.Utf8, "list_date": pl.Date, "delist_date": pl.Date},
+    ).write_parquet(base / "part.parquet")
+
+
+def test_listing_order_flags_a_delist_date_before_the_list_date(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    _write_instruments(
+        cfg.data_root,
+        [
+            ("301688.SZ", date(2026, 9, 2), date(2026, 9, 1)),
+            ("600001.SH", date(2000, 1, 4), date(2009, 12, 15)),
+            ("600519.SH", date(2001, 8, 27), None),
+        ],
+    )
+
+    findings = instrument_listing_order_findings(cfg)
+
+    assert len(findings) == 1
+    assert findings[0]["check"] == "instrument_listing_order"
+    assert findings[0]["rows"] == 1
+    assert findings[0]["sample"] == [
+        {"symbol": "301688.SZ", "list_date": "2026-09-02", "delist_date": "2026-09-01"}
+    ]
+
+
+def test_listing_order_quiet_when_every_pair_is_ordered(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    _write_instruments(
+        cfg.data_root,
+        [
+            ("600001.SH", date(2000, 1, 4), date(2009, 12, 15)),
+            ("600519.SH", date(2001, 8, 27), None),
+        ],
+    )
+
+    assert instrument_listing_order_findings(cfg) == []

@@ -1279,19 +1279,37 @@ def test_action_terms_do_not_add_two_vendors_readings_of_one_event(adj_config):
         adj_config,
         [
             {
-                "symbol": "600519.SH", "ex_date": ex, "action_type": "transfer",
-                "cash_dividend": 0.0, "bonus_ratio": 0.0, "transfer_ratio": 0.4,
-                "allotment_ratio": None, "allotment_price": None, "source": "eastmoney",
+                "symbol": "600519.SH",
+                "ex_date": ex,
+                "action_type": "transfer",
+                "cash_dividend": 0.0,
+                "bonus_ratio": 0.0,
+                "transfer_ratio": 0.4,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "eastmoney",
             },
             {
-                "symbol": "600519.SH", "ex_date": ex, "action_type": "bonus",
-                "cash_dividend": 0.0, "bonus_ratio": 0.4, "transfer_ratio": 0.0,
-                "allotment_ratio": None, "allotment_price": None, "source": "tdx_protocol",
+                "symbol": "600519.SH",
+                "ex_date": ex,
+                "action_type": "bonus",
+                "cash_dividend": 0.0,
+                "bonus_ratio": 0.4,
+                "transfer_ratio": 0.0,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "tdx_protocol",
             },
             {
-                "symbol": "600519.SH", "ex_date": ex, "action_type": "cash_dividend",
-                "cash_dividend": 0.155, "bonus_ratio": 0.0, "transfer_ratio": 0.0,
-                "allotment_ratio": None, "allotment_price": None, "source": "tdx_protocol",
+                "symbol": "600519.SH",
+                "ex_date": ex,
+                "action_type": "cash_dividend",
+                "cash_dividend": 0.155,
+                "bonus_ratio": 0.0,
+                "transfer_ratio": 0.0,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "tdx_protocol",
             },
         ],
         ex,
@@ -1302,8 +1320,54 @@ def test_action_terms_do_not_add_two_vendors_readings_of_one_event(adj_config):
     assert out.height == 1
     row = out.to_dicts()[0]
     assert row["_bonus"] + row["_transfer"] == pytest.approx(0.4)
-    # The tie breaks toward the vendor that also reports the cash, so dividend
-    # and dilution come from one reading of one event.
+    assert row["_dividend"] == pytest.approx(0.155)
+
+
+def test_action_terms_keep_the_cash_a_vendor_without_the_dilution_filed(adj_config):
+    """The dilution picks one source; the dividend must not ride along with it.
+
+    TDX files 送0.4 and no dividend row, EastMoney files the 0.155 cash and no
+    dilution. Binding the cash to the source that wins the dilution would drop
+    the dividend and fire exactly the divergence the single-source pick exists
+    to silence.
+    """
+    from cnequity.derive.adj_factors import _action_terms
+
+    ex = date(2024, 6, 28)
+    _write_actions(
+        adj_config,
+        [
+            {
+                "symbol": "601398.SH",
+                "ex_date": ex,
+                "action_type": "bonus",
+                "cash_dividend": 0.0,
+                "bonus_ratio": 0.4,
+                "transfer_ratio": 0.0,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "tdx_protocol",
+            },
+            {
+                "symbol": "601398.SH",
+                "ex_date": ex,
+                "action_type": "cash_dividend",
+                "cash_dividend": 0.155,
+                "bonus_ratio": 0.0,
+                "transfer_ratio": 0.0,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "eastmoney",
+            },
+        ],
+        ex,
+    )
+
+    out = _action_terms(adj_config, ["601398.SH"], ex, ex)
+
+    assert out.height == 1
+    row = out.to_dicts()[0]
+    assert row["_bonus"] == pytest.approx(0.4)
     assert row["_dividend"] == pytest.approx(0.155)
 
 
@@ -1316,14 +1380,26 @@ def test_action_terms_still_add_rows_from_one_vendor(adj_config):
         adj_config,
         [
             {
-                "symbol": "000001.SZ", "ex_date": ex, "action_type": "bonus",
-                "cash_dividend": 0.0, "bonus_ratio": 0.3, "transfer_ratio": 0.0,
-                "allotment_ratio": None, "allotment_price": None, "source": "eastmoney",
+                "symbol": "000001.SZ",
+                "ex_date": ex,
+                "action_type": "bonus",
+                "cash_dividend": 0.0,
+                "bonus_ratio": 0.3,
+                "transfer_ratio": 0.0,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "eastmoney",
             },
             {
-                "symbol": "000001.SZ", "ex_date": ex, "action_type": "transfer",
-                "cash_dividend": 0.0, "bonus_ratio": 0.0, "transfer_ratio": 0.5,
-                "allotment_ratio": None, "allotment_price": None, "source": "eastmoney",
+                "symbol": "000001.SZ",
+                "ex_date": ex,
+                "action_type": "transfer",
+                "cash_dividend": 0.0,
+                "bonus_ratio": 0.0,
+                "transfer_ratio": 0.5,
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "source": "eastmoney",
             },
         ],
         ex,

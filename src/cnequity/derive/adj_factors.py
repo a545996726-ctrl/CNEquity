@@ -674,9 +674,15 @@ def _action_terms(config: Config, symbols: list[str], start: date, end: date) ->
     two of them classify 送 vs 转 differently: for 30 stored ex-dates EastMoney
     files a ``transfer`` row carrying the same ratio TDX files as ``bonus``, so
     summing the two columns doubled a 0.4 dilution into 0.8 and fired a spurious
-    crosscheck finding. Aggregate per source, then keep the single source with
-    the largest dilution — the most complete view of one event, rather than the
-    sum of two partial ones.
+    crosscheck finding.
+
+    So aggregate per source, then settle the two halves of the event separately.
+    The dilution comes from the single source reporting the most of it — the
+    fullest reading, rather than the sum of two partial ones — and the allotment
+    cash travels with it, being that same source's ``ratio * price``. The cash
+    dividend is resolved across sources instead. Binding it to the dilution
+    winner would drop the dividend whenever the vendor with the fuller dilution
+    files no cash row, which is the divergence this was meant to silence.
     """
     from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
 
@@ -716,21 +722,24 @@ def _action_terms(config: Config, symbols: list[str], start: date, end: date) ->
         pl.col("allotment_ratio").sum().alias("_allotment"),
         pl.col("_allot_cash").sum().alias("_allot_cash"),
     )
-    # One source per ex-date: the largest dilution, breaking ties toward the
-    # source that also reports the most cash, so the dividend and the dilution
-    # always come from the same vendor's reading of the same event.
-    return (
-        per_source.with_columns(
-            (pl.col("_bonus") + pl.col("_transfer") + pl.col("_allotment")).alias("_dilution")
-        )
-        .sort(
-            ["symbol", "ex_date", "_dilution", "_dividend", "_allot_cash", "source"],
-            descending=[False, False, True, True, True, False],
+    per_source = per_source.with_columns(
+        (pl.col("_bonus") + pl.col("_transfer") + pl.col("_allotment")).alias("_dilution")
+    )
+    # One source per ex-date for the share terms; ties break on the allotment
+    # cash and then on the name, so the pick is deterministic.
+    dilution = (
+        per_source.sort(
+            ["symbol", "ex_date", "_dilution", "_allot_cash", "source"],
+            descending=[False, False, True, True, False],
         )
         .group_by(["symbol", "ex_date"], maintain_order=True)
         .first()
-        .drop("source", "_dilution")
+        .drop("source", "_dilution", "_dividend")
     )
+    cash = per_source.group_by(["symbol", "ex_date"]).agg(
+        pl.col("_dividend").max().alias("_dividend")
+    )
+    return dilution.join(cash, on=["symbol", "ex_date"], how="left")
 
 
 def _corporate_action_crosscheck_findings(config: Config, out: pl.DataFrame) -> list[dict]:
