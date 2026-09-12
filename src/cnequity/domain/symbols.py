@@ -20,8 +20,17 @@ CDR_PREFIXES = ("689",)
 
 # Exchange-traded funds / LOFs. Kept in instruments + daily_bars for UI/quotes,
 # but NOT in PREFIX_WHITELIST — all_a research universe excludes them.
+# Exchange-traded fund products: ETFs and LOFs, both of which quote on-exchange
+# with real volume.
+#
+# SH is enumerated rather than written as "51" because 519xxx is *not* one of
+# these — it is the open-end fund code space, sold and redeemed at NAV away from
+# the exchange. A "51" prefix swept all 188 of them into the tradable universe,
+# and TDX answered with a NAV series: 436,533 rows in `daily_bars` carrying a
+# close but zero volume and zero turnover on every single one, against 95-99%
+# non-zero volume for every genuine prefix beside it.
 ETF_PREFIXES = {
-    "SH": ("51", "52", "56", "58"),
+    "SH": ("510", "511", "512", "513", "514", "515", "516", "517", "518", "52", "56", "58"),
     "SZ": ("15", "16"),
 }
 
