@@ -93,4 +93,4 @@ def test_my_dataset_normalizes(monkeypatch):
 
 - [domain 模块](../modules/domain.md)
 - [steps 模块](../modules/steps.md)
-- [CONTRIBUTING.md](../../CONTRIBUTING.md)
+- [CONTRIBUTING.md](../../.github/CONTRIBUTING.md)

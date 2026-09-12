@@ -1,6 +1,6 @@
 # 开发约定
 
-与 [CONTRIBUTING.md](../../CONTRIBUTING.md) 互补；本文更完整地描述包结构与分层规则。
+与 [CONTRIBUTING.md](../../.github/CONTRIBUTING.md) 互补；本文更完整地描述包结构与分层规则。
 
 ---
 

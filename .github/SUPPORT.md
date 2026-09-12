@@ -11,7 +11,7 @@ the dataset, the symptom, and the window, which is what makes the report actiona
 [Discussions](https://github.com/rootSunc/CNEquity/discussions) for usage questions, source
 availability, and anything not yet scoped into a concrete change. A feature request lands better
 when it explains the downstream research problem and the dataset or query contract you expect —
-see [CONTRIBUTING.md](../CONTRIBUTING.md).
+see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **You found a security issue.** Report it privately through
 [SECURITY.md](../SECURITY.md) — never in a public issue or discussion.

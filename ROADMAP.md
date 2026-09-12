@@ -48,6 +48,6 @@ stability gates, and a `cne run events` job for the feeds that publish 7x24.
 ## Requests
 
 Feature requests and source additions are welcome when they preserve the data-layer boundary.
-Before opening an issue, see [CONTRIBUTING.md](CONTRIBUTING.md), the
+Before opening an issue, see [CONTRIBUTING.md](.github/CONTRIBUTING.md), the
 [dataset catalog](docs/datasets/catalog.md), and the
 [legal notes](docs/legal-and-data-sources.md).

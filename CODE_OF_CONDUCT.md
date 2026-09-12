@@ -1,34 +1,31 @@
-# Code of Conduct
+# 行为准则
 
-## Our standard
+## 我们的标准
 
-This project should be useful to people with different backgrounds and levels of experience.
-Be respectful, constructive, and specific — especially when discussing data quality, implementation
-trade-offs, or competing tools.
+这个项目希望对不同背景、不同经验水平的人都有用。请保持尊重、建设性和具体——在讨论数据质量、
+实现取舍或同类工具时尤其如此。
 
-Unacceptable behaviour includes harassment, discrimination, personal attacks, publishing someone's
-private information, and knowingly filing misleading reports about data or source behaviour.
+不可接受的行为包括：骚扰、歧视、人身攻击、公开他人隐私信息，以及明知不实仍提交关于数据或数据源
+行为的误导性报告。
 
-## Scope
+## 适用范围
 
-This applies in every project space — issues, pull requests, discussions, commit messages, and the
-documentation site — and whenever someone is representing the project in public.
+本准则适用于项目的所有空间——issue、pull request、discussion、提交信息和文档站，
+以及任何人以项目名义在公开场合发言的场合。
 
-## Reporting
+## 举报方式
 
-Report a problem privately to the maintainer (GitHub: [@rootSunc](https://github.com/rootSunc)) via
-a [private security advisory](https://github.com/rootSunc/CNEquity/security/advisories/new), which
-is the only private channel this repository offers. For anything that is not sensitive, open a
-[discussion](https://github.com/rootSunc/CNEquity/discussions) or contact the maintainer through an
-issue.
+请通过[私密安全公告](https://github.com/rootSunc/CNEquity/security/advisories/new)私下联系维护者
+（GitHub：[@rootSunc](https://github.com/rootSunc)）——这是本仓库唯一的私密渠道。
+不涉及敏感信息的问题，可以开 [discussion](https://github.com/rootSunc/CNEquity/discussions)
+或通过 issue 联系维护者。
 
-Include what happened, where, and links if you have them. You will not be asked to confront the
-other person, and reports will not be shared beyond what is needed to act on them.
+请说明发生了什么、在哪里发生，有链接的话附上链接。你不会被要求去和对方当面对质；
+举报内容不会超出处理所需的范围被传播。
 
-## Enforcement
+## 处理
 
-CNEquity is maintained by one person, so response times are best-effort rather than guaranteed.
-Depending on severity, a report may lead to a private warning, edited or deleted content, or a
-block from the repository. The maintainer decides, and will say what was decided and why.
+CNEquity 由一个人维护，因此响应时间是尽力而为，而非承诺。视严重程度，处理结果可能是私下警告、
+编辑或删除内容，或封禁其访问仓库的权限。由维护者做出决定，并说明决定内容与理由。
 
-If you disagree with a decision, say so in the same channel — it will be reconsidered once.
+如果你不认同某个决定，在同一渠道提出即可——会被重新考虑一次。

@@ -93,7 +93,16 @@ def test_statements_are_not_swept_daily(tmp_path, monkeypatch):
     assert called == ["valuations", "daily_bars", "corporate_actions"]
 
 
-@pytest.mark.parametrize("config_path", ["configs/cnequity.toml", "configs/cnequity.example.toml"])
+@pytest.mark.parametrize(
+    "config_path",
+    # Only the templates that actually ship. configs/cnequity.toml is the user's
+    # own config and is gitignored, so naming it here passes on a developer's
+    # machine and fails on every clean checkout.
+    [
+        "configs/cnequity.example.toml",
+        "src/cnequity/config/templates/cnequity.example.toml",
+    ],
+)
 def test_the_shipped_configs_run_it_before_audit(config_path):
     from cnequity.config import load_config
 

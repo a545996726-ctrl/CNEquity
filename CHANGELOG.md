@@ -44,9 +44,12 @@ stay silent, per [ADR-0008](docs/adr/0008-optional-keyed-sources.md).
   illustration.
 - **The community files follow open-source convention.** `NOTICE` carries
   attribution only rather than a second copy of the licence text;
-  `CODE_OF_CONDUCT.md` gains scope, a private contact and stated consequences;
-  `CONTRIBUTING.md` documents the commit convention and the CI gates with their
-  local equivalents; `SECURITY.md` states supported versions as a table.
+  `CODE_OF_CONDUCT.md` is in Chinese to match the rest of the project's
+  first-language docs, and gains scope, a private contact and stated
+  consequences; `SECURITY.md` states supported versions as a table.
+  `CONTRIBUTING.md` moves to `.github/`, where GitHub still surfaces it, and now
+  documents the commit convention and the CI gates with their local
+  equivalents.
 - **`ROADMAP.md` no longer tracks shipped work.** It had been left at "Now ·
   0.6" and "Next · 0.7" while the project shipped 0.8.
 
@@ -68,6 +71,10 @@ stay silent, per [ADR-0008](docs/adr/0008-optional-keyed-sources.md).
   evidence.
 - **`.git-blame-ignore-revs` matched nothing.** August's history rewrite gave
   both formatting commits new ids, so GitHub silently ignored the file.
+- **A test read a gitignored config.** `test_the_shipped_configs_run_it_before_audit`
+  named `configs/cnequity.toml` — the user's own config — so it passed on a
+  developer's machine and failed on every clean checkout. It now covers the two
+  templates that actually ship.
 
 ## [0.8.0] — 2026-09-06
 

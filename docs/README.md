@@ -59,7 +59,7 @@ CLI 是 `cne`，Python 包是 `cnequity`。推荐：`pip install cnequity` → `
 
 源码包拆分说明：[modules/](modules/README.md)（config / domain / adapters / orchestrator / steps / storage / derive / quality / query / cli）。
 
-开发：[开发约定](development/conventions.md) · [测试](development/testing.md) · [新增数据集](development/adding-dataset.md) · [贡献指南](../CONTRIBUTING.md)
+开发：[开发约定](development/conventions.md) · [测试](development/testing.md) · [新增数据集](development/adding-dataset.md) · [贡献指南](../.github/CONTRIBUTING.md)
 
 ## 定位与合规
 
