@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -786,4 +786,69 @@ def step_audit(config: Config, trade_date: date, run_id: str, context: dict) -> 
         criticality="core",
         rows_written=findings,
     )
+    return out
+
+
+@register_step(
+    "ths_official_snapshot",
+    group="core",
+    depends_on=["compact"],
+    description="Capture licensed peer snapshots for the arbitration checks",
+)
+def step_ths_official_snapshot(
+    config: Config, trade_date: date, run_id: str, context: dict
+) -> dict:
+    """Refresh the peer snapshots ``audit`` arbitrates against.
+
+    Placed between ``compact`` and ``audit`` because it needs the session just
+    published and its output is what the arbitration checks read. Without it
+    those checks are permanently silent: they read ``meta/source_snapshots`` and
+    nothing else writes there.
+
+    Valuations are the reason this is daily rather than occasional. The upstream
+    publishes no valuation history at all, so a session not captured on the day
+    is gone — the accumulating record is the whole product. Bars and corporate
+    actions are refreshed alongside because both feed arbitration and both move.
+
+    Statements are **not** here. They change on disclosure days, so a daily
+    sweep of 300 securities buys nothing; `cne ths-official snapshot --what
+    financials` covers them when it matters.
+
+    Never fails the run. No key, verification switched off, or an unreachable
+    source all return a skipped result — an absent second opinion is not a
+    reason to fail a day's ingestion.
+    """
+    from cnequity.steps.bars import snapshot_daily_bars_ths_official
+    from cnequity.steps.capital import snapshot_valuations_ths_official
+    from cnequity.steps.fundamentals import snapshot_corporate_actions_ths_official
+
+    if not config.sources.get("ths_official", False):
+        return {"rows_written": 0, "status": "skipped", "reason": "source not enabled"}
+    if not getattr(config, "ths_official_verify_enabled", True):
+        return {"rows_written": 0, "status": "skipped", "reason": "verify off"}
+    if not getattr(config, "ths_official_api_key", None):
+        return {"rows_written": 0, "status": "skipped", "reason": "no api key"}
+
+    out: dict = {"rows_written": 0}
+    for label, call in (
+        ("valuations", lambda: snapshot_valuations_ths_official(config, run_id, as_of=trade_date)),
+        (
+            "daily_bars",
+            lambda: snapshot_daily_bars_ths_official(
+                config, run_id, start=trade_date - timedelta(days=45), end=trade_date
+            ),
+        ),
+        (
+            "corporate_actions",
+            lambda: snapshot_corporate_actions_ths_official(config, run_id),
+        ),
+    ):
+        try:
+            result = call()
+        except Exception as exc:  # noqa: BLE001 — a peer outage is not a failed day
+            logger.warning("ths_official snapshot: %s failed: %s", label, exc)
+            out[label] = {"status": "error", "reason": str(exc)[:200]}
+            continue
+        out[label] = result
+        out["rows_written"] += int(result.get("rows_written", 0) or 0)
     return out

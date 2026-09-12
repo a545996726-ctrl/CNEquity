@@ -365,3 +365,99 @@ def step_news_headlines(config: Config, trade_date: date, run_id: str, context: 
         allow_empty=True,
         date_col="publish_date",
     )
+
+
+def resource_sector_bars_ths_official(
+    config: Config,
+    run_id: str,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    workers: int = 4,
+    dry_run: bool = True,
+) -> dict:
+    """Move ``sector_bars`` from the scraper to the licensed endpoint.
+
+    ``sector_bars`` is the lake's only dataset with no second source of any
+    kind: 303,559 rows, all of them from ``ths``, an unauthenticated scrape of
+    10jqka's public pages that ``sources/SOURCES.yml`` records as an
+    unregistered client. There is nothing to arbitrate it against and nothing to
+    fall back to.
+
+    Unusually for a re-source, there is no accuracy question to settle first.
+    Measured 2026-09-12 over five boards and 2,547 comparable sessions, close,
+    volume and turnover all agreed within 10bps with a **median difference of
+    zero** — the same numbers through a licensed channel. The peer also carried
+    698 rows the lake did not.
+
+    Still switching rather than routing ([ADR-0005](../../docs/adr/0005-source-routing-vs-switching.md)),
+    so ``dry_run`` defaults to true. The floor at 2022-01-04 leaves 37,304 rows
+    (12.3%) on the scraper; those years hold a handful of boards, 2 in 2018 and
+    39 in 2019, against 432 today.
+    """
+    import polars as pl
+
+    from cnequity.adapters.ths_official import SOURCE as THS_SOURCE
+    from cnequity.adapters.ths_official import client_from_config
+    from cnequity.adapters.ths_official.sectors import (
+        HISTORY_FLOOR,
+        fetch_sector_bars,
+        fetch_sector_catalog,
+    )
+    from cnequity.domain.market_time import shanghai_today
+    from cnequity.query.canonical import dedupe_lazy_by_primary_key
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+    from cnequity.steps.http_common import write_fetched
+
+    client = client_from_config(config)
+    if client is None:
+        return {"status": "skipped", "reason": "no api key", "rows_written": 0}
+    if not dry_run and not getattr(config, "ths_official_backfill_enabled", False):
+        client.close()
+        return {"status": "skipped", "reason": "backfill disabled", "rows_written": 0}
+
+    window_start = max(start or HISTORY_FLOOR, HISTORY_FLOOR)
+    window_end = end or shanghai_today()
+    try:
+        catalog = fetch_sector_catalog(client)
+        if catalog.is_empty():
+            return {"status": "warning", "reason": "empty catalogue", "rows_written": 0}
+        # Only boards the lake already tracks. The upstream lists 710 and the
+        # lake carries 432; adopting the rest would widen the dataset on the
+        # quiet, which is a separate decision from re-sourcing what it has.
+        root = config.curated_root / "sector_bars"
+        if dataset_has_parquet(root):
+            known = (
+                dedupe_lazy_by_primary_key(
+                    scan_parquet_root(root, partition_col="trade_date"), "sector_bars"
+                )
+                .select("sector_code")
+                .unique()
+                .collect()
+                .get_column("sector_code")
+                .to_list()
+            )
+            catalog = catalog.filter(pl.col("sector_code").is_in(known))
+        frame, counters = fetch_sector_bars(
+            catalog, window_start, window_end, client=client, workers=workers
+        )
+    finally:
+        client.close()
+
+    result = {
+        "boards": catalog.height,
+        "rows_fetched": frame.height,
+        "window": f"{window_start}..{window_end}",
+        **counters,
+    }
+    if frame.is_empty():
+        return {**result, "status": "warning", "reason": "peer returned nothing", "rows_written": 0}
+    if dry_run:
+        return {**result, "status": "dry_run", "rows_written": 0}
+
+    written = write_fetched(config, run_id, "sector_bars", frame, source=THS_SOURCE)
+    return {
+        **result,
+        "status": "applied",
+        "rows_written": written.get("rows_written", frame.height),
+    }

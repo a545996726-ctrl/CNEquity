@@ -125,10 +125,19 @@ class ThsOfficialClient:
         config: Config | None = None,
         timeout: float | None = None,
         transport: httpx.BaseTransport | None = None,
+        archive: Any = None,
+        archive_dataset: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         if not api_key or not api_key.strip():
             raise ThsOfficialError("ths_official requires an API key")
         self._config = config
+        # Curated rows must be traceable to the exact bytes that produced them,
+        # so every 200 is archived before it is parsed. `write_fetched` refuses
+        # to stage a dataset configured for archiving without that receipt.
+        self._archive = archive
+        self._archive_dataset = archive_dataset
+        self._run_id = run_id
         resolved_timeout = timeout if timeout is not None else _configured_timeout(config)
         self._http = httpx.Client(
             base_url=BASE_URL,
@@ -220,6 +229,7 @@ class ThsOfficialClient:
                     continue
                 raise ThsOfficialError(f"{path}: HTTP {status}")
 
+            self._archive_response(path, params, response)
             try:
                 payload = response.json()
             except ValueError as exc:
@@ -238,6 +248,34 @@ class ThsOfficialClient:
             return payload
 
         raise ThsOfficialError(f"{path}: transport failed — {last_transport_error}")
+
+    def _archive_response(
+        self, path: str, params: dict[str, Any], response: httpx.Response
+    ) -> None:
+        if self._archive is None or not getattr(self._archive, "enabled", False):
+            return
+        if not self._archive_dataset:
+            return
+        scope = getattr(self._archive, "capture_scope", None)
+        # One logical observation per (run, endpoint, parameter set): the receipt
+        # check rejects a record without one, and two endpoints can legitimately
+        # return byte-identical payloads for the same symbol.
+        signature = ",".join(f"{k}={v}" for k, v in sorted(_clean(params).items()))
+        self._archive.archive(
+            self._archive_dataset,
+            response.content,
+            source=SOURCE,
+            request_params=_clean(params),
+            observation_id=f"{self._run_id or 'anonymous'}:{path}:{signature}:scope={scope}",
+            run_id=self._run_id,
+            url=str(response.request.url),
+            response_status=response.status_code,
+            payload_format="bytes",
+            http_metadata={"wire_exact": True, "protocol": "http"},
+            # The receipt check compares the record's scope against the caller's,
+            # so it has to be stamped explicitly rather than left to default.
+            request_scope=scope,
+        )
 
     def download_url(self, kind: str) -> tuple[str, int]:
         """Return ``(presigned_url, expires_in_seconds)`` for a market dump.

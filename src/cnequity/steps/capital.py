@@ -662,3 +662,87 @@ def step_block_trades(config: Config, trade_date: date, run_id: str, context: di
             config, trade_date, run_id, "block_trades", fetch_block_trades, date(2010, 1, 1)
         )
     return _run_capital_step(config, trade_date, run_id, "block_trades", fetch_block_trades)
+
+
+def snapshot_valuations_ths_official(
+    config: Config,
+    run_id: str,
+    *,
+    as_of: date | None = None,
+    symbols: list[str] | None = None,
+) -> dict:
+    """Keep today's licensed valuation ratios, which nothing can reconstruct later.
+
+    ``valuation_metrics`` holds 16,457,034 rows from baostock back to 2001, but
+    they are restated — a ratio computed from today's share count and earnings,
+    stamped with an old date. Right for comparing across time, wrong for asking
+    what a screen would have seen on the day, which is why the dataset declares
+    ``pit=none``.
+
+    The upstream publishes no valuation history at all, only today. Run this
+    daily and the snapshot store accumulates the other thing: a licensed record
+    of what the market actually showed, one session at a time. It cannot reach a
+    single day before the first run, so the sooner it starts the longer that
+    record is.
+
+    Verification class — writes to ``meta/source_snapshots``, never to curated.
+    """
+    from cnequity.adapters.ths_official import SOURCE as THS_SOURCE
+    from cnequity.adapters.ths_official import client_from_config
+    from cnequity.adapters.ths_official.valuations import fetch_valuation_snapshot
+    from cnequity.domain.market_time import shanghai_today
+    from cnequity.domain.schemas import data_version_for, with_provenance
+    from cnequity.steps.common import load_symbols
+    from cnequity.storage.source_snapshots import SnapshotStore
+
+    if not getattr(config, "ths_official_verify_enabled", True):
+        return {"rows_written": 0, "status": "skipped", "reason": "verify off"}
+    client = client_from_config(config)
+    if client is None:
+        return {"rows_written": 0, "status": "skipped", "reason": "no api key"}
+
+    session = as_of or shanghai_today()
+    try:
+        wanted = symbols if symbols is not None else load_symbols(config)
+        # One unknown code fails a whole 100-symbol request, so intersect with
+        # the upstream's own code table first. Measured without it: 91 of 500
+        # securities were rejected and recovering them by halving cost 525
+        # requests for what should be five.
+        carried = _ths_official_code_table(client)
+        if carried:
+            wanted = [symbol for symbol in wanted if symbol in carried]
+        frame, counters = fetch_valuation_snapshot(wanted, client=client, as_of=session)
+    finally:
+        client.close()
+    if frame.is_empty():
+        return {"rows_written": 0, "status": "warning", "reason": "peer returned nothing"}
+
+    SnapshotStore(config.meta_root).write(
+        "valuation_metrics",
+        with_provenance(
+            frame, source=THS_SOURCE, data_version=data_version_for("valuation_metrics")
+        ),
+        source=THS_SOURCE,
+        data_version=data_version_for("valuation_metrics"),
+        run_id=run_id,
+        trade_date=session,
+    )
+    return {"rows_written": frame.height, "trade_date": session.isoformat(), **counters}
+
+
+def _ths_official_code_table(client) -> set[str]:
+    """Every A-share code the upstream carries, or an empty set if it will not say."""
+    carried: set[str] = set()
+    offset = 0
+    while True:
+        try:
+            data = client.get(
+                "/api/meta/tickers/list", asset_type="a-share", limit=10000, offset=offset
+            )
+        except Exception:  # noqa: BLE001 — the filter is an optimisation, not a gate
+            return set()
+        page = (data or {}).get("item") or []
+        carried.update(str(row["thscode"]) for row in page if row.get("thscode"))
+        if len(page) < 10000:
+            return carried
+        offset += 10000

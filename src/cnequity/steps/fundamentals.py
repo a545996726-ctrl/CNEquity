@@ -640,3 +640,293 @@ def step_top_holders(config: Config, trade_date: date, run_id: str, context: dic
         daily_by=CHANGE_DATE,
         daily_lookback_days=TOP_HOLDERS_DAILY_LOOKBACK_DAYS,
     )
+
+
+def _borrowable_announce_dates(
+    config: Config, start_period: str, end_period: str
+) -> dict[tuple[str, str], date]:
+    """Disclosure dates the lake already knows, keyed by (symbol, report_period).
+
+    All four statements come from one filing and share one date; measured across
+    the lake, 303,769 of 315,264 multi-statement periods (96.35%) already carry a
+    single date. ``income`` is preferred because it is the statement with full
+    coverage over the gap years; ``indicator`` fills in behind it.
+    """
+    from cnequity.query.canonical import dedupe_lazy_by_primary_key
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    root = config.curated_root / "financial_statement_items"
+    if not dataset_has_parquet(root):
+        return {}
+    frame = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="report_period"),
+            "financial_statement_items",
+        )
+        .filter(
+            pl.col("statement_type").is_in(["income", "indicator"])
+            & (pl.col("report_period") >= start_period)
+            & (pl.col("report_period") <= end_period)
+            & pl.col("announce_date").is_not_null()
+        )
+        .select("symbol", "report_period", "statement_type", "announce_date")
+        .collect()
+    )
+    if frame.is_empty():
+        return {}
+    # income wins ties; sorting puts it last so `keep="last"` selects it.
+    ordered = frame.with_columns(
+        pl.when(pl.col("statement_type") == "income").then(1).otherwise(0).alias("_rank")
+    ).sort(["symbol", "report_period", "_rank"])
+    unique = ordered.unique(subset=["symbol", "report_period"], keep="last", maintain_order=True)
+    return {
+        (row["symbol"], row["report_period"]): row["announce_date"]
+        for row in unique.iter_rows(named=True)
+    }
+
+
+def backfill_statement_gap_ths_official(
+    config: Config,
+    run_id: str,
+    *,
+    start: date,
+    end: date,
+    symbols: list[str] | None = None,
+    chunk_size: int = 200,
+    workers: int = 4,
+    announce_dates: dict[tuple[str, str], date] | None = None,
+) -> dict:
+    """Fill the 2016-2024 balance-sheet and cash-flow hole from the licensed peer.
+
+    Routing, not switching (ADR-0005): those primary keys hold no rows today, so
+    nothing canonical is overwritten and no repair flag is needed. It still
+    requires ``[sources.ths_official].backfill`` because it changes what the lake
+    holds, and a lake with no key keeps its existing sources untouched.
+    """
+    from cnequity.adapters.ths_official import SOURCE as THS_SOURCE
+    from cnequity.adapters.ths_official import ThsOfficialClient
+    from cnequity.adapters.ths_official.financials import fetch_statements
+    from cnequity.storage.raw_archive import RawPayloadArchive, begin_capture
+
+    dataset = "financial_statement_items"
+    if not getattr(config, "ths_official_backfill_enabled", False):
+        return {"rows_read": 0, "rows_written": 0, "status": "skipped", "reason": "backfill off"}
+    api_key = getattr(config, "ths_official_api_key", None)
+    if not api_key or not config.sources.get(THS_SOURCE, False):
+        return {"rows_read": 0, "rows_written": 0, "status": "skipped", "reason": "no api key"}
+
+    # Exact wire evidence for every staged row; `write_fetched` requires the
+    # receipt for any dataset the lake archives.
+    archive_scope = f"ths_gap:{start.isoformat()}:{end.isoformat()}"
+    archive = None
+    if config.should_archive_raw(dataset):
+        nonce = begin_capture(
+            config, dataset, run_id, source=THS_SOURCE, request_scope=archive_scope
+        )
+        archive = RawPayloadArchive(
+            config.meta_root,
+            enabled=True,
+            datasets=[dataset],
+            compression=getattr(config, "raw_archive_compression", "gzip"),
+            max_payload_bytes=getattr(config, "raw_archive_max_payload_bytes", None),
+            capture_owner=config,
+            capture_run_id=run_id,
+            capture_source=THS_SOURCE,
+            capture_scope=archive_scope,
+            capture_nonce=nonce,
+        )
+    client = ThsOfficialClient(
+        api_key, config=config, archive=archive, archive_dataset=dataset, run_id=run_id
+    )
+
+    start_period = f"{start.year}Q{(start.month - 1) // 3 + 1}"
+    end_period = f"{end.year}Q{(end.month - 1) // 3 + 1}"
+    # Building this scans the whole four-million-row dataset, so a caller
+    # sweeping the market in chunks should build it once and pass it in rather
+    # than paying for the scan on every chunk.
+    if announce_dates is None:
+        announce_dates = _borrowable_announce_dates(config, start_period, end_period)
+    if not announce_dates:
+        client.close()
+        return {"rows_read": 0, "rows_written": 0, "status": "skipped", "reason": "no known dates"}
+
+    if symbols is None:
+        symbols = sorted({symbol for symbol, _ in announce_dates})
+
+    totals = {"rows_read": 0, "rows_written": 0}
+    counters: dict[str, int] = {}
+    try:
+        for offset in range(0, len(symbols), chunk_size):
+            chunk = symbols[offset : offset + chunk_size]
+            rows, chunk_counters = fetch_statements(
+                chunk, start, end, client=client, announce_dates=announce_dates, workers=workers
+            )
+            for key, value in chunk_counters.items():
+                counters[key] = counters.get(key, 0) + value
+            if not rows:
+                continue
+            frame = pl.DataFrame(
+                rows,
+                schema={
+                    "symbol": pl.Utf8,
+                    "report_period": pl.Utf8,
+                    "statement_type": pl.Utf8,
+                    "item_code": pl.Utf8,
+                    "item_value": pl.Float64,
+                    "announce_date": pl.Date,
+                },
+            )
+            written = write_fetched(
+                config,
+                run_id,
+                dataset,
+                frame,
+                source=THS_SOURCE,
+                batch_id=f"ths-gap-{offset // chunk_size:04d}",
+                raw_archive_evidence=(
+                    verify_raw_archive(
+                        config,
+                        dataset,
+                        run_id,
+                        source=THS_SOURCE,
+                        request_scope=archive_scope,
+                    )
+                    if archive is not None
+                    else None
+                ),
+            )
+            totals["rows_read"] += written.get("rows_read", frame.height)
+            totals["rows_written"] += written.get("rows_written", frame.height)
+    finally:
+        client.close()
+
+    totals.update(counters)
+    totals["symbols"] = len(symbols)
+    return totals
+
+
+def snapshot_corporate_actions_ths_official(config: Config, run_id: str) -> dict:
+    """Capture the 同花顺 adjustment-factor dump as a corporate-action snapshot.
+
+    Verification, not content: this writes to ``meta/source_snapshots`` and never
+    to curated, so it is safe whenever a key is present and needs no backfill
+    flag. One download replaces the 5,500 per-symbol requests the REST event
+    stream would cost, and it is the only route that carries 配股 at all.
+    """
+    from cnequity.adapters.ths_official import SOURCE as THS_SOURCE
+    from cnequity.adapters.ths_official import client_from_config
+    from cnequity.adapters.ths_official.corporate_actions import fetch_corporate_actions_dump
+    from cnequity.domain.schemas import data_version_for, with_provenance
+    from cnequity.storage.source_snapshots import SnapshotStore
+
+    if not getattr(config, "ths_official_verify_enabled", True):
+        return {"rows_written": 0, "status": "skipped", "reason": "verify off"}
+    client = client_from_config(config)
+    if client is None:
+        return {"rows_written": 0, "status": "skipped", "reason": "no api key"}
+    try:
+        frame, cached = fetch_corporate_actions_dump(
+            client, cache_dir=config.meta_root / "ths_official_dumps"
+        )
+    finally:
+        client.close()
+    if frame.is_empty():
+        return {"rows_written": 0, "status": "warning", "reason": "dump parsed empty"}
+
+    SnapshotStore(config.meta_root).write(
+        "corporate_actions",
+        with_provenance(
+            frame, source=THS_SOURCE, data_version=data_version_for("corporate_actions")
+        ),
+        source=THS_SOURCE,
+        data_version=data_version_for("corporate_actions"),
+        run_id=run_id,
+    )
+    return {
+        "rows_written": frame.height,
+        "symbols": frame.get_column("symbol").n_unique(),
+        "dump": str(cached),
+    }
+
+
+def snapshot_financials_ths_official(
+    config: Config,
+    run_id: str,
+    *,
+    start: date,
+    end: date,
+    sample: int = 300,
+    workers: int = 4,
+    statement_types: tuple[str, ...] = ("income",),
+) -> dict:
+    """Capture a peer reading of the statements the lake holds from one source.
+
+    ``income`` is 1,624,060 rows and ``indicator`` 1,058,909, both entirely from
+    EastMoney — the two largest single-sourced blocks left once balance and cash
+    flow gained a peer. Nothing arbitrates them today.
+
+    Verification class: writes to ``meta/source_snapshots``, never to curated.
+    Sampled, because the point is a standing second opinion rather than a mirror
+    of a four-million-row dataset.
+    """
+    from cnequity.adapters.ths_official import SOURCE as THS_SOURCE
+    from cnequity.adapters.ths_official import client_from_config
+    from cnequity.adapters.ths_official.financials import fetch_statements
+    from cnequity.domain.schemas import data_version_for, with_provenance
+    from cnequity.storage.source_snapshots import SnapshotStore
+
+    dataset = "financial_statement_items"
+    if not getattr(config, "ths_official_verify_enabled", True):
+        return {"rows_written": 0, "status": "skipped", "reason": "verify off"}
+    client = client_from_config(config)
+    if client is None:
+        return {"rows_written": 0, "status": "skipped", "reason": "no api key"}
+
+    start_period = f"{start.year}Q{(start.month - 1) // 3 + 1}"
+    end_period = f"{end.year}Q{(end.month - 1) // 3 + 1}"
+    announce_dates = _borrowable_announce_dates(config, start_period, end_period)
+    if not announce_dates:
+        client.close()
+        return {"rows_written": 0, "status": "skipped", "reason": "no known dates"}
+
+    # Spread the sample across the code space rather than taking a prefix, so a
+    # whole exchange or listing vintage cannot sit outside the second opinion.
+    symbols = sorted({symbol for symbol, _ in announce_dates})
+    if sample and len(symbols) > sample:
+        stride = max(1, len(symbols) // sample)
+        symbols = symbols[::stride][:sample]
+
+    try:
+        rows, counters = fetch_statements(
+            symbols,
+            start,
+            end,
+            client=client,
+            announce_dates=announce_dates,
+            statement_types=statement_types,
+            workers=workers,
+        )
+    finally:
+        client.close()
+    if not rows:
+        return {"rows_written": 0, "status": "warning", "reason": "peer returned nothing"}
+
+    frame = pl.DataFrame(
+        rows,
+        schema={
+            "symbol": pl.Utf8,
+            "report_period": pl.Utf8,
+            "statement_type": pl.Utf8,
+            "item_code": pl.Utf8,
+            "item_value": pl.Float64,
+            "announce_date": pl.Date,
+        },
+    )
+    SnapshotStore(config.meta_root).write(
+        dataset,
+        with_provenance(frame, source=THS_SOURCE, data_version=data_version_for(dataset)),
+        source=THS_SOURCE,
+        data_version=data_version_for(dataset),
+        run_id=run_id,
+    )
+    return {"rows_written": frame.height, "symbols": len(symbols), **counters}

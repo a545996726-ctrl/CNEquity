@@ -498,6 +498,16 @@ def fetch_incremental_daily(
         dates = [trade_date]
     else:
         dates = incremental_trade_dates(config, dataset, trade_date)
+    if (
+        not dates
+        and semantics == "snapshot"
+        and spec is not None
+        and spec.session_scope == "calendar"
+    ):
+        # News keeps publishing on closed days. The trading-day gap walk can
+        # be empty once Friday is covered, but today's live request must still
+        # run (including an empty response's exact archive capture).
+        dates = [trade_date]
     if not dates:
         return pl.DataFrame(), []
 
