@@ -1703,3 +1703,605 @@ def corporate_action_classification_findings(config: Config, start: date, end: d
             }
         )
     return findings
+
+
+# A balance sheet that does not balance is wrong no matter which vendor served
+# it, so the tolerance is for rounding rather than for disagreement.
+BALANCE_IDENTITY_TOLERANCE = 1e-4
+
+
+def balance_sheet_identity_findings(config: Config) -> list[dict]:
+    """Assets = liabilities + equity, per (symbol, report_period).
+
+    The one integrity test on a balance sheet that needs no second source: it
+    holds by construction, so a breach is an upstream defect rather than a
+    difference of opinion. Measured over the 2016-2024 backfill, 165,046 of
+    165,064 periods held within a basis point; the failures are scale errors,
+    such as 300885.SZ 2020Q1 reporting equity of 31.1bn against total assets of
+    345m — a hundredfold slip on one field.
+    """
+    root = config.curated_root / "financial_statement_items"
+    if not dataset_has_parquet(root):
+        return []
+    frame = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="report_period"),
+            "financial_statement_items",
+        )
+        .filter(
+            (pl.col("statement_type") == "balance")
+            & pl.col("item_code").is_in(["total_assets", "total_liabilities", "total_equity"])
+        )
+        .select("symbol", "report_period", "item_code", "item_value", "source")
+        .collect()
+    )
+    if frame.is_empty():
+        return []
+
+    # The primary key carries announce_date, so a restated period holds several
+    # rows per item; compare the latest reading of each.
+    latest = (
+        frame.group_by("symbol", "report_period", "item_code")
+        .agg(pl.col("item_value").last().alias("value"), pl.col("source").last().alias("source"))
+        .pivot(on="item_code", index=["symbol", "report_period"], values="value")
+    )
+    for column in ("total_assets", "total_liabilities", "total_equity"):
+        if column not in latest.columns:
+            return []
+    checked = latest.drop_nulls(["total_assets", "total_liabilities", "total_equity"]).filter(
+        pl.col("total_assets") != 0
+    )
+    if checked.is_empty():
+        return []
+
+    breached = checked.with_columns(
+        (
+            (pl.col("total_liabilities") + pl.col("total_equity") - pl.col("total_assets")).abs()
+            / pl.col("total_assets").abs()
+        ).alias("_rel")
+    ).filter(pl.col("_rel") > BALANCE_IDENTITY_TOLERANCE)
+    if breached.is_empty():
+        return []
+
+    sample = breached.sort("_rel", descending=True).head(5)
+    return [
+        {
+            "dataset": "financial_statement_items",
+            "severity": "warning",
+            "check": "balance_sheet_identity",
+            "message": (
+                f"{breached.height} of {checked.height} balance-sheet periods break "
+                "assets = liabilities + equity by more than a basis point"
+            ),
+            "rows": breached.height,
+            "checked": checked.height,
+            "sample": [
+                {
+                    "symbol": row["symbol"],
+                    "report_period": row["report_period"],
+                    "total_assets": row["total_assets"],
+                    "total_liabilities": row["total_liabilities"],
+                    "total_equity": row["total_equity"],
+                }
+                for row in sample.to_dicts()
+            ],
+        }
+    ]
+
+
+def adj_factor_arbitration_findings(config: Config) -> list[dict]:
+    """Ask a third source which side of an internal contradiction is wrong.
+
+    ``adj_factors`` carries 19,088,826 rows from sina alone — no backup, no
+    backfill, no failover entry. Every other check here compares the lake with
+    itself, which cannot settle the case where its two internal series disagree:
+    a recorded corporate action the factor never steps on, or a factor step with
+    no recorded action. Measured 2026-09-09 there are 8,133 such (symbol, date)
+    pairs, and the count rises every year.
+
+    A 同花顺 snapshot of the same events breaks the tie. The verdict is
+    directional rather than a pass/fail, because each combination points at a
+    different series:
+
+    * action recorded, factor still, peer agrees there was an event
+      -> the factor missed a step
+    * action recorded, factor still, peer has no event
+      -> the recorded action is doubtful
+    * factor stepped, no action recorded, peer has an event
+      -> the lake is missing the action
+    * factor stepped, no action recorded, peer has none either
+      -> the factor step has no basis
+
+    Silent without a snapshot, so a lake with no key is unaffected. Delisted
+    securities cannot be arbitrated at all: the upstream refuses them, which is
+    why the finding reports its own coverage.
+    """
+    from cnequity.storage.source_snapshots import SnapshotStore
+
+    peer = SnapshotStore(config.meta_root).read_latest("corporate_actions", source="ths_official")
+    if peer.is_empty() or not {"symbol", "ex_date"} <= set(peer.columns):
+        return []
+
+    factors_root = config.derived_root / "adj_factors"
+    actions_root = config.curated_root / "corporate_actions"
+    if not dataset_has_parquet(factors_root) or not dataset_has_parquet(actions_root):
+        return []
+
+    factors = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(factors_root, partition_col="trade_date"), "adj_factors"
+        )
+        .filter(pl.col("adjust_type") == "hfq")
+        .select("symbol", "trade_date", "factor")
+        .collect()
+        .sort(["symbol", "trade_date"])
+    )
+    if factors.is_empty():
+        return []
+    jumps = (
+        factors.with_columns(
+            (pl.col("factor") / pl.col("factor").shift(1).over("symbol") - 1).abs().alias("_chg")
+        )
+        .filter(pl.col("_chg") > 1e-6)
+        .select("symbol", pl.col("trade_date").alias("ex_date"))
+    )
+    if jumps.is_empty():
+        return []
+
+    floor = jumps.get_column("ex_date").min()
+    actions = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(actions_root, partition_col="ex_date"), "corporate_actions"
+        )
+        .filter(pl.col("ex_date") >= floor)
+        .select("symbol", "ex_date")
+        .unique()
+        .collect()
+    )
+    # Only compare where a comparison is meaningful: the symbol has a factor
+    # series at all, and the date is one the market was open on.
+    covered = factors.get_column("symbol").unique().to_list()
+    sessions = _open_sessions(config)
+    if sessions is not None:
+        actions = actions.filter(pl.col("ex_date").is_in(sessions))
+    actions = actions.filter(pl.col("symbol").is_in(covered))
+
+    peer_dates = peer.select("symbol", "ex_date").unique()
+    peer_symbols = peer.get_column("symbol").unique().to_list()
+
+    silent = actions.join(jumps, on=["symbol", "ex_date"], how="anti")
+    baseless = jumps.filter(pl.col("ex_date") >= floor).join(
+        actions, on=["symbol", "ex_date"], how="anti"
+    )
+
+    def _split(frame: pl.DataFrame) -> tuple[int, int, int]:
+        in_scope = frame.filter(pl.col("symbol").is_in(peer_symbols))
+        confirmed = in_scope.join(peer_dates, on=["symbol", "ex_date"], how="inner").height
+        return confirmed, in_scope.height - confirmed, frame.height - in_scope.height
+
+    silent_yes, silent_no, silent_out = _split(silent)
+    baseless_yes, baseless_no, baseless_out = _split(baseless)
+    total = silent.height + baseless.height
+    if not total:
+        return []
+
+    against_factors = silent_yes + baseless_no
+    against_actions = silent_no + baseless_yes
+    unarbitrated = silent_out + baseless_out
+    return [
+        {
+            "dataset": "adj_factors",
+            "severity": "info" if not (against_factors or against_actions) else "warning",
+            "check": "adj_factor_arbitration",
+            "message": (
+                f"{total} factor/action contradiction(s); the peer settles "
+                f"{total - unarbitrated}: {against_factors} point at the factor series, "
+                f"{against_actions} at the recorded actions, {unarbitrated} unarbitrated "
+                "because the peer does not carry those securities"
+            ),
+            "contradictions": total,
+            "against_factor_series": against_factors,
+            "against_recorded_actions": against_actions,
+            "unarbitrated": unarbitrated,
+            "factor_missed_a_step": silent_yes,
+            "recorded_action_doubtful": silent_no,
+            "missing_recorded_action": baseless_yes,
+            "factor_step_without_basis": baseless_no,
+        }
+    ]
+
+
+def _open_sessions(config: Config) -> list[date] | None:
+    root = config.curated_root / "trading_calendar"
+    if not dataset_has_parquet(root):
+        return None
+    frame = scan_parquet_root(root, partition_col="trade_date").collect()
+    if "is_trading" not in frame.columns:
+        return None
+    return frame.filter(pl.col("is_trading")).get_column("trade_date").unique().to_list()
+
+
+# One tick on a ten-yuan share is 10bps, so a tie-break threshold below that
+# would arbitrate rounding. `daily_bars` failover already uses 10bps.
+BAR_ARBITRATION_TOLERANCE_BPS = 10.0
+
+
+def daily_bars_arbitration_findings(config: Config) -> list[dict]:
+    """When the two incumbents disagree on a close, ask a third.
+
+    ``daily_bars`` from 2016 runs tdx against eastmoney with a revision gate.
+    That gate has to decide something on a disagreement, and a binary comparison
+    gives it nothing to decide with: it can block a good day on vendor noise or
+    pass a real break, and there is no way to tell those apart from inside.
+
+    A 同花顺 snapshot breaks the tie by siding with one incumbent or neither.
+    "Neither" is itself informative — it means the two agreeing sources are both
+    away from a third, which is the shape of a definitional difference rather
+    than a defect.
+
+    Silent without a snapshot, so a lake with no key keeps exactly the checks it
+    had.
+    """
+    from cnequity.storage.source_snapshots import SnapshotStore
+
+    store = SnapshotStore(config.meta_root)
+    peer = store.read_latest("daily_bars", source="ths_official")
+    backup = store.read_latest("daily_bars", source="eastmoney")
+    needed = {"symbol", "trade_date", "close"}
+    if peer.is_empty() or backup.is_empty():
+        return []
+    if not needed <= set(peer.columns) or not needed <= set(backup.columns):
+        return []
+
+    root = config.curated_root / "daily_bars"
+    if not dataset_has_parquet(root):
+        return []
+    dates = backup.get_column("trade_date").unique().to_list()
+    primary = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="trade_date", start=min(dates), end=max(dates)),
+            "daily_bars",
+        )
+        .select("symbol", "trade_date", "close", "source")
+        .collect()
+    )
+    if primary.is_empty():
+        return []
+
+    pair = primary.join(
+        backup.select("symbol", "trade_date", pl.col("close").alias("_backup")),
+        on=["symbol", "trade_date"],
+        how="inner",
+    ).filter(pl.col("close") != 0)
+    if pair.is_empty():
+        return []
+    disputed = pair.with_columns(
+        ((pl.col("_backup") - pl.col("close")).abs() / pl.col("close").abs() * 10_000).alias("_bps")
+    ).filter(pl.col("_bps") > BAR_ARBITRATION_TOLERANCE_BPS)
+    if disputed.is_empty():
+        return []
+
+    judged = disputed.join(
+        peer.select("symbol", "trade_date", pl.col("close").alias("_peer")),
+        on=["symbol", "trade_date"],
+        how="inner",
+    )
+    if judged.is_empty():
+        return [
+            {
+                "dataset": "daily_bars",
+                "severity": "info",
+                "check": "daily_bars_arbitration",
+                "message": (
+                    f"{disputed.height} close disagreement(s) between the primary and its "
+                    "backup, none covered by the third-source snapshot"
+                ),
+                "disputed": disputed.height,
+                "arbitrated": 0,
+            }
+        ]
+
+    judged = judged.with_columns(
+        ((pl.col("_peer") - pl.col("close")).abs() / pl.col("close").abs() * 10_000).alias(
+            "_to_primary"
+        ),
+        ((pl.col("_peer") - pl.col("_backup")).abs() / pl.col("_backup").abs() * 10_000).alias(
+            "_to_backup"
+        ),
+    )
+    backs_primary = judged.filter(
+        (pl.col("_to_primary") <= BAR_ARBITRATION_TOLERANCE_BPS)
+        & (pl.col("_to_backup") > BAR_ARBITRATION_TOLERANCE_BPS)
+    ).height
+    backs_backup = judged.filter(
+        (pl.col("_to_backup") <= BAR_ARBITRATION_TOLERANCE_BPS)
+        & (pl.col("_to_primary") > BAR_ARBITRATION_TOLERANCE_BPS)
+    ).height
+    backs_neither = judged.height - backs_primary - backs_backup
+    return [
+        {
+            "dataset": "daily_bars",
+            "severity": "warning" if backs_backup else "info",
+            "check": "daily_bars_arbitration",
+            "message": (
+                f"{disputed.height} primary/backup close disagreement(s); the third source "
+                f"settles {judged.height}: {backs_primary} for the primary, "
+                f"{backs_backup} for the backup, {backs_neither} for neither"
+            ),
+            "disputed": disputed.height,
+            "arbitrated": judged.height,
+            "supports_primary": backs_primary,
+            "supports_backup": backs_backup,
+            "supports_neither": backs_neither,
+            "tolerance_bps": BAR_ARBITRATION_TOLERANCE_BPS,
+        }
+    ]
+
+
+# Statement values are reported to the yuan, so anything under 10bps is the two
+# vendors rounding a restated figure differently rather than disagreeing.
+STATEMENT_PEER_TOLERANCE = 1e-3
+
+
+def financial_statement_peer_findings(config: Config) -> list[dict]:
+    """Compare the statements the lake holds from one source against a peer.
+
+    ``income`` and ``indicator`` come entirely from EastMoney — 1,624,060 and
+    1,058,909 rows — and nothing checks them. A restated figure, a caliber
+    change or a plain transcription error all look identical from inside a
+    single-sourced dataset.
+
+    Measured 2026-09-12 over 30 securities and nine years, the two agree on
+    ``net_profit`` 958 times in 960 and on ``revenue`` 925 in 960. The other
+    mapped codes matched exactly. So a breach here is worth reading: at these
+    rates, disagreement is rare enough to be a signal.
+
+    Reported per item code, because the rates differ by an order of magnitude
+    between them and one aggregate number would hide that. Silent without a
+    snapshot.
+    """
+    from cnequity.storage.source_snapshots import SnapshotStore
+
+    peer = SnapshotStore(config.meta_root).read_latest(
+        "financial_statement_items", source="ths_official"
+    )
+    needed = {"symbol", "report_period", "item_code", "item_value"}
+    if peer.is_empty() or not needed <= set(peer.columns):
+        return []
+
+    root = config.curated_root / "financial_statement_items"
+    if not dataset_has_parquet(root):
+        return []
+    periods = peer.get_column("report_period").unique().to_list()
+    curated = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="report_period"),
+            "financial_statement_items",
+        )
+        .filter(pl.col("report_period").is_in(periods))
+        .select("symbol", "report_period", "item_code", "item_value", "source")
+        .collect()
+    )
+    if curated.is_empty():
+        return []
+
+    # The primary key carries announce_date, so a restated period holds several
+    # rows per item; compare the latest reading of each.
+    latest = curated.group_by("symbol", "report_period", "item_code").agg(
+        pl.col("item_value").last().alias("_curated"), pl.col("source").last().alias("_source")
+    )
+    peer_latest = peer.group_by("symbol", "report_period", "item_code").agg(
+        pl.col("item_value").last().alias("_peer")
+    )
+    pair = (
+        latest.join(peer_latest, on=["symbol", "report_period", "item_code"], how="inner")
+        .drop_nulls(["_curated", "_peer"])
+        .filter(pl.col("_curated") != 0)
+    )
+    if pair.is_empty():
+        return []
+
+    scored = pair.with_columns(
+        ((pl.col("_peer") - pl.col("_curated")).abs() / pl.col("_curated").abs()).alias("_rel")
+    )
+    by_code = (
+        scored.group_by("item_code")
+        .agg(
+            pl.len().alias("compared"),
+            (pl.col("_rel") > STATEMENT_PEER_TOLERANCE).sum().alias("disagreed"),
+        )
+        .filter(pl.col("disagreed") > 0)
+        .sort("disagreed", descending=True)
+    )
+    if by_code.is_empty():
+        return []
+
+    total = int(by_code.get_column("disagreed").sum())
+    return [
+        {
+            "dataset": "financial_statement_items",
+            "severity": "warning",
+            "check": "financial_statement_peer",
+            "message": (
+                f"{total} value(s) differ from the peer by more than "
+                f"{STATEMENT_PEER_TOLERANCE:.1%} across {scored.height} compared"
+            ),
+            "compared": scored.height,
+            "disagreed": total,
+            "by_item_code": [
+                {
+                    "item_code": row["item_code"],
+                    "compared": row["compared"],
+                    "disagreed": row["disagreed"],
+                }
+                for row in by_code.to_dicts()
+            ],
+        }
+    ]
+
+
+def untraded_instrument_findings(config: Config, trade_date: date) -> list[dict]:
+    """Securities in ``daily_bars`` that never print a trade.
+
+    A price with no volume and no turnover behind it is a net asset value, not a
+    quote. The open-end fund code space reached the lake this way: 519xxx on the
+    SSE matched a "51" ETF prefix, and TDX answered with 436,533 NAV rows that
+    every liquidity screen, turnover aggregate and tradable-universe filter then
+    treated as market data.
+
+    Structural rather than statistical, which is what makes it cheap: one real
+    session is enough to tell a quoted security from an unquoted one, and a
+    genuine security that is merely halted still carries prints either side of
+    the halt. The window is a year so a thin-but-real name cannot be caught by a
+    quiet fortnight.
+    """
+    root = config.curated_root / "daily_bars"
+    if not dataset_has_parquet(root):
+        return []
+    start = trade_date - timedelta(days=365)
+    bars = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="trade_date", start=start, end=trade_date),
+            "daily_bars",
+        )
+        .select("symbol", "volume", "amount")
+        .collect()
+    )
+    if bars.is_empty():
+        return []
+
+    per_symbol = bars.group_by("symbol").agg(
+        pl.len().alias("rows"),
+        pl.col("volume").fill_null(0).max().alias("_max_volume"),
+        pl.col("amount").fill_null(0).max().alias("_max_amount"),
+    )
+    # A handful of rows proves nothing: a security listed last week can be quiet.
+    untraded = per_symbol.filter(
+        (pl.col("_max_volume") <= 0) & (pl.col("_max_amount") <= 0) & (pl.col("rows") >= 20)
+    )
+    if untraded.is_empty():
+        return []
+
+    sample = untraded.sort("rows", descending=True).head(5)
+    return [
+        {
+            "dataset": "daily_bars",
+            "severity": "warning",
+            "check": "untraded_instruments",
+            "message": (
+                f"{untraded.height} symbol(s) carry {int(untraded.get_column('rows').sum())} "
+                "bar(s) with no volume and no turnover in the last year — a NAV series "
+                "rather than a quoted price"
+            ),
+            "symbols": untraded.height,
+            "rows": int(untraded.get_column("rows").sum()),
+            "sample": [{"symbol": row["symbol"], "rows": row["rows"]} for row in sample.to_dicts()],
+        }
+    ]
+
+
+def _policy_base(source: str, registered: set[str]) -> str | None:
+    """Resolve a provenance sub-label to the registered source it inherits from.
+
+    Adapters refine provenance beyond the vendor — `eastmoney_cached`,
+    `derived_bar_gap`, `exchange_calendar` — and those inherit the base label's
+    terms. Longest match wins so `eastmoney_kline+sina_global` is not mistaken
+    for plain `eastmoney`.
+    """
+    for candidate in sorted(registered, key=len, reverse=True):
+        if source == candidate or source.startswith(f"{candidate}_"):
+            return candidate
+    return None
+
+
+def undeclared_source_findings(config: Config) -> list[dict]:
+    """Sources in the data that the compliance registry cannot speak for.
+
+    ``policies_for_dataset`` answers "which terms apply to this data" from the
+    ``DatasetSpec`` routing fields — primary, backup, backfill. Anything that
+    reached curated another way is invisible to it, and a compliance matrix with
+    a blind spot is worse than none, because it answers confidently.
+
+    Two failures, reported separately because they need different responses:
+
+    *Unregistered.* No policy covers the label or any base it inherits from, so
+    its terms are simply unknown. ``bse`` is one: 654 rows in ``daily_bars`` and
+    two sub-labels in ``trading_status``, and ``sources/SOURCES.yml`` has never
+    carried it.
+
+    *Registered but unrouted.* A policy exists and the dataset does not route to
+    the source, so ``policies_for_dataset`` omits terms that do apply. The
+    ``ths_official`` rows in ``daily_bars`` and ``financial_statement_items``
+    arrived through dedicated repair commands rather than a configured route —
+    and theirs is the policy whose redistribution field reads ``unknown``.
+
+    Reads what is stored rather than what the config intends, so it catches the
+    next out-of-band writer whatever route it takes.
+    """
+    from cnequity.compliance.source_policy import load_source_policies
+    from cnequity.domain.datasets import DATASETS
+
+    try:
+        registered = set(load_source_policies())
+    except Exception:  # noqa: BLE001 — a missing registry is not this check's business
+        return []
+
+    unregistered: dict[str, list[str]] = {}
+    unrouted: dict[str, list[str]] = {}
+    for name, spec in sorted(DATASETS.items()):
+        root = (config.derived_root if spec.layer == "derived" else config.curated_root) / name
+        if not dataset_has_parquet(root):
+            continue
+        try:
+            present = (
+                scan_parquet_root(root, partition_col=spec.partition_col)
+                .select("source")
+                .unique()
+                .collect()
+                .get_column("source")
+                .to_list()
+            )
+        except Exception:  # noqa: BLE001 — a dataset with no source column is fine
+            continue
+        declared = {
+            value
+            for value in (spec.primary_source, spec.backup_source, spec.backfill_source)
+            if value
+        }
+        for value in sorted(filter(None, present)):
+            base = _policy_base(value, registered)
+            if base is None:
+                unregistered.setdefault(value, []).append(name)
+            elif base not in declared and value not in declared:
+                unrouted.setdefault(base, []).append(name)
+
+    findings: list[dict] = []
+    if unregistered:
+        findings.append(
+            {
+                "dataset": "sources",
+                "severity": "error",
+                "check": "unregistered_source",
+                "message": (
+                    f"{len(unregistered)} source label(s) in curated have no policy entry and "
+                    "no registered base, so their terms are undetermined: "
+                    + ", ".join(sorted(unregistered))
+                ),
+                "sources": {key: sorted(set(value)) for key, value in sorted(unregistered.items())},
+            }
+        )
+    if unrouted:
+        findings.append(
+            {
+                "dataset": "sources",
+                "severity": "warning",
+                "check": "unrouted_source",
+                "message": (
+                    f"{len(unrouted)} registered source(s) wrote rows to datasets that do not "
+                    "route to them, so policies_for_dataset omits their terms: "
+                    + ", ".join(sorted(unrouted))
+                ),
+                "sources": {key: sorted(set(value)) for key, value in sorted(unrouted.items())},
+            }
+        )
+    return findings

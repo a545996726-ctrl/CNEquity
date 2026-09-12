@@ -16,15 +16,21 @@ from cnequity.domain.market_time import is_session_final
 from cnequity.quality.authority_checks import run_authority_checks
 from cnequity.quality.cross_checks import (
     ADJ_RECON_LOOKBACK_DAYS,
+    adj_factor_arbitration_findings,
     adj_factor_coverage_findings,
     adj_factor_reconciliation_findings,
+    balance_sheet_identity_findings,
     corporate_action_classification_findings,
+    daily_bars_arbitration_findings,
     daily_bars_calendar_findings,
     daily_bars_close_crosscheck_findings,
+    financial_statement_peer_findings,
     instrument_listing_order_findings,
     st_label_crosscheck_findings,
     trading_calendar_horizon_findings,
+    undeclared_source_findings,
     universe_survivorship_findings,
+    untraded_instrument_findings,
     valuation_bars_coverage_findings,
 )
 from cnequity.quality.dataset_checks import (
@@ -42,6 +48,7 @@ from cnequity.quality.tick_checks import trade_ticks_findings
 from cnequity.quality.unit_checks import (
     daily_bars_amount_completeness_findings,
     daily_bars_volume_unit_findings,
+    valuation_ratio_unit_findings,
 )
 from cnequity.query.canonical import dedupe_lazy_by_primary_key
 from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
@@ -398,6 +405,13 @@ def _collect_lake_findings(
     findings.extend(adj_factor_coverage_findings(config, trade_date))
     findings.extend(universe_survivorship_findings(config, trade_date))
     findings.extend(instrument_listing_order_findings(config))
+    findings.extend(untraded_instrument_findings(config, trade_date))
+    findings.extend(undeclared_source_findings(config))
+    findings.extend(valuation_ratio_unit_findings(config, trade_date))
+    findings.extend(balance_sheet_identity_findings(config))
+    findings.extend(adj_factor_arbitration_findings(config))
+    findings.extend(daily_bars_arbitration_findings(config))
+    findings.extend(financial_statement_peer_findings(config))
     findings.extend(
         corporate_action_classification_findings(
             config, trade_date - timedelta(days=ADJ_RECON_LOOKBACK_DAYS), trade_date

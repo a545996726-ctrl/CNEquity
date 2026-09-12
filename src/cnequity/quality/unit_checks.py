@@ -210,3 +210,78 @@ def daily_bars_amount_completeness_findings(
             }
         )
     return findings
+
+
+# A price-to-something ratio lives in single or low double digits. Even a loss
+# -making company priced on a sliver of earnings rarely clears four figures, and
+# nothing legitimate reaches the millions.
+RATIO_PLAUSIBLE_MAX = 1000.0
+# One outlier is a business fact; a majority is a wrong field.
+RATIO_IMPLAUSIBLE_SHARE = 0.5
+
+
+def valuation_ratio_unit_findings(config: Config, trade_date: date) -> list[dict]:
+    """Valuation columns that hold an amount rather than a ratio.
+
+    ``valuation_metrics.ps_ttm`` is stored per source, and one of them writes a
+    figure in yuan: measured over the whole dataset, 96.7% of the EastMoney rows
+    exceed 1000 with a median of 1.99e7, against 99.9% plausible and a median of
+    3.2 from baostock. A licensed third source reads 600519.SH at 9.20 where the
+    lake says 4.45e10. The adapter asks for EastMoney field ``f45``, which is a
+    profit or revenue figure and not 市销率 at all.
+
+    Grouped by source for the same reason ``daily_bars_volume_unit_findings``
+    is: a mixed column has a median near neither, and one bad adapter among
+    several healthy ones is otherwise outvoted.
+
+    This is a shape test, not a value test, so it needs no second source to run
+    — which is the point. The break was visible in the numbers themselves for as
+    long as they have been stored.
+    """
+    root = config.curated_root / "valuation_metrics"
+    if not dataset_has_parquet(root):
+        return []
+    columns = ("pe_ttm", "pb", "ps_ttm")
+    frame = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="trade_date", end=trade_date),
+            "valuation_metrics",
+        )
+        .select("source", *columns)
+        .collect()
+    )
+    if frame.is_empty():
+        return []
+
+    findings: list[dict] = []
+    for column in columns:
+        scored = (
+            frame.select("source", column)
+            .drop_nulls(column)
+            .group_by("source")
+            .agg(
+                pl.len().alias("rows"),
+                (pl.col(column).abs() > RATIO_PLAUSIBLE_MAX).mean().alias("share"),
+                pl.col(column).abs().median().alias("median"),
+            )
+            .filter(pl.col("share") > RATIO_IMPLAUSIBLE_SHARE)
+        )
+        for row in scored.iter_rows(named=True):
+            findings.append(
+                {
+                    "dataset": "valuation_metrics",
+                    "severity": "error",
+                    "check": "valuation_ratio_unit",
+                    "message": (
+                        f"{column} from {row['source']}: {row['share']:.1%} of "
+                        f"{row['rows']:,} values exceed {RATIO_PLAUSIBLE_MAX:.0f} "
+                        f"(median {row['median']:.4g}) — an amount, not a ratio"
+                    ),
+                    "column": column,
+                    "source": row["source"],
+                    "rows": int(row["rows"]),
+                    "implausible_share": round(float(row["share"]), 4),
+                    "median": float(row["median"]),
+                }
+            )
+    return findings
