@@ -26,6 +26,34 @@ def test_source_health_note_does_not_describe_removed_eastmoney_sticky_state():
     assert "proxy" in note
 
 
+def test_the_declared_version_is_the_packaged_version():
+    """__version__ is hand-written, so nothing but a test keeps it honest.
+
+    A release bumps pyproject and can silently leave the module behind; the
+    wheel then reports one version and `cne --version` another.
+    """
+    import tomllib
+
+    from cnequity import __version__
+
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        declared = tomllib.load(fh)["project"]["version"]
+    assert __version__ == declared, (
+        f"src/cnequity/__init__.py says {__version__}, pyproject.toml says {declared}"
+    )
+
+
+def test_the_release_contract_for_this_version_exists():
+    """The release workflow fails on a missing contract; fail here instead."""
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        version = tomllib.load(fh)["project"]["version"]
+    assert (ROOT / "contracts" / f"v{version}.json").is_file(), (
+        f"contracts/v{version}.json is missing; run `cne contract show > contracts/v{version}.json`"
+    )
+
+
 def test_citation_metadata_tracks_the_current_package_version():
     from cnequity import __version__
 

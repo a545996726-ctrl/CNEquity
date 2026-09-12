@@ -6,11 +6,68 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-13
+
+No dataset contract changes: `cne contract diff` reports zero breaking and zero
+compatible differences against 0.8.0. A lake without a HiThink key is unaffected
+by everything in the Added section — the source stays inert and its peer checks
+stay silent, per [ADR-0008](docs/adr/0008-optional-keyed-sources.md).
+
+### Added
+
+- **An optional licensed peer for the datasets the lake already holds.** Daily
+  bars, financial statements, valuations, sector bars and corporate actions can
+  be sourced from a licensed endpoint and used to arbitrate disagreements — a
+  disputed value is switched only when a third source backs it. Includes the
+  2016–2024 balance and cash-flow backfill, ETF codes routed to the fund
+  endpoint, and valuation snapshots accumulated daily because the upstream keeps
+  no history.
+- **`cne ths-official` — the command group for that source.** `backfill`,
+  `repair-bars`, `resource-sectors` and `snapshot`, each reporting `skipped`
+  rather than failing when no key is configured.
+- **Three checks the audit could not make before.** Balance sheets must balance;
+  a valuation column holding amounts instead of ratios is caught; and the
+  compliance register is checked against what `curated` actually holds rather
+  than against its own routing table. The last one found two real gaps: `bse`
+  wrote to `daily_bars` and `trading_status` with no policy entry, and six
+  registered sources wrote to datasets that do not route to them.
+- **The Beijing Stock Exchange is registered.** It was writing rows while absent
+  from `sources/SOURCES.yml`, so its terms could not be looked up at all. Every
+  permission field stays `unknown` — the site answers 403 from this egress.
+- **ADR-0008 (optional keyed sources) and ADR-0009 (share dilution is one
+  fact).**
+
 ### Changed
 
 - **Chinese README now introduces the serve console.** The new 数据运维页面
   section explains what `cne serve` shows and embeds the labelled dashboard
   illustration.
+- **The community files follow open-source convention.** `NOTICE` carries
+  attribution only rather than a second copy of the licence text;
+  `CODE_OF_CONDUCT.md` gains scope, a private contact and stated consequences;
+  `CONTRIBUTING.md` documents the commit convention and the CI gates with their
+  local equivalents; `SECURITY.md` states supported versions as a table.
+- **`ROADMAP.md` no longer tracks shipped work.** It had been left at "Now ·
+  0.6" and "Next · 0.7" while the project shipped 0.8.
+
+### Fixed
+
+- **Every documentation link served a 404.** GitHub Pages is case-sensitive, and
+  13 links — including `pyproject`'s `Documentation` URL shown on PyPI and
+  mkdocs' own `site_url` — pointed at `rootsunc.github.io/cnequity` rather than
+  `/CNEquity`.
+- **Windows CI could not parse the test config.** Four `ths_official` config
+  tests wrote a raw `Path` into a TOML string, so the runner's `D:\a\…` became
+  invalid escapes. This was the only failing job on 0.8.0's last commit.
+- **Open-end funds were classified as exchange-traded.** A `51` prefix swept all
+  188 `519xxx` codes into the tradable universe, and TDX answered with a NAV
+  series: 436,533 rows in `daily_bars` carrying a close but zero volume and zero
+  turnover on every one.
+- **A security that never traded could be inferred as delisted.** No bar history
+  looked identical to history that stopped; absence of evidence is no longer
+  evidence.
+- **`.git-blame-ignore-revs` matched nothing.** August's history rewrite gave
+  both formatting commits new ids, so GitHub silently ignored the file.
 
 ## [0.8.0] — 2026-09-06
 
@@ -1350,7 +1407,8 @@ First public release of the self-hosted A-share Parquet data layer.
 - TLS verify on by default for HTTP clients
 - Project URLs point at `rootSunc/cnequity`
 
-[Unreleased]: https://github.com/rootSunc/CNEquity/compare/v0.8.0...main
+[Unreleased]: https://github.com/rootSunc/CNEquity/compare/v0.8.1...main
+[0.8.1]: https://github.com/rootSunc/CNEquity/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/rootSunc/CNEquity/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/rootSunc/CNEquity/releases/tag/v0.7.3
 [0.7.2]: https://github.com/rootSunc/CNEquity/releases/tag/v0.7.2
