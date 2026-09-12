@@ -47,6 +47,39 @@ pytest tests/unit      # 快速
 pytest tests/integration
 ```
 
+本地预览文档站（CI 会用 `mkdocs build --strict` 校验，坏链会直接失败）：
+
+```bash
+mkdocs serve      # http://127.0.0.1:8000
+```
+
+## 提交与 PR
+
+提交信息用 [Conventional Commits](https://www.conventionalcommits.org/)，仓库最近 200 个提交中
+198 个遵循此格式：
+
+```
+<type>(<scope>): <简短描述>
+```
+
+常用 type：`feat` `fix` `docs` `refactor` `perf` `test` `chore` `ci`。
+scope 用模块名（`ths_official`、`quality`、`symbols`、`cli`…）。描述用祈使句、不加句号。
+
+正文说明**为什么**这样改，而不是复述 diff。破坏性变更加 `!`（如 `feat(query)!:`）并在正文写明迁移方式。
+
+PR 合入前 CI 必须全绿，本地可提前跑掉大部分：
+
+| CI job | 本地等价命令 |
+| --- | --- |
+| `quality` — lint | `ruff check . && ruff format --check . && shellcheck scripts/*.sh` |
+| `quality` — 离线基准 | `python scripts/benchmark_offline.py --check --max-elapsed-seconds 10 --max-concurrency 2` |
+| `quality` — 前端产物 | `cd frontend && npm ci && npm run check` |
+| `test` | `pytest` |
+
+`test` 在 Linux（Python 3.10/3.12/3.13/3.14）、Windows 与 macOS 上各跑一遍。**Windows 是一等目标**：
+路径、文件锁和换行差异都算回归。往 TOML 里写路径时务必用 `path_for_toml()`，裸 `Path` 在
+`C:\Users\…` 下会变成非法转义。
+
 ## 约定
 
 - 代码在 `src/cnequity/`，按职责拆分（`domain`、`adapters`、`orchestrator`、
