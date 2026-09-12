@@ -102,12 +102,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rootSunc/cnequity"
-Documentation = "https://rootsunc.github.io/cnequity/"
-Source = "https://github.com/rootSunc/cnequity"
-Changelog = "https://github.com/rootSunc/cnequity/blob/main/CHANGELOG.md"
-Citation = "https://github.com/rootSunc/cnequity/blob/main/CITATION.cff"
-Issues = "https://github.com/rootSunc/cnequity/issues"
+Homepage = "https://github.com/rootSunc/CNEquity"
+Documentation = "https://rootsunc.github.io/CNEquity/"
+Source = "https://github.com/rootSunc/CNEquity"
+Changelog = "https://github.com/rootSunc/CNEquity/blob/main/CHANGELOG.md"
+Citation = "https://github.com/rootSunc/CNEquity/blob/main/CITATION.cff"
+Issues = "https://github.com/rootSunc/CNEquity/issues"
 
 [project.scripts]
 cne = "cnequity.cli.main:cli"

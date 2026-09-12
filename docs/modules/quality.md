@@ -121,7 +121,7 @@ cne audit --full --research-universe all_a_sh_sz \
 `instruments`；风险警示板名单经 **东财 HTTP** 进入 `trading_status`。不同厂商、
 不同协议、同一个交易所事实。已移除的 AkShare ST 并集只是看起来独立——它查的是
 和东财适配器完全相同的 push2 端点与 `fs` 过滤条件，永远不可能给出不同答案
-（[issue #3](https://github.com/rootSunc/cnequity/issues/3)）。
+（[issue #3](https://github.com/rootSunc/CNEquity/issues/3)）。
 
 容差 `ST_CROSSCHECK_MAX_DISAGREEMENT = 3`：改名当天两个 step 分别抓取，
 个位数的边界名单属于正常抖动。

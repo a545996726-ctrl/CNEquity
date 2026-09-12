@@ -2,11 +2,11 @@
 <p align="center"><b>Starting with China's A-share market, CNEquity turns fragmented sources into a refreshable, reproducible local data layer for people and AI agents.</b></p>
 
 <p align="center">
-  <a href="https://github.com/rootSunc/cnequity/actions/workflows/ci.yml"><img src="https://github.com/rootSunc/cnequity/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml"><img src="https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/cnequity/"><img src="https://img.shields.io/pypi/v/cnequity?logo=pypi&amp;logoColor=white&amp;color=orange" alt="PyPI version"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="https://rootsunc.github.io/cnequity/"><img src="https://img.shields.io/badge/docs-site-2f80ed.svg" alt="Docs site"></a>
+  <a href="https://rootsunc.github.io/CNEquity/"><img src="https://img.shields.io/badge/docs-site-2f80ed.svg" alt="Docs site"></a>
   <a href="README.md"><img src="https://img.shields.io/badge/文档-中文-lightgrey.svg" alt="中文"></a>
 </p>
 

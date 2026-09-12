@@ -11,8 +11,8 @@ date-released: 2026-09-06
 authors:
   - name: "CNEquity Contributors"
 license: Apache-2.0
-repository-code: "https://github.com/rootSunc/cnequity"
-url: "https://rootsunc.github.io/cnequity/"
+repository-code: "https://github.com/rootSunc/CNEquity"
+url: "https://rootsunc.github.io/CNEquity/"
 keywords:
   - A-shares
   - financial data

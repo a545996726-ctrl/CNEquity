@@ -32,4 +32,4 @@ def test_citation_metadata_tracks_the_current_package_version():
     citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
     assert f"version: {__version__}" in citation
     assert "license: Apache-2.0" in citation
-    assert 'repository-code: "https://github.com/rootSunc/cnequity"' in citation
+    assert 'repository-code: "https://github.com/rootSunc/CNEquity"' in citation

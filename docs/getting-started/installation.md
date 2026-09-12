@@ -53,7 +53,7 @@ cne query --config configs/cnequity.demo.toml --sql "SELECT count(*) FROM daily_
 ## 从源码安装（开发）
 
 ```bash
-git clone https://github.com/rootSunc/cnequity.git
+git clone https://github.com/rootSunc/CNEquity.git
 cd cnequity
 python3 -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip   # PEP 735 --group 需要 pip >= 25.1
@@ -64,7 +64,7 @@ pip install -e . --group dev
 Windows（PowerShell）：
 
 ```powershell
-git clone https://github.com/rootSunc/cnequity.git
+git clone https://github.com/rootSunc/CNEquity.git
 cd cnequity
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -145,7 +145,7 @@ pytest tests/unit -q                               # 需源码 + --group dev，�
 
 2. **配置**：删掉手写配置里的 `[sources.akshare]`；加上 `[sources.pboc]`（社融）。可选 `[sources.nbs]` / `[sources.exchange]` 打开发布方交叉核验。或直接 `cne config init --force` 后把 `data.root` 改回原路径。
 
-3. **孤儿包**：AkShare 已移除（[issue #3](https://github.com/rootSunc/cnequity/issues/3)），pip / uv 不会卸掉不再依赖的包：
+3. **孤儿包**：AkShare 已移除（[issue #3](https://github.com/rootSunc/CNEquity/issues/3)），pip / uv 不会卸掉不再依赖的包：
 
    ```bash
    pip uninstall akshare mini-racer py-mini-racer

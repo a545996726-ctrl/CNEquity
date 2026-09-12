@@ -2,11 +2,11 @@
 <p align="center">把多源的 A 股行情、基本面、事件与宏观数据，落到一份可日更、可回查的本地 Parquet 数据湖。</p>
 
 <p align="center">
-  <a href="https://github.com/rootSunc/cnequity/actions/workflows/ci.yml"><img src="https://github.com/rootSunc/cnequity/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml"><img src="https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/cnequity/"><img src="https://img.shields.io/pypi/v/cnequity?logo=pypi&amp;logoColor=white&amp;color=orange" alt="PyPI version"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="https://rootsunc.github.io/cnequity/"><img src="https://img.shields.io/badge/docs-site-2f80ed.svg" alt="Docs site"></a>
+  <a href="https://rootsunc.github.io/CNEquity/"><img src="https://img.shields.io/badge/docs-site-2f80ed.svg" alt="Docs site"></a>
   <a href="README.en.md"><img src="https://img.shields.io/badge/docs-English-lightgrey.svg" alt="English"></a>
 </p>
 
@@ -16,10 +16,10 @@
 </p>
 
 <p align="center">
-  <a href="https://rootsunc.github.io/cnequity/getting-started/quickstart/">快速开始</a> ·
-  <a href="https://rootsunc.github.io/cnequity/datasets/catalog/">数据集目录</a> ·
-  <a href="https://rootsunc.github.io/cnequity/recipes/">研究 Recipes</a> ·
-  <a href="https://rootsunc.github.io/cnequity/reference/mcp/">接入 AI Agent</a>
+  <a href="https://rootsunc.github.io/CNEquity/getting-started/quickstart/">快速开始</a> ·
+  <a href="https://rootsunc.github.io/CNEquity/datasets/catalog/">数据集目录</a> ·
+  <a href="https://rootsunc.github.io/CNEquity/recipes/">研究 Recipes</a> ·
+  <a href="https://rootsunc.github.io/CNEquity/reference/mcp/">接入 AI Agent</a>
 </p>
 
 CNEquity 开源、免注册、自托管。它不负责给出交易信号，而是把分散在不同来源、不同口径、不同更新节奏的数据，长期保存在自己的机器或服务器上，并且说明每一行从哪里来、何时采到、截至哪一天可用。

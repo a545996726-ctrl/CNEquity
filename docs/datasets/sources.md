@@ -261,7 +261,7 @@
 | nbs | HTTP | **仅审计**：PMI 发布稿，对照 `macro_indicators` | — | 缺省关闭；不可达时静默跳过 |
 | exchange | HTTP | **仅审计**：上交所/深交所上市列表，对照 ST 标签 | — | 缺省关闭；不可达时静默跳过 |
 
-> **AkShare 已不再被任何适配器调用**（[issue #3](https://github.com/rootSunc/cnequity/issues/3)）。
+> **AkShare 已不再被任何适配器调用**（[issue #3](https://github.com/rootSunc/CNEquity/issues/3)）。
 > 它此前的两个调用点分别指向本项目已经直连的端点：ST 集合走的是同一个东财
 > push2 clist 板块与同一个 `fs` 过滤器，PMI / 货币供应量走的是同一批东财
 > datacenter 报表。它提供的不是第二个口径，而是同一个口径外面的一层解析。

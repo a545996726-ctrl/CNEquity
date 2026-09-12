@@ -1,6 +1,6 @@
 # 引用 cnequity
 
-如果 cnequity 帮助了你的论文、研究报告或数据工程，请引用仓库。GitHub 会读取根目录的 [`CITATION.cff`](https://github.com/rootSunc/cnequity/blob/main/CITATION.cff)，并在仓库首页提供 “Cite this repository” 入口。
+如果 cnequity 帮助了你的论文、研究报告或数据工程，请引用仓库。GitHub 会读取根目录的 [`CITATION.cff`](https://github.com/rootSunc/CNEquity/blob/main/CITATION.cff)，并在仓库首页提供 “Cite this repository” 入口。
 
 ## 软件引用
 
@@ -8,7 +8,7 @@
 CNEquity Contributors. (2026). CNEquity: A free, self-hosted historical
 financial data infrastructure for China markets, starting with A-shares
 (Version 0.8.0). Apache-2.0.
-https://github.com/rootSunc/cnequity
+https://github.com/rootSunc/CNEquity
 ```
 
 版本化研究请同时记录：

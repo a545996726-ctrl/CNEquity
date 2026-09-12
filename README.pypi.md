@@ -48,12 +48,12 @@ cne run daily --config configs/cnequity.toml
 ```
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/rootSunc/cnequity/main/docs/assets/cne-demo.png" alt="cne demo" width="820" />
+  <img src="https://raw.githubusercontent.com/rootSunc/CNEquity/main/docs/assets/cne-demo.png" alt="cne demo" width="820" />
 </p>
 
 ## 有什么数据
 
-数据集名即 `load()` 的第一个参数。字段见 [schema](https://github.com/rootSunc/cnequity/blob/main/docs/datasets/schema.md)，编排元数据见 [catalog](https://github.com/rootSunc/cnequity/blob/main/docs/datasets/catalog.md)。
+数据集名即 `load()` 的第一个参数。字段见 [schema](https://github.com/rootSunc/CNEquity/blob/main/docs/datasets/schema.md)，编排元数据见 [catalog](https://github.com/rootSunc/CNEquity/blob/main/docs/datasets/catalog.md)。
 
 | 类别 | 数据集 |
 |------|--------|
@@ -82,8 +82,8 @@ roe = load("financial_statement_items", items=["roe"], as_of="2024-04-30")
 
 详细 schema、runbook、定位对照与合规说明以 GitHub 为准：
 
-- [仓库](https://github.com/rootSunc/cnequity)
-- [文档站](https://rootsunc.github.io/cnequity/) · [仓库文档](https://github.com/rootSunc/cnequity/tree/main/docs)
-- [Changelog](https://github.com/rootSunc/cnequity/blob/main/CHANGELOG.md)
+- [仓库](https://github.com/rootSunc/CNEquity)
+- [文档站](https://rootsunc.github.io/CNEquity/) · [仓库文档](https://github.com/rootSunc/CNEquity/tree/main/docs)
+- [Changelog](https://github.com/rootSunc/CNEquity/blob/main/CHANGELOG.md)
 
 代码 Apache-2.0。落盘行情 / 公告仍受上游条款约束——本包不附带、也不再分发数据湖。

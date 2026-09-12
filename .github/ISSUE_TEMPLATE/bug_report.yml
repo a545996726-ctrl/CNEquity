@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         感谢反馈。**安全问题**请走
-        [SECURITY.md](https://github.com/rootSunc/cnequity/security/advisories/new)，
+        [SECURITY.md](https://github.com/rootSunc/CNEquity/security/advisories/new)，
         不要开公开 issue。
   - type: textarea
     id: what

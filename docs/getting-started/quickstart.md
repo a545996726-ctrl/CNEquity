@@ -99,7 +99,7 @@ init 耗时较长（全市场日线分页回填），建议在稳定网络下运
 验收脚本在 GitHub 仓库的 `scripts/`，**不随 PyPI 包安装**。有 checkout 时：
 
 ```bash
-git clone https://github.com/rootSunc/cnequity.git
+git clone https://github.com/rootSunc/CNEquity.git
 cd cnequity
 python scripts/accept_backfill.py snapshot --out /tmp/curated-counts.json
 # 同窗口重跑 daily 后对比

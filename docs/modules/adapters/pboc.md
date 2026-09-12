@@ -32,7 +32,7 @@
 154 507。**所以问题不只是慢，而是它在传播一个已被修正的数值**——这种源作为备源也
 不安全（ADR-0003：备源不得静默写 canonical），因此直接移除，不保留 failover。
 
-见 [issue #10](https://github.com/rootSunc/cnequity/issues/10)。
+见 [issue #10](https://github.com/rootSunc/CNEquity/issues/10)。
 
 ---
 

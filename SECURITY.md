@@ -10,7 +10,7 @@
 
 优先任选其一：
 
-1. [GitHub Security Advisories](https://github.com/rootSunc/cnequity/security/advisories/new)
+1. [GitHub Security Advisories](https://github.com/rootSunc/CNEquity/security/advisories/new)
    （私密报告），或
 2. 通过仓库所有者（GitHub：`rootSunc`）建立私密联系渠道。
 

@@ -161,7 +161,7 @@ bars = load("daily_bars")</code></pre>
   </div>
   <div class="cne-actions">
     <a class="cne-button cne-button--primary" href="getting-started/installation/">开始安装 <span aria-hidden="true">→</span></a>
-    <a class="cne-button cne-button--ghost" href="https://github.com/rootSunc/cnequity">查看 GitHub</a>
+    <a class="cne-button cne-button--ghost" href="https://github.com/rootSunc/CNEquity">查看 GitHub</a>
   </div>
 </section>
 

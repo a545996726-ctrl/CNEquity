@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         这张表用于上游数据源回归，不要附带湖数据或代理凭据。
-        安全问题请走私密 [SECURITY.md](https://github.com/rootSunc/cnequity/security/advisories/new)。
+        安全问题请走私密 [SECURITY.md](https://github.com/rootSunc/CNEquity/security/advisories/new)。
   - type: input
     id: source
     attributes:

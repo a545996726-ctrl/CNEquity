@@ -1,8 +1,8 @@
 site_name: CNEquity
 site_description: 可日更、可溯源的 A 股研究数据湖
-site_url: https://rootsunc.github.io/cnequity/
-repo_name: rootSunc/cnequity
-repo_url: https://github.com/rootSunc/cnequity
+site_url: https://rootsunc.github.io/CNEquity/
+repo_name: rootSunc/CNEquity
+repo_url: https://github.com/rootSunc/CNEquity
 edit_uri: edit/main/docs/
 exclude_docs: "/README.md"
 
@@ -105,7 +105,7 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/rootSunc/cnequity
+      link: https://github.com/rootSunc/CNEquity
       name: GitHub
   generator: false
 
