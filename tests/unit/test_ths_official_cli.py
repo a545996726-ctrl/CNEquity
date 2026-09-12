@@ -1,0 +1,79 @@
+"""The `cne ths-official` surface.
+
+The integration is optional, so the property that matters most is what happens
+without a key: every command reports that it was skipped and touches nothing.
+"""
+
+import json
+
+import pytest
+from click.testing import CliRunner
+
+from cnequity.cli.main import cli
+from cnequity.config.bootstrap import path_for_toml
+
+
+@pytest.fixture
+def lake_config(tmp_path):
+    path = tmp_path / "cnequity.toml"
+    path.write_text(f'[data]\nroot = "{path_for_toml(tmp_path / "lake")}"\n')
+    return str(path)
+
+
+def _run(args):
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)
+
+
+@pytest.mark.parametrize("command", ["snapshot", "backfill", "repair-bars"])
+def test_every_command_is_inert_without_a_key(command, lake_config, monkeypatch):
+    """A lake with no key keeps the sources it already has, and says so."""
+    monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
+    out = _run(["ths-official", command, "--config", lake_config])
+    assert out["status"] == "skipped"
+    assert "no API key" in out["reason"]
+
+
+def test_a_key_alone_does_not_enable_the_source(lake_config, monkeypatch):
+    """Holding a credential is not the same as opting the lake into the source."""
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "sk-test")
+    out = _run(["ths-official", "snapshot", "--config", lake_config])
+    assert out["status"] == "skipped"
+    assert "enabled = true" in out["reason"]
+
+
+def test_backfill_needs_its_own_switch(tmp_path, monkeypatch):
+    """Verification and content are separate switches, on purpose.
+
+    Sharing one would make "check my data against a licensed peer" also mean
+    "and rewrite nine years of it".
+    """
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "sk-test")
+    path = tmp_path / "cnequity.toml"
+    path.write_text(
+        f'[data]\nroot = "{path_for_toml(tmp_path / "lake")}"\n\n'
+        "[sources.ths_official]\nenabled = true\nverify = true\nbackfill = false\n"
+    )
+    out = _run(["ths-official", "backfill", "--config", str(path)])
+    assert out["status"] == "skipped"
+    assert "backfill = true" in out["reason"]
+
+
+def test_repair_bars_refuses_to_apply_without_the_content_switch(tmp_path, monkeypatch):
+    """Switching an existing canonical owner is never a side effect of a flag."""
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "sk-test")
+    path = tmp_path / "cnequity.toml"
+    path.write_text(
+        f'[data]\nroot = "{path_for_toml(tmp_path / "lake")}"\n\n'
+        "[sources.ths_official]\nenabled = true\nbackfill = false\n"
+    )
+    out = _run(["ths-official", "repair-bars", "--config", str(path), "--apply"])
+    assert out["status"] == "skipped"
+    assert "backfill = true" in out["reason"]
+
+
+def test_the_group_is_discoverable_from_the_root_help():
+    result = CliRunner().invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "ths-official" in result.output

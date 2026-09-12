@@ -24,6 +24,7 @@ from cnequity.cli import (  # noqa: F401
     quality_cmds,
     run_cmds,
     setup_cmds,
+    ths_official_cmds,
 )
 from cnequity.cli._root import cli
 from cnequity.cli._shared import (  # noqa: F401 — the documented config contract
