@@ -374,7 +374,7 @@ cne backfill daily_bars --start 2001-01-01
 
 - [快速开始](docs/getting-started/quickstart.md) · [CLI 参考](docs/reference/cli.md) · [完整文档索引](docs/README.md)
 - [数据集目录](docs/datasets/catalog.md) · [MCP 参考](docs/reference/mcp.md) · [运维手册](docs/operations/runbook.md)
-- [ROADMAP](ROADMAP.md) · [CHANGELOG](CHANGELOG.md) · [贡献指南](.github/CONTRIBUTING.md) · [安全策略](SECURITY.md)
+- [ROADMAP](ROADMAP.md) · [CHANGELOG](CHANGELOG.md) · [安全策略](SECURITY.md)
 
 这是个人维护的开源项目，issue 和 PR 都欢迎。用于论文或研究报告时，可引用仓库中的 [CITATION.cff](CITATION.cff)，并记录版本、覆盖范围及复权 / PIT 口径。
 

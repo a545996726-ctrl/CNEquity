@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
 from click.testing import CliRunner
 
 from cnequity.cli.main import cli
@@ -32,8 +36,6 @@ def test_the_declared_version_is_the_packaged_version():
     A release bumps pyproject and can silently leave the module behind; the
     wheel then reports one version and `cne --version` another.
     """
-    import tomllib
-
     from cnequity import __version__
 
     with (ROOT / "pyproject.toml").open("rb") as fh:
@@ -45,8 +47,6 @@ def test_the_declared_version_is_the_packaged_version():
 
 def test_the_release_contract_for_this_version_exists():
     """The release workflow fails on a missing contract; fail here instead."""
-    import tomllib
-
     with (ROOT / "pyproject.toml").open("rb") as fh:
         version = tomllib.load(fh)["project"]["version"]
     assert (ROOT / "contracts" / f"v{version}.json").is_file(), (

@@ -286,7 +286,7 @@ More: [troubleshooting](docs/operations/troubleshooting.md) ·
 ## Project status and docs
 
 Personal project: issues and PRs welcome, responses best-effort. See the current [ROADMAP](ROADMAP.md).
-[CONTRIBUTING](.github/CONTRIBUTING.md) · [SECURITY](SECURITY.md) ·
+[SECURITY](SECURITY.md) ·
 [CHANGELOG](CHANGELOG.md).
 
 Full index: [docs/README.md](docs/README.md). Common entry points:
