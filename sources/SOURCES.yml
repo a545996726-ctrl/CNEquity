@@ -205,6 +205,29 @@ sources:
     notes: 用于行业板块行情及历史回填。许可协议把明确标识的免费产品限定为自用、非商业使用且不得复制、分发；商业销售、复制或分发须书面授权。当前适配器访问公开页面，并非已登记 iFinD QuantAPI 客户端；官方 QuantAPI 免费额度不能自动授权当前适配器或数据再分发。
     derived: false
 
+  bse:
+    owner: 北京证券交易所（Beijing Stock Exchange）
+    access_type: official_public_http_endpoint
+    tos_url: unknown
+    tos_reviewed_at: unknown
+    authentication: none_observed
+    personal_use: unknown
+    commercial_use: unknown
+    cache_allowed: unknown
+    redistribution: unknown
+    rate_limit: unknown
+    retained_payloads: unknown
+    legal_status: unknown
+    notes: 北交所官网行情页背后的 JSONP 接口（www.bse.cn/nqhqController/nqhq_en.do，Referer 指向
+      /nq/quotation.html），分页返回上市板块的当日收盘快照，用作 daily_bars 的 BJ 行情来源。这是一个
+      tip 源：只给最新一个交易日，不提供历史序列，所以调用方必须校验返回日期而不能把它盖到旧分区上。
+      端点要求浏览器形态的 User-Agent 与 Referer。与 exchange 标签区分开：那个覆盖沪深两所自行发布的
+      文件与接口，本条是北交所自己的行情端点。curated 里还存在 bse_listed_company_snapshot（2 行）与
+      bse_public_announcement（705 行，trading_status）两个子标签，当前代码库里没有任何适配器再产生
+      它们；子标签按前缀继承本条政策。站点在境外出口返回 403（2026-09-13 实测，条款页同样不可达），
+      因此版权声明与再分发条件均未核实，权限字段保持 unknown。
+    derived: false
+
   ths_official:
     owner: 同花顺（HiThink）金融数据 API — fuyao.aicubes.cn
     access_type: authenticated_rest_api

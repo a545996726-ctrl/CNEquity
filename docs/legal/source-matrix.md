@@ -6,7 +6,7 @@
 
 矩阵的来源集合来自 `src/cnequity/domain/datasets.py` 中每个 `DatasetSpec` 的 `primary_source`、`backup_source` 和 `backfill_source`。因此备源和只用于历史回填的来源也必须登记。`derived` 是一个特殊的显式来源标签：它表示本地派生结果，不能把它当作独立的数据许可来源。
 
-当前登记覆盖 12 个来源标签。可以用下面的只读检查确认注册表与矩阵仍然一致：
+当前登记覆盖 14 个来源标签。可以用下面的只读检查确认注册表与矩阵仍然一致：
 
 ```python
 from cnequity.compliance.source_policy import load_source_policies, required_sources
@@ -15,7 +15,14 @@ policies = load_source_policies()
 assert required_sources() <= policies.keys()
 ```
 
-截至 2026-08-29，矩阵已经记录东方财富和同花顺的官方用户许可页面及限制性结论；其余来源仍保持待核实状态。这里的“已审阅”只表示维护者把页面中的明确限制转换为保守的机器状态，不等于律师出具的完整法律意见。
+截至 2026-08-29，矩阵已经记录东方财富和同花顺的官方用户许可页面及限制性结论；其余来源仍保持待核实状态。
+
+2026-09-13 新增 `ths_official`（同花顺官方 API，fuyao.aicubes.cn）。它与 `ths` 是两个不同的来源标签：`ths` 抓取 10jqka 公开页面且并非已登记客户端，`ths_official` 是账号签发 API Key 的已登记客户端，因此 `authentication` 记为 `api_key`。但站内文档（含 llms-full.txt 全文聚合）没有任何关于数据商用、再分发、缓存或留存的条款，只有一句「数据权限以官网与账号授权为准」，所以 `commercial_use`、`redistribution`、`cache_allowed` 全部保持 `unknown`，`cne sources policy ths_official` 因此返回 `review_required`。上游仓库的 MIT 许可只覆盖代码，不涉及数据。
+
+同日补登 `bse`（北京证券交易所）。它此前从未登记，却已向 `daily_bars` 写入 654 行、向
+`trading_status` 写入两个子标签，使得 `cne sources policy bse` 查不到任何条款。
+北交所站点在境外出口返回 403，条款页不可达，因此权限字段全部保持 `unknown`。
+子标签 `bse_*` 按前缀继承本条政策，无需改动适配器。这里的“已审阅”只表示维护者把页面中的明确限制转换为保守的机器状态，不等于律师出具的完整法律意见。
 
 ## 字段与保守语义
 

@@ -151,6 +151,26 @@ bars_15m = (
 
 ---
 
+## 需要 API Key 的覆盖区间
+
+同花顺官方 API（`ths_official`）是**可选源**：没有 Key 的湖保持原有来源，日更不受影响
+（见 [ADR-0008](../adr/0008-optional-keyed-sources.md)）。它已经改变的覆盖如下，
+`source` 列可直接分辨：
+
+| 数据集 | 区间 | 行数 | 说明 |
+|---|---|---|---|
+| `financial_statement_items` | 2016–2024 的 `balance` / `cashflow` | 1,495,007 | 此前这两张表在该区间覆盖 0–37 只标的，而 `income` 是 4,623–5,558。披露日借自同期 `income` 行 |
+| `daily_bars` | 2005-01-01 – 2015-12-31 | 4,398,523 | 由非官方 `ths` 抓取换为持牌来源，占该区间 98.68%。2005 年前够不到服务端历史下界 |
+
+以下能力只写 `meta/source_snapshots`，**不进 curated**，仅供 `cne audit` 的仲裁检查使用：
+`adj_factor_arbitration`、`daily_bars_arbitration`、`financial_statement_peer`。
+无快照时它们静默，不影响其余检查。
+
+估值快照是唯一**只能向前累积**的一项：上游不提供估值历史，当天没采就永远补不回来，
+因此 `ths_official_snapshot` 步骤配置在日更 `finalize` wave 的 `audit` 之前。
+
+完整背景见 [docs/development/ths-official-integration.md](../development/ths-official-integration.md)。
+
 ## 溯源列（所有 curated 行）
 
 | 列 | 类型 | 说明 |

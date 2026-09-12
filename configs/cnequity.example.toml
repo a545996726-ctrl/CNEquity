@@ -360,7 +360,16 @@ steps = ["index_bars"]
 [[job.daily.waves]]
 name = "finalize"
 parallel = false
-steps = ["compact", "derive_adj_factors", "derive_industry_index", "audit"]
+# `ths_official_snapshot` refreshes the peer data `audit` arbitrates against.
+# Without it those checks are permanently silent — nothing else writes the
+# snapshots they read. It skips itself when no key is configured.
+steps = [
+    "compact",
+    "derive_adj_factors",
+    "derive_industry_index",
+    "ths_official_snapshot",
+    "audit",
+]
 
 # Group start times. Every `daily*` job takes the same non-blocking
 # `daily_ingestion` lock, so a group that is still running when the next one
