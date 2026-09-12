@@ -5,7 +5,7 @@
 # Each commit below was verified to change no behavior.
 
 # style: apply ruff formatting (53 files)
-f209d5b88a7fa1c349dffafe6f1606fbdd221899
+7badf0f1e5dd279e59c4e3fbaa8f2aaf9c5fb9fd
 
 # fix: apply ruff formatting so CI quality job passes (46 files)
-7b34ca73ef4508ea4f91c7abc5f064c0af0e2dad
+4564e2fdeb83ef1f4646e9f6ff1908eac9aa8610
