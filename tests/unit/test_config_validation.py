@@ -442,7 +442,7 @@ def test_rate_limited_sources_are_all_declared_in_the_example_config():
 
 def _write_config(tmp_path, body: str) -> Path:
     path = tmp_path / "cnequity.toml"
-    path.write_text(f'[data]\nroot = "{tmp_path / "lake"}"\n\n{body}')
+    path.write_text(f'[data]\nroot = "{path_for_toml(tmp_path / "lake")}"\n\n{body}')
     return path
 
 
