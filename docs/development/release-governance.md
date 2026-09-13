@@ -54,9 +54,23 @@ does not depend on the state of any particular user's lake.
 A package release and a production-readiness claim are deliberately separate.
 Operators who claim that a deployed lake is production-ready should retain a
 current report with the required consecutive trading days, a passing 30-day
-source SLO, and no hidden core failures. `release-evidence/` and
-`scripts/validate_release_evidence.py` provide a strict, optional format for
-that claim; those reports are not required to tag or publish the package.
+source SLO, and no hidden core failures. `scripts/validate_release_evidence.py`
+provides a strict, optional format for that claim; those reports are not
+required to tag or publish the package. Generate them from the production lake
+into a directory of your own:
+
+```bash
+cne stability --config /path/to/production.toml --days 20 --enforce \
+  > evidence/vX.Y.Z/stability-20d.json
+cne sources slo --config /path/to/production.toml \
+  --window-days 30 --minimum-observations 10 --enforce \
+  > evidence/vX.Y.Z/source-slo-30d.json
+python scripts/validate_release_evidence.py evidence/vX.Y.Z
+```
+
+Both reports must be produced within seven days of the release, pass their
+native gates, and contain no failing critical source or open source incident.
+Never copy reports from a fixture or temporary lake.
 
 The clean CI runner must not run stability or source-SLO checks against an
 empty fixture lake and describe them as production evidence. Unknown source
