@@ -54,6 +54,13 @@ GROUP_LIST="${CNE_GROUPS:-core capital signals fundamentals macro_risk research}
 GATE_GROUP_LIST="${CNE_GATE_GROUPS:-core}"
 # Overseas Mac: expected EM lag must not paint the whole day red.
 SOFT_FAIL_OK="${CNE_SOFT_FAIL_OK:-1}"
+# ...but a soft group that fails every day is an outage, not lag. One bad day
+# is noise; three in a row is the failure mode the runbook records — default
+# SOFT_FAIL_OK=1 hid a soft group for three days and nobody noticed. Track the
+# consecutive-failure streak per group and escalate on persistence instead of
+# on a single result. 0 disables escalation.
+SOFT_FAIL_MAX_DAYS="${CNE_SOFT_FAIL_MAX_DAYS:-3}"
+SOFT_STREAK_DIR="${CNE_SOFT_STREAK_DIR:-$LOG_DIR/../state/soft_streak}"
 STALE_RETRY="${CNE_STALE_RETRY:-0}"
 STALE_RETRY_DELAY_SEC="${CNE_STALE_RETRY_DELAY_SEC:-1800}"
 SOURCE_HEALTH="${CNE_SOURCE_HEALTH:-1}"
@@ -196,8 +203,46 @@ while [[ $i -lt ${#summary_names[@]} ]]; do
 done
 log "  stale-retry: ${stale_retry_status}"
 
+# Update the per-group consecutive-failure streaks before deciding the exit
+# code. A group that succeeded today has its streak cleared; one that failed
+# has it incremented, and crossing the threshold escalates a warn-only day
+# into a red one.
+escalated=()
+if [[ "$SOFT_FAIL_MAX_DAYS" != "0" ]]; then
+  mkdir -p "$SOFT_STREAK_DIR" 2>/dev/null || true
+  i=0
+  while [[ $i -lt ${#summary_names[@]} ]]; do
+    name="${summary_names[$i]}"
+    streak_file="$SOFT_STREAK_DIR/$name"
+    if _is_gate_group "$name"; then
+      i=$((i + 1))
+      continue
+    fi
+    if [[ "${summary_status[$i]}" == "OK" ]]; then
+      rm -f "$streak_file" 2>/dev/null || true
+    else
+      previous=0
+      [[ -f "$streak_file" ]] && previous="$(cat "$streak_file" 2>/dev/null || echo 0)"
+      [[ "$previous" =~ ^[0-9]+$ ]] || previous=0
+      current=$((previous + 1))
+      echo "$current" >"$streak_file" 2>/dev/null || true
+      log "  soft streak: $name failed ${current} day(s) in a row"
+      if [[ $current -ge $SOFT_FAIL_MAX_DAYS ]]; then
+        escalated+=("$name:${current}d")
+      fi
+    fi
+    i=$((i + 1))
+  done
+fi
+
 if [[ ${#gate_failed[@]} -gt 0 ]]; then
   log "==== daily pipeline DONE — GATE FAILED: ${gate_failed[*]} (soft also: ${soft_failed[*]:-none}) ===="
+  exit 1
+fi
+if [[ ${#escalated[@]} -gt 0 ]]; then
+  log "==== daily pipeline DONE — SOFT GROUP DOWN ${SOFT_FAIL_MAX_DAYS}+ DAYS: ${escalated[*]} ===="
+  log "     (a soft failure this persistent is an outage, not expected lag;"
+  log "      raise CNE_SOFT_FAIL_MAX_DAYS or fix the source)"
   exit 1
 fi
 if [[ ${#soft_failed[@]} -gt 0 ]]; then

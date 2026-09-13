@@ -15,11 +15,6 @@
   <b>42 个数据集 · 39 curated + 3 derived · Python / DuckDB / Polars / MCP</b>
 </p>
 
-<p align="center">
-  <img src="docs/assets/cne-serve-hero-demo.png" alt="CNEquity 数据运维页面：湖状态、覆盖热力与行动项" width="1100" />
-</p>
-
-> 图为 README 演示用的合成数据，页面上标有 `ILLUSTRATIVE DEMO`；满覆盖热力不是对当前生产湖的声明。
 
 <p align="center">
   <a href="https://rootsunc.github.io/CNEquity/getting-started/quickstart/">快速开始</a> ·

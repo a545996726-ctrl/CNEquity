@@ -531,3 +531,68 @@ def test_raw_archive_rejects_same_size_payload_tampering(tmp_path):
         archive.records("financial_statement_items")
     with pytest.raises(RawArchiveError):
         archive.archive("financial_statement_items", {"value": 1}, source="eastmoney")
+
+
+def test_prune_keeps_the_pointer_and_the_newest_generations(tmp_path):
+    """Retention bounds the store without breaking the lake anyone reads.
+
+    A commit copies the whole dataset into a new generation and nothing ever
+    removed one, so the store grew by the dataset's size per run — 16 GB
+    against 14 GB of curated data on a two-year lake. Pruning drops the bytes
+    of old generations; it must never drop the one `current.json` resolves to,
+    and it must leave every receipt in place, because the receipt is the
+    lineage record and costs a few KB.
+    """
+    from cnequity.storage.revisions import prune_revision_generations
+
+    cfg = Config(data_root=tmp_path / "data")
+    path = cfg.curated_root / "daily_bars/trade_date=2026-01-01/part.parquet"
+    store = RevisionStore(cfg.meta_root, cfg.curated_root)
+
+    for index in range(6):
+        _bars(path, date(2026, 1, 1), 10.0 + index)
+        assert store.commit(
+            "daily_bars",
+            run_id=f"r-{index}",
+            changed_files=[path],
+            schema_version=1,
+            contract_fingerprint="contract",
+        )
+
+    generations = cfg.meta_root / "revisions" / "data" / "daily_bars"
+    receipts = cfg.meta_root / "revisions" / "daily_bars"
+    before = {p.name for p in generations.iterdir()}
+    assert len(before) >= 6
+    receipts_before = {p.name for p in receipts.glob("*.json")}
+    current_before = store.current_root("daily_bars")
+
+    dry = prune_revision_generations(cfg.meta_root, keep=2, dry_run=True)
+    assert dry, "there is something to prune"
+    assert {p.name for p in generations.iterdir()} == before, "dry run must not delete"
+
+    prune_revision_generations(cfg.meta_root, keep=2)
+
+    after = {p.name for p in generations.iterdir()}
+    assert after < before and len(after) <= 3
+    # The generation every reader resolves to survived, and still reads.
+    assert current_before is not None and current_before.is_dir()
+    assert store.current_root("daily_bars") == current_before
+    assert load("daily_bars", config=cfg)["close"].to_list() == [15.0]
+    # Lineage is untouched: receipts are the record, generations are the bytes.
+    assert {p.name for p in receipts.glob("*.json")} == receipts_before
+
+
+def test_prune_keeps_what_the_pointer_resolves_to_even_at_keep_one(tmp_path):
+    """`keep=1` is the most aggressive setting and must still leave a readable lake."""
+    from cnequity.storage.revisions import prune_revision_generations
+
+    cfg, store, _path = _revision_lake(tmp_path, 10.0)
+    generations = cfg.meta_root / "revisions" / "data" / "daily_bars"
+    current = store.current_root("daily_bars")
+
+    prune_revision_generations(cfg.meta_root, keep=1)
+
+    assert current is not None and current.is_dir()
+    assert store.current_root("daily_bars") == current
+    assert load("daily_bars", config=cfg)["close"].to_list() == [10.0]
+    assert list(generations.iterdir()), "at least the pointed-to generation remains"

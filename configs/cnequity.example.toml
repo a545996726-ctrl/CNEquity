@@ -30,6 +30,19 @@ batch_stale_seconds = 3600  # running batches without heartbeat for this long �
 # missing key; instrument catalog revisions still invalidate live evidence.
 negative_evidence_ttl_days = 7
 
+[quality]
+# What a run does when the lake audit reports `error` findings.
+#   off    — record nothing, never fail (pre-0.8.2 behaviour)
+#   shadow — record what would have been blocked, but let the run succeed
+#   block  — fail the run, so `cne status` and the pipeline exit code see it
+# The audit step depends on `compact`, so it runs *after* the rows are in
+# curated: blocking fails the run, it does not prevent the write. Shadow mode
+# appends one line per affected run to `meta/quality/audit_gate.jsonl`, which
+# is what to read before switching this to "block" — a gate turned on without
+# knowing how often it fires is a gate that gets turned off again.
+# Only `error` gates; the 32 checks that emit `warning` never do.
+audit_gate = "shadow"
+
 [tdx_protocol]
 enabled = true
 # Cross-process paced; 100ms is safer for long daily sweeps than 50ms.

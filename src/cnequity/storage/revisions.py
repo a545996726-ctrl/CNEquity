@@ -840,3 +840,110 @@ def committed_revision(
     if pointer is None:
         return None
     return int(pointer["revision"]), str(pointer["revision_id"])
+
+
+@dataclass(frozen=True)
+class GenerationPruneResult:
+    """What a generation prune removed, per dataset."""
+
+    dataset: str
+    removed_revision_ids: tuple[str, ...]
+    kept_revision_ids: tuple[str, ...]
+    freed_bytes: int
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            info = entry.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            total += info.st_size
+    return total
+
+
+def prune_revision_generations(
+    meta_root: Path | str,
+    *,
+    keep: int = 5,
+    dry_run: bool = False,
+) -> list[GenerationPruneResult]:
+    """Drop the stored bytes of all but the newest *keep* generations.
+
+    A commit copies the whole dataset into a new immutable generation, so the
+    store grows by the dataset's full size per commit and nothing ever removed
+    one: 307 generations and 16 GB on a two-year lake, of which ``adj_factors``
+    alone was 46 generations and 9.5 GB — larger than ``curated/`` itself.
+
+    Receipts are deliberately kept. They are a few KB each and carry the
+    lineage: run id, code version, config fingerprint and the per-file sha256
+    of the generation. Pruning removes the ability to *read* an old revision,
+    not the record that it existed or the evidence of what was in it.
+
+    The generation named by ``current.json`` is always kept, whatever *keep*
+    says, because it is what every reader resolves to.
+    """
+    root = Path(meta_root).expanduser() / "revisions"
+    if not root.is_dir():
+        return []
+    keep = max(1, int(keep))
+    results: list[GenerationPruneResult] = []
+
+    for dataset_dir in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "data"):
+        dataset = dataset_dir.name
+        generations_root = root / "data" / dataset
+        if not generations_root.is_dir():
+            continue
+
+        # Receipts are named ``<zero-padded revision>-<revision_id>.json``, so
+        # the filename alone orders them without opening every file.
+        receipts: list[tuple[int, str]] = []
+        for receipt in generations_root.parent.parent.joinpath(dataset).glob("*.json"):
+            if receipt.name == "current.json":
+                continue
+            number, _, remainder = receipt.stem.partition("-")
+            if not number.isdigit() or not remainder:
+                continue
+            receipts.append((int(number), remainder))
+        # The pre-revision baseline has no receipt, so without this it would
+        # be dropped whatever ``keep`` said. It is generation zero; order it
+        # as one so ``keep`` covers it like any other.
+        if (generations_root / _LEGACY_REVISION_ID).is_dir():
+            receipts.append((0, _LEGACY_REVISION_ID))
+        receipts.sort()
+
+        protected = {revision_id for _, revision_id in receipts[-keep:]}
+        current = _read_json_quietly(dataset_dir / "current.json")
+        current_id = str(current.get("revision_id", "")).strip() if current else ""
+        if current_id:
+            protected.add(current_id)
+
+        removed: list[str] = []
+        freed = 0
+        for generation in sorted(p for p in generations_root.iterdir() if p.is_dir()):
+            if generation.name in protected:
+                continue
+            freed += _directory_size(generation)
+            removed.append(generation.name)
+            if not dry_run:
+                shutil.rmtree(generation, ignore_errors=True)
+
+        if removed:
+            results.append(
+                GenerationPruneResult(
+                    dataset=dataset,
+                    removed_revision_ids=tuple(removed),
+                    kept_revision_ids=tuple(sorted(protected)),
+                    freed_bytes=freed,
+                )
+            )
+    return results
+
+
+def _read_json_quietly(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None

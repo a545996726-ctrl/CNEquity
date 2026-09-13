@@ -220,6 +220,11 @@ class Config:
     # Keep the option at the end so historical positional Config(...) callers
     # retain their argument order.
     negative_evidence_ttl_days: int = 7
+    # "off" | "shadow" | "block".  The audit runs after compact, so it has
+    # never been able to stop bad data reaching curated; "shadow" records what
+    # it would have blocked so the gate can be switched on with evidence
+    # rather than optimism.  See [quality].audit_gate.
+    audit_gate: str = "shadow"
     # Keep new compatibility options at the end for the same reason. If an
     # explicit proxy fails only for push2his, this permits one retry without
     # proxy/environment routing; default-off avoids bypassing mandatory proxy
@@ -648,6 +653,9 @@ def load_config(path: str | Path) -> Config:
     failover_raw = raw.get("failover", {})
     exchange_audit_raw = raw.get("exchange_audit", {})
     incremental_raw = raw.get("incremental", {})
+    quality_raw = raw.get("quality", {})
+    if not isinstance(quality_raw, dict):
+        quality_raw = {}
     raw_archive_raw = raw.get("raw_archive", {})
     if not isinstance(raw_archive_raw, dict):
         raw_archive_raw = {}
@@ -767,6 +775,7 @@ def load_config(path: str | Path) -> Config:
             exchange_audit_raw.get("turnover_max_fraction", 0.15)
         ),
         negative_evidence_ttl_days=int(incremental_raw.get("negative_evidence_ttl_days", 7)),
+        audit_gate=str(quality_raw.get("audit_gate", "shadow")).strip().lower(),
         config_path=config_path,
     )
     return cfg
@@ -831,6 +840,8 @@ def validate_config(cfg: Config) -> list[str]:
         errors.append("orchestrator.batch_size must be >= 1")
     if cfg.negative_evidence_ttl_days < 0:
         errors.append("[incremental].negative_evidence_ttl_days must be >= 0")
+    if cfg.audit_gate not in {"off", "shadow", "block"}:
+        errors.append("[quality].audit_gate must be one of: off, shadow, block")
     if cfg.raw_archive_compression not in {"gzip", "none"}:
         errors.append("[raw_archive].compression must be 'gzip' or 'none'")
     if cfg.raw_archive_max_payload_bytes is not None and cfg.raw_archive_max_payload_bytes < 1:

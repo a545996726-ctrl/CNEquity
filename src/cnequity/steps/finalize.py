@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, timedelta
 from pathlib import Path
@@ -776,17 +777,68 @@ def step_audit(config: Config, trade_date: date, run_id: str, context: dict) -> 
     from cnequity.quality.audit import run_audit
 
     findings = run_audit(config, run_id, trade_date, context)
+    by_severity = context.get("audit_by_severity", {}) if isinstance(context, dict) else {}
+    errors = int(by_severity.get("error", 0))
+
+    # This step depends on `compact`, so by the time it runs the rows are
+    # already in curated: the audit has never been able to *prevent* anything,
+    # only describe it afterwards. `aggregate_run_status` already fails a run
+    # on a core step that failed, so the missing piece was only ever this
+    # status. Recording the verdict in shadow mode first means the gate can be
+    # switched on against measured evidence rather than a guess about how many
+    # runs it would have stopped.
+    gate = getattr(config, "audit_gate", "shadow")
+    would_block = errors > 0
+    status = "failed" if (would_block and gate == "block") else "success"
+    if would_block and gate != "off":
+        _record_audit_gate_verdict(config, run_id, trade_date, gate, by_severity)
+        logger.warning(
+            "audit gate (%s): %d error finding(s)%s",
+            gate,
+            errors,
+            " — failing this run" if gate == "block" else " would have failed this run",
+        )
+
     out = {"rows_read": findings, "rows_written": findings}
     _record_dataset_result(
         config,
         run_id,
         "audit",
         "audit",
-        "success",
+        status,
         criticality="core",
         rows_written=findings,
     )
     return out
+
+
+def _record_audit_gate_verdict(
+    config: Config,
+    run_id: str,
+    trade_date: date,
+    gate: str,
+    by_severity: dict,
+) -> None:
+    """Append one line of evidence about what the gate did, or would have done.
+
+    A JSONL so a quarter of runs can be read back with one pass before anyone
+    decides to switch `[quality].audit_gate` to "block".
+    """
+    path = config.meta_root / "quality" / "audit_gate.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "run_id": run_id,
+        "trade_date": trade_date.isoformat(),
+        "gate": gate,
+        "blocked": gate == "block",
+        "by_severity": dict(by_severity),
+    }
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        # Evidence is useful, not load-bearing; never fail a run over it.
+        logger.debug("could not append audit gate verdict to %s", path)
 
 
 @register_step(

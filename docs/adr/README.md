@@ -16,3 +16,6 @@ Copy [0000-template.md](0000-template.md) for a new record. Number sequentially.
 | [0007](0007-two-facts-two-columns-in-trading-status.md) | Two facts, two columns, in trading_status |
 | [0008](0008-optional-keyed-sources.md) | Optional keyed sources never own data |
 | [0009](0009-share-dilution-is-one-fact.md) | Share dilution is one fact, however two vendors label it |
+| [0010](0010-bounded-generation-retention.md) | Committed generations are retained by count, not forever |
+| [0011](0011-bitemporal-columns-are-carried-not-required.md) | Bitemporal columns are carried through validation, not added to the schema |
+| [0012](0012-the-audit-gates-in-shadow-first.md) | The audit is a publication gate, and it runs in shadow first |

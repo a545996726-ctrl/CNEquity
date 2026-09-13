@@ -30,6 +30,29 @@ cne contract diff meta/old-contract.json meta/dataset-contract.json
   `financial_statement_items` 及历史股东回填为 `reconstructed`/`partial`，
   `announcement_index` 才是严格 PIT。`availability_col` 默认是
   `announce_date`。
+
+  !!! warning "先看 `pit`，再看 `pit_quality`"
+
+      **`pit_quality` 只在 `pit: true` 时才是一个声明。** 非 PIT 的按日数据
+      没有 PIT 质量可言，但导出的契约必须是完整的（每个数据集每个字段都有
+      值），所以这类表回落到字面量 `strict`——42 个数据集里有 29 个是这种
+      情况，**包括 `daily_bars`**，而真正声明严格 PIT 的只有
+      `announcement_index` 一个。
+
+      单看 `pit_quality` 会把「这张表没人考虑过 PIT」读成「这张表的 PIT 是
+      精确的」。判断依据是 `pit`（布尔）与 `pit_grade`；
+      `pit_storage_columns` 为空同样说明该表没有双时态列。
+
+      ```python
+      spec = contract["datasets"]["daily_bars"]
+      spec["pit"]           # False  ← 这个才是答案
+      spec["pit_grade"]     # "none"
+      spec["pit_quality"]   # "strict" ← 占位值，不是声明
+      ```
+
+      这个命名会在下一个次版本里收敛（新增 `not_applicable`）。那是一次
+      破坏性契约变更：29 个数据集的 `pit_quality` 会改变取值，因此留给带
+      版本号的发布，而不是补丁。
 - `pit_modes` 固定为 `strict` / `best_effort`。strict 只允许在截止日已知的
   vintage；best-effort 可保留回填现值，但返回 `pit_is_exact=False`。
 - `pit_storage_columns` 是可选双时态列：`available_at`、

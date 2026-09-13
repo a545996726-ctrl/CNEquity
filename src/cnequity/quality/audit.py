@@ -463,6 +463,16 @@ def run_audit(config: Config, run_id: str, trade_date: date, context: dict | Non
         default=str,
     )
 
+    by_severity: dict[str, int] = {}
+    for item in findings:
+        key = str(item.get("severity", "info"))
+        by_severity[key] = by_severity.get(key, 0) + 1
+    if context is not None:
+        # The step needs severities, not just a count, to decide whether this
+        # run should have been allowed to publish. The caller already owns
+        # this dict; returning a richer type would break every other caller.
+        context["audit_by_severity"] = by_severity
+
     return len(findings)
 
 

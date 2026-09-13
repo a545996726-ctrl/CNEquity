@@ -24,6 +24,7 @@ from cnequity.domain.market_time import shanghai_today
 from cnequity.orchestrator.engine import JobEngine
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.query.parquet_scan import scan_parquet_files
+from cnequity.storage.revisions import prune_revision_generations
 from cnequity.storage.source_snapshots import (
     DEFAULT_SNAPSHOT_RETENTION_DAYS,
     clean_source_snapshots,
@@ -197,6 +198,18 @@ def derive(name: str, config_path: str, full: bool, start_str: str | None, end_s
     ),
 )
 @click.option(
+    "--keep-revision-generations",
+    default=5,
+    show_default=True,
+    type=int,
+    help=(
+        "Keep this many committed generations per dataset under "
+        "meta/revisions/data; drop the stored bytes of older ones. Receipts are "
+        "always kept, and the generation current.json points at is never "
+        "dropped. 0 disables the prune."
+    ),
+)
+@click.option(
     "--reconcile-runs",
     is_flag=True,
     help="Mark runs stuck in 'running' (crashed workers) as failed before cleanup.",
@@ -213,6 +226,7 @@ def clean(
     dry_run: bool,
     orphan_retention_days: int,
     snapshot_retention_days: int,
+    keep_revision_generations: int,
     force: bool,
     reconcile_runs: bool,
     reconcile_after_seconds: float | None,
@@ -248,6 +262,13 @@ def clean(
         retention_days=snapshot_retention_days,
         dry_run=dry_run,
     )
+    # Each commit copies the whole dataset into a new immutable generation and
+    # nothing removed one, so meta/revisions grew past curated/ itself.
+    generations = (
+        prune_revision_generations(cfg.meta_root, keep=keep_revision_generations, dry_run=dry_run)
+        if keep_revision_generations > 0
+        else []
+    )
     click.echo(
         json.dumps(
             {
@@ -257,12 +278,25 @@ def clean(
                 "orphan_run_ids": result.orphan_run_ids,
                 "force_removed_run_ids": result.force_removed_run_ids,
                 "skipped_run_ids": result.skipped_run_ids,
-                "bytes_freed": result.bytes_freed + snaps.bytes_freed,
+                "bytes_freed": (
+                    result.bytes_freed
+                    + snaps.bytes_freed
+                    + sum(item.freed_bytes for item in generations)
+                ),
                 "source_snapshots": {
                     "removed_run_dirs": snaps.removed_run_dirs,
                     "kept_run_dirs": snaps.kept_run_dirs,
                     "bytes_freed": snaps.bytes_freed,
                 },
+                "revision_generations": [
+                    {
+                        "dataset": item.dataset,
+                        "removed": len(item.removed_revision_ids),
+                        "kept": len(item.kept_revision_ids),
+                        "bytes_freed": item.freed_bytes,
+                    }
+                    for item in generations
+                ],
             },
             indent=2,
         )

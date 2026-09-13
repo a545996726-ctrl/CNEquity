@@ -390,3 +390,72 @@ def test_health_notify_honours_the_same_cne_override_as_the_pipeline(tmp_path):
     # It really went through the stub, not some other cne on the machine.
     assert "audit" in _call_args(calls)
     assert "--datasets" in _call_args(calls)
+
+
+def _soft_fail_env(tmp_path: Path, cne: Path, calls: Path) -> dict[str, str]:
+    env = _stale_env(tmp_path, cne, calls)
+    env.update(
+        {
+            # One soft group, no gate group, so the run is warn-only by default.
+            "CNE_GROUPS": "capital",
+            "CNE_GATE_GROUPS": "core",
+            "CNE_SOFT_FAIL_OK": "1",
+            "CNE_STALE_RETRY": "0",
+            "CNE_SOURCE_HEALTH": "0",
+            "CNE_SOFT_STREAK_DIR": str(tmp_path / "streak"),
+            "CNE_STUB_STATUS": "1",  # the group fails
+        }
+    )
+    return env
+
+
+def test_a_soft_group_down_for_three_days_stops_being_warn_only(tmp_path):
+    """One bad day is noise; three in a row is the outage the runbook records.
+
+    `CNE_SOFT_FAIL_OK=1` made every soft failure exit 0, which is how a group
+    stayed down for three days without anyone noticing. Persistence, not a
+    single result, is what should turn the run red.
+    """
+    cne = _stub_cne(tmp_path)
+    calls = tmp_path / "calls.log"
+    env = _soft_fail_env(tmp_path, cne, calls)
+    env["CNE_SOFT_FAIL_MAX_DAYS"] = "3"
+
+    first = _run(DAILY, env=env)
+    second = _run(DAILY, env=env)
+    assert first.returncode == 0, "one soft failure stays warn-only"
+    assert second.returncode == 0, "two is still within tolerance"
+
+    third = _run(DAILY, env=env)
+    assert third.returncode == 1, "a soft group down three days is an outage"
+
+    log = (tmp_path / "logs").glob("daily-*.log")
+    text = "\n".join(p.read_text(encoding="utf-8") for p in log)
+    assert "SOFT GROUP DOWN" in text
+    assert "capital:3d" in text
+
+
+def test_a_recovered_soft_group_clears_its_streak(tmp_path):
+    cne = _stub_cne(tmp_path)
+    calls = tmp_path / "calls.log"
+    env = _soft_fail_env(tmp_path, cne, calls)
+    env["CNE_SOFT_FAIL_MAX_DAYS"] = "2"
+
+    assert _run(DAILY, env=env).returncode == 0
+    # The source comes back before the threshold is reached.
+    recovered = dict(env, CNE_STUB_STATUS="0")
+    assert _run(DAILY, env=recovered).returncode == 0
+    assert not (tmp_path / "streak" / "capital").exists()
+
+    # The streak restarts from zero rather than resuming where it left off.
+    assert _run(DAILY, env=env).returncode == 0
+
+
+def test_escalation_can_be_disabled(tmp_path):
+    cne = _stub_cne(tmp_path)
+    calls = tmp_path / "calls.log"
+    env = _soft_fail_env(tmp_path, cne, calls)
+    env["CNE_SOFT_FAIL_MAX_DAYS"] = "0"
+
+    for _ in range(4):
+        assert _run(DAILY, env=env).returncode == 0

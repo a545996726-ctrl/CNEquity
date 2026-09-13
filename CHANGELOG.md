@@ -8,6 +8,31 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`cne clean --keep-revision-generations N` (default 5), and
+  [ADR-0010](docs/adr/0010-bounded-generation-retention.md).** Every commit
+  copies the whole dataset into a new immutable generation and nothing ever
+  removed one: 307 generations and 16 GB against 14 GB of curated data, of
+  which `adj_factors` alone was 46 generations and 9.5 GB. Retention drops the
+  bytes of old generations while keeping every receipt — the receipt is the
+  lineage record and costs a few KB — and never touches the generation
+  `current.json` resolves to. On the measured lake it reclaims 11.2 GB of
+  16 GB. The ADR records why hard-linking unchanged files was implemented and
+  reverted instead.
+
+- **`[quality].audit_gate` and pipeline escalation, with
+  [ADR-0012](docs/adr/0012-the-audit-gates-in-shadow-first.md).** 84 checks ran
+  after every load and could not change what a run reported: `step_audit`
+  recorded `success` unconditionally. It can now record `failed` on an `error`
+  finding, and defaults to `shadow` — the run still succeeds, but every
+  affected run appends its severity breakdown to
+  `meta/quality/audit_gate.jsonl`, so the gate can be armed against measured
+  evidence. Separately, `CNE_SOFT_FAIL_MAX_DAYS` (default 3) escalates a soft
+  group that fails several days running: `CNE_SOFT_FAIL_OK=1` made every soft
+  failure exit 0, which is how a group stayed down for three days unnoticed
+  (`docs/operations/runbook.md`). One bad day stays warn-only; three in a row
+  exits 1.
+
+- **`scripts/sync_schema_docs.py`, gated in CI.**
 - **`scripts/sync_schema_docs.py`, gated in CI.** `docs/datasets/schema.md` was
   hand-maintained and had drifted: 11 of the 42 registered datasets had no
   section at all (`top_holders`, `share_structure`, `delisting_events`,
@@ -22,6 +47,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   which is not a PIT dataset, so it read as a property of the wrong table.
 
 ### Fixed
+
+- **`pit_quality` is documented as a placeholder, not a claim.** It falls back
+  to the literal `strict` for any dataset with no point-in-time claim, so 29 of
+  42 datasets publish `strict` — `daily_bars` included — while
+  `announcement_index` is the only genuine one. The contract is complete (it
+  also publishes `pit: false` and `pit_grade: "none"`), but reading
+  `pit_quality` alone inverts the meaning. `docs/datasets/contract.md` now
+  names `pit` as the field to read. Renaming the value is breaking on 29
+  datasets and is left to a versioned release; see the naming-debt section of
+  [ADR-0011](docs/adr/0011-bitemporal-columns-are-carried-not-required.md).
 
 - **The bitemporal PIT columns now reach disk.** `available_at`,
   `source_published_at`, `observed_at` and `revision_id` are declared in the
