@@ -20,11 +20,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   from 0.55 s to 0.003 s, and the full dataset from ~19 s to ~0.1 s, because
   `revision_id` is no longer re-hashed row by row on every read.
 
-  Two consequences worth knowing. `observed_at` is excluded from the
-  business digest alongside `fetched_at` — it is the same fact under its
-  bitemporal name, and counting it would mint a revision on every
-  reconciliation pass. And the stored 64-character digest is not free: across
-  the five PIT datasets it adds roughly 390 MB to 190 MB of curated parquet.
+  Two consequences worth knowing. `observed_at` is excluded from the business
+  digest alongside `fetched_at` — it is the same fact under its bitemporal
+  name, and counting it would mint a revision on every reconciliation pass.
+  And storing a digest per row is not free, so `revision_id` is now a
+  96-bit (24 hex character) truncated SHA-256 rather than the full 64: the
+  chance of any collision across the current 12.2M PIT rows is ~1e-15, and
+  the full width would have added 389 MB to 190 MB of curated parquet instead
+  of 73 MB — every byte of which is also copied into each committed
+  generation. Nothing had persisted the old width, so no migration is needed.
 
 ### Removed
 

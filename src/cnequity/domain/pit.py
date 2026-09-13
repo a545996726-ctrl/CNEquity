@@ -46,6 +46,14 @@ PIT_STORAGE_DTYPES: dict[str, pl.DataType] = {
     "revision_id": pl.Utf8,
 }
 
+# A truncated SHA-256.  This digest identifies a vintage; it is not a security
+# boundary, and it is stored on every row of every PIT dataset, so its width is
+# a storage decision.  At 96 bits the chance of any collision across the
+# current 12.2M PIT rows is ~1e-15 and ~1e-13 at a hundred times that, while
+# the full 64-character form costs 389 MB against 73 MB here — on datasets
+# totalling 190 MB, and copied whole into each committed generation.
+REVISION_ID_HEX_CHARS = 24
+
 # Current PIT registry members.  Keeping this small constant independent of
 # DatasetSpec avoids a domain import cycle; registry code re-exports the same
 # public aliases and the reader derives its set from DATASETS.
@@ -94,7 +102,7 @@ def revision_id_for_row(row: Mapping[str, object]) -> str:
         separators=(",", ":"),
         default=_json_default,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:REVISION_ID_HEX_CHARS]
 
 
 def _as_datetime_expr(df: pl.DataFrame, column: str) -> pl.Expr:

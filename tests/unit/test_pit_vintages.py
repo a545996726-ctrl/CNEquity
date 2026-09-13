@@ -320,3 +320,31 @@ def test_refetch_with_new_fetched_at_stays_a_physical_no_op(tmp_path):
         changed_files=real,
     )
     assert real, "a restatement must mint a revision"
+
+
+def test_revision_id_width_is_a_storage_decision():
+    """Pinned: the digest is stored on every row, so its width is not free.
+
+    96 bits keeps the collision probability negligible (~1e-15 across the
+    current PIT row count, ~1e-13 at a hundred times that) while costing 73 MB
+    instead of 389 MB — on datasets totalling 190 MB, each copy of which is
+    duplicated whole into every committed generation.
+    """
+    from cnequity.domain.pit import REVISION_ID_HEX_CHARS, revision_id_for_row
+
+    assert REVISION_ID_HEX_CHARS == 24
+    digest = revision_id_for_row(_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00"))
+    assert len(digest) == 24
+    assert all(char in "0123456789abcdef" for char in digest)
+
+
+def test_revision_id_ignores_observation_time_but_tracks_value():
+    """Re-observing a fact keeps its identity; restating it changes identity."""
+    from cnequity.domain.pit import revision_id_for_row
+
+    base = _row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")
+    later = _row(_ORIGINAL, 100.0, "2026-01-02T09:00:00+00:00")
+    restated = _row(_ORIGINAL, 80.0, "2024-04-20T09:00:00+00:00")
+
+    assert revision_id_for_row(base) == revision_id_for_row(later)
+    assert revision_id_for_row(base) != revision_id_for_row(restated)
