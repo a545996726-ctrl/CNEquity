@@ -285,7 +285,7 @@ More: [troubleshooting](docs/operations/troubleshooting.md) ·
 
 ## Project status and docs
 
-Personal project: issues and PRs welcome, responses best-effort. See the current [ROADMAP](ROADMAP.md).
+Personal project: issues and PRs welcome, responses best-effort.
 [SECURITY](SECURITY.md) ·
 [CHANGELOG](CHANGELOG.md).
 

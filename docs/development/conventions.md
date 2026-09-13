@@ -1,6 +1,6 @@
 # 开发约定
 
-与 [CONTRIBUTING.md](../../.github/CONTRIBUTING.md) 互补；本文更完整地描述包结构与分层规则。
+本文描述包结构、分层规则与提交约定。
 
 ---
 
@@ -55,6 +55,45 @@
 - 协议、分页、源字段映射 → `adapters/`
 - 增量窗口、写 staging、manifest → `steps/`
 - 不含 DuckDB / compact 逻辑
+
+---
+
+## 提交约定
+
+提交信息用 [Conventional Commits](https://www.conventionalcommits.org/)：
+
+```
+<type>(<scope>): <简短描述>
+```
+
+常用 type：`feat` `fix` `docs` `refactor` `perf` `test` `chore` `ci`。
+scope 用模块名（`ths_official`、`quality`、`symbols`、`cli`…）。描述用祈使句、不加句号。
+正文说明**为什么**这样改，而不是复述 diff。破坏性变更加 `!`，并在正文写明迁移方式。
+
+---
+
+## CI 门禁
+
+| CI job | 本地等价命令 |
+| --- | --- |
+| `quality` — lint | `ruff check . && ruff format --check . && shellcheck scripts/*.sh` |
+| `quality` — 离线基准 | `python scripts/benchmark_offline.py --check --max-elapsed-seconds 10 --max-concurrency 2` |
+| `quality` — 前端产物 | `cd frontend && npm ci && npm run check` |
+| `test` | `pytest` |
+| `Docs` | `mkdocs build --strict` |
+
+`test` 在 Linux（Python 3.10/3.12/3.13/3.14）、Windows 与 macOS 上各跑一遍。
+
+**Windows 是一等目标**：路径、文件锁和换行差异都算回归。往 TOML 里写路径务必用 `path_for_toml()`，
+裸 `Path` 在 `C:\Users\…` 下会变成非法转义。
+
+**测试不要读 gitignore 的文件**：`configs/cnequity.toml` 是本地配置，在干净检出中不存在。
+
+本地预览文档站：
+
+```bash
+mkdocs serve      # http://127.0.0.1:8000
+```
 
 ---
 

@@ -6,6 +6,20 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **`ROADMAP.md` and `CONTRIBUTING.md`.** The product boundary they described is
+  already in [comparison](docs/comparison.md), and the development conventions —
+  package layout, the commit convention, the CI gates and their local
+  equivalents — now live in
+  [development/conventions](docs/development/conventions.md), where the rest of
+  the developer documentation is.
+
+### Changed
+
+- **`CODE_OF_CONDUCT.md` is three rules and a sentence.** A personal project does
+  not need a reporting apparatus it cannot staff.
+
 ## [0.8.1] — 2026-09-13
 
 No dataset contract changes: `cne contract diff` reports zero breaking and zero

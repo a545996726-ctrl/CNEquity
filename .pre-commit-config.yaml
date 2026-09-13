@@ -1,5 +1,5 @@
 # Local gate for the two checks CI's `quality` job runs (.github/workflows/ci.yml).
-# Both had already been documented in CONTRIBUTING.md and run by hand, which is
+# Both had already been documented in docs/development/conventions.md and run by hand, which is
 # how 145 commits still accumulated formatter drift across 53 files and turned
 # the push red — the same failure 7b34ca7 cleaned up once before. Documenting a
 # command does not enforce it; this does.

@@ -8,8 +8,6 @@ CLI 是 `cne`，Python 包是 `cnequity`。推荐：`pip install cnequity` → `
 
 定位与合规（开源读者可先看）：[与同类项目差异](comparison.md) · [许可与数据合规](legal-and-data-sources.md)。
 
-产品边界与近期方向：[ROADMAP](../ROADMAP.md)。
-
 可搜索的在线文档站：[rootsunc.github.io/CNEquity](https://rootsunc.github.io/CNEquity/)。
 
 面向使用者的文档以中文为准；[CHANGELOG](../CHANGELOG.md) 与 [ADR](adr/) 保持英文。英文简介见 [README.en.md](../README.en.md)。
@@ -59,7 +57,7 @@ CLI 是 `cne`，Python 包是 `cnequity`。推荐：`pip install cnequity` → `
 
 源码包拆分说明：[modules/](modules/README.md)（config / domain / adapters / orchestrator / steps / storage / derive / quality / query / cli）。
 
-开发：[开发约定](development/conventions.md) · [测试](development/testing.md) · [新增数据集](development/adding-dataset.md) · [贡献指南](../.github/CONTRIBUTING.md)
+开发：[开发约定](development/conventions.md) · [测试](development/testing.md) · [新增数据集](development/adding-dataset.md)
 
 ## 定位与合规
 
