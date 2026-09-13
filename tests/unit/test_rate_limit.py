@@ -24,13 +24,32 @@ INTERVAL = 0.1
 MIN_OBSERVED = INTERVAL * 0.3
 
 
-def test_rate_limiter_enforces_minimum_interval(tmp_path):
-    state_dir = tmp_path / "rate_limits"
-    limiter = RateLimiter("test", INTERVAL, state_dir)
+def test_rate_limiter_enforces_minimum_interval(tmp_path, monkeypatch):
+    """The second call must wait out the interval the first one reserved.
+
+    Asserts on the sleep the limiter asks for rather than on measured wall
+    time. The deadline is computed from `time.time()` — it has to be, it is
+    shared across processes through a JSON file — so a clock step on a CI
+    runner retires it early and a `perf_counter` measurement then reports no
+    wait while the limiter is behaving correctly. That failed a release build
+    at 0.98 ms against a 30 ms floor.
+    """
+    now = [1_000.0]
+    slept: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("cnequity.domain.rate_limit.time.time", lambda: now[0])
+    monkeypatch.setattr("cnequity.domain.rate_limit.time.sleep", fake_sleep)
+
+    limiter = RateLimiter("test", INTERVAL, tmp_path / "rate_limits")
     limiter.wait()
-    t0 = time.perf_counter()
     limiter.wait()
-    assert time.perf_counter() - t0 >= MIN_OBSERVED
+
+    # The first call owns the current slot and sleeps not at all.
+    assert slept == [pytest.approx(INTERVAL)]
 
 
 def test_rate_limiter_defer_persists_a_shared_cooldown(tmp_path, monkeypatch):

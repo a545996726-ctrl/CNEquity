@@ -59,7 +59,6 @@ reports 29 breaking and 0 compatible differences, all of them the same field.
   (`docs/operations/runbook.md`). One bad day stays warn-only; three in a row
   exits 1.
 
-- **`scripts/sync_schema_docs.py`, gated in CI.**
 - **`scripts/sync_schema_docs.py`, gated in CI.** `docs/datasets/schema.md` was
   hand-maintained and had drifted: 11 of the 42 registered datasets had no
   section at all (`top_holders`, `share_structure`, `delisting_events`,
