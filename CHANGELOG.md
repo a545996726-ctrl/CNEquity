@@ -6,6 +6,33 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-13
+
+One breaking data-contract change, and the storage/quality work that came with
+the audit. `cne contract diff contracts/v0.8.1.json contracts/v0.9.0.json`
+reports 29 breaking and 0 compatible differences, all of them the same field.
+
+### Changed — BREAKING (data contract)
+
+- **`pit_quality` gains `not_applicable`, and 29 datasets move to it.**
+  The value fell back to the literal `strict` for any dataset that makes no
+  point-in-time claim, so 29 of the 42 registered datasets published
+  `pit_quality: "strict"` — `daily_bars`, `trade_ticks` and `trading_calendar`
+  among them — while `announcement_index` was the only genuine one. The
+  contract was complete (it also published `pit: false` and
+  `pit_grade: "none"`), but a consumer reading `pit_quality` alone got the
+  strongest possible claim for a table nobody had considered.
+
+  **Migration.** No data changes and no re-fetch: this is a metadata value
+  only. A consumer that treats `pit_quality == "strict"` as "safe for
+  point-in-time research" should now read `pit` (boolean) or `pit_grade`,
+  which were already correct. A consumer that enumerates the vocabulary must
+  accept the fourth value. `announcement_index` is unchanged.
+
+  Rationale and the rejected alternatives are in the naming-debt section of
+  [ADR-0011](docs/adr/0011-bitemporal-columns-are-carried-not-required.md).
+
+
 ### Added
 
 - **`cne clean --keep-revision-generations N` (default 5), and

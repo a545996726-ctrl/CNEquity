@@ -480,10 +480,13 @@ class DatasetSpec:
             elif self.fetch_semantics == "snapshot" and not self.backfill_source:
                 quality = "snapshot_only"
             else:
-                # Non-PIT by-date data has no PIT quality claim; ``strict`` is
-                # reserved for an exact PIT source, but keeping a concrete
-                # value makes the public contract total and deterministic.
-                quality = "strict"
+                # Non-PIT by-date data makes no PIT quality claim. This used to
+                # default to ``strict`` so the exported contract stayed total,
+                # which published the strongest possible claim for every table
+                # nobody had considered -- 29 of the 30 ``strict`` datasets,
+                # ``daily_bars`` among them. The contract is still total; the
+                # value now says what it means.
+                quality = "not_applicable"
             object.__setattr__(self, "pit_quality", quality)
 
         if self.pit_quality not in PIT_QUALITIES:

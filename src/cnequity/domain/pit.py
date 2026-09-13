@@ -26,9 +26,21 @@ import polars as pl
 from cnequity.domain.frames import is_blank
 
 PitMode = Literal["strict", "best_effort"]
-PitQuality = Literal["strict", "reconstructed", "snapshot_only"]
+PitQuality = Literal["strict", "reconstructed", "snapshot_only", "not_applicable"]
 PIT_MODES: tuple[PitMode, ...] = ("strict", "best_effort")
-PIT_QUALITIES: tuple[PitQuality, ...] = ("strict", "reconstructed", "snapshot_only")
+# ``not_applicable`` exists because the other three had to cover a case none of
+# them describes: a by-date dataset that makes no point-in-time claim at all.
+# That used to be spelled ``strict``, to keep the exported contract total, and
+# it read as the strongest possible claim on 29 of the 30 datasets carrying it
+# -- ``daily_bars`` included. A consumer reading the contract had no way to
+# tell "this source is exact as of that date" from "nobody has thought about
+# it for this table". See ADR-0011.
+PIT_QUALITIES: tuple[PitQuality, ...] = (
+    "strict",
+    "reconstructed",
+    "snapshot_only",
+    "not_applicable",
+)
 
 # These are intentionally optional storage columns.  They are not added to
 # DATASET_SCHEMAS' required shape until every writer can provide them.  Readers
