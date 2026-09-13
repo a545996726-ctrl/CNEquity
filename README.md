@@ -16,6 +16,12 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/cne-serve-hero-demo.png" alt="CNEquity 数据运维页面：湖状态、覆盖热力与行动项" width="1100" />
+</p>
+
+> 图为 README 演示用的合成数据，页面上标有 `ILLUSTRATIVE DEMO`；满覆盖热力不是对当前生产湖的声明。
+
+<p align="center">
   <a href="https://rootsunc.github.io/CNEquity/getting-started/quickstart/">快速开始</a> ·
   <a href="https://rootsunc.github.io/CNEquity/datasets/catalog/">数据集目录</a> ·
   <a href="https://rootsunc.github.io/CNEquity/recipes/">研究 Recipes</a> ·
@@ -23,6 +29,60 @@
 </p>
 
 CNEquity 开源、免注册、自托管。它不负责给出交易信号，而是把分散在不同来源、不同口径、不同更新节奏的数据，长期保存在自己的机器或服务器上，并且说明每一行从哪里来、何时采到、截至哪一天可用。
+
+## 30 秒试玩
+
+需要 Python 3.10+，无需 token、积分或账号：
+
+```bash
+pip install cnequity
+cne demo
+```
+
+`cne demo` 默认拉取 5 只股票最近约 30 个交易日的真实数据，写入独立目录 `data/cnequity-demo/`，不会覆盖正式数据湖。需要能访问 TDX 行情主机；如果连接失败，可以先检查：
+
+```bash
+cne doctor                 # 环境体检：不需要配置，也不需要网络
+cne sources probe --only tdx_protocol --config configs/cnequity.demo.toml
+```
+
+完全没有网络时，用 `cne demo --sample` 跑离线样例。
+
+完全无法连接 TDX 时，运行 `cne demo --sample`，可离线验证安装、Parquet 落盘和查询链路。合成行全部标记为 `source=mock`，不可用于研究。
+
+<p align="center">
+  <img src="docs/assets/cne-demo.png" alt="cne demo 分阶段采集真实日线并打印结果" width="820" />
+</p>
+
+然后在 Python 中读取：
+
+```python
+from cnequity.query import load
+
+bars = load("daily_bars", data_root="data/cnequity-demo")
+print(bars.tail())
+```
+
+想直接比较原始价格与后复权口径：
+
+```bash
+cne demo --research --symbols 600519.SH
+```
+
+## 数据运维页面
+
+建好湖之后，日常要确认的是覆盖有没有跟上、哪里断了、上次审计留下了什么。`cne serve` 打开只读控制台：
+
+```bash
+cne serve                 # http://127.0.0.1:8787
+```
+
+<p align="center">
+  <img src="docs/assets/cne-serve-hero-demo.png" alt="cne serve 数据运维页面：湖状态、覆盖热力与行动项" width="1100" />
+</p>
+<p align="center"><sub>示意截图，图中标有 ILLUSTRATIVE DEMO；完整覆盖热力不是对当前生产湖的声明。</sub></p>
+
+概览页给出健康状态、Fresh / Stale 计数、覆盖热力和行动项。另外三个页面分别看数据集契约与水位、跑批时间线，以及审计 findings、跨源比对和隔离区。控制台不写湖：采集、重试和清理仍走 CLI，页面只显示该复制的命令。非回环地址必须加 `--token`。
 
 ## 为什么要一个数据湖
 
@@ -42,6 +102,74 @@ CNEquity 开源、免注册、自托管。它不负责给出交易信号，而�
 
 那些股票不是收益为零，而是根本没有进入计算。CNEquity 因此把退市股、复权因子、历史成分和 PIT（按当时可获得的信息取数）放在数据层里处理，而不是交给每个下游脚本临时拼接。
 
+
+## 与 AkShare、Tushare、Qlib 有什么不同
+
+AkShare 和其它取数工具解决“怎样调用数据源”，Tushare 提供云端数据服务，Qlib / vn.py 更偏研究或交易平台。CNEquity 做的是中间的数据基础设施：把多源数据落成可日更、可复查、可溯源的本地 Parquet 湖。
+
+| 你在意的能力 | **CNEquity** | AkShare / efinance | Tushare Pro | Baostock | Qlib / vn.py |
+|---|---|---|---|---|---|
+| 本地可续跑的数据底座 | **湖 + 日更编排** | 拉到内存，编排自管 | 云端积分，非自建湖 | 会话拉数，无湖 | 绑在平台数据子系统 |
+| 历史结果能否复查 | **行级溯源 + 写前校验** | 无统一契约 | 平台字段 | 无湖契约 | 视模块 |
+| 复权 / 历史成分 / PIT | **统一在 `load()`** | 自己拼接 | 自己拼接 | 自己拼接 | 用平台口径 |
+| 退市股是否保留 | **保留（防幸存者偏差）** | 看调用方 | 看接口 | 看接口 | 看数据源 |
+| 单一数据源故障 | **按批失败，可单独重试** | 调用方处理 | 平台处理 | 平台处理 | 视模块 |
+| 需要注册 / token | **不需要** | 不需要 | 需要积分 | 不需要 | 视数据源 |
+
+更完整的逐项比较见[项目对比](docs/comparison.md)。
+
+## 能回答哪些问题
+
+| 研究问题 | 推荐入口 |
+|---|---|
+| 茅台过去五年复权后涨了多少 | `load("daily_bars", symbols=[...], adjust="hfq")` |
+| 茅台 PE 在自身五年历史中的分位数 | `valuation_metrics` + 窗口分位 |
+| 2018 年财报因子的 IC，且不使用未来数据 | `load("financial_statement_items", as_of="2018-04-30")` |
+| 退市股退市前 60 天的价格形态 | `delisting_events` + `daily_bars` |
+| 三年前的沪深 300 成分或申万行业 | `index_constituents` · `industry_members` |
+| 今天的龙虎榜、未来解禁和板块资金流 | `dragon_tiger` · `share_unlock_schedule` · `sector_fund_flow` |
+
+常用查询：
+
+```python
+from cnequity.query import load
+
+bars = load(
+    "daily_bars",
+    start="2020-01-01",
+    end="2025-12-31",
+    symbols=["600519.SH"],
+    adjust="hfq",
+)
+
+roe = load(
+    "financial_statement_items",
+    items=["roe"],
+    as_of="2024-04-30",
+)
+```
+
+## 5 分钟开始建湖
+
+```bash
+pip install cnequity
+cne config init            # 生成 configs/cnequity.toml
+cne init                   # 全市场标的，默认回溯最近 3 年
+cne run daily              # 之后每个交易日执行这一条
+```
+
+默认策略是“浅而不窄”：历史先取最近 3 年，但全市场标的一个不缺。这样不会因为只保留今天仍上市的股票，提前把幸存者偏差写进数据湖。每个数据集的真实起点会记录在 `coverage_start`。
+
+需要更长历史时可以一次拉满，也可以以后补深：
+
+```bash
+cne init --profile full
+
+# 或对单个数据集补历史
+cne backfill daily_bars --start 2016-01-01 --end <coverage_start>
+```
+
+默认初始化通常是小时级、GB 级，实际取决于网络、数据源状态和机器配置。详细安装说明见[快速开始](docs/getting-started/quickstart.md)和[安装指南](docs/getting-started/installation.md)。
 
 ## 数据范围
 
@@ -147,98 +275,6 @@ CNEquity 适合需要反复使用同一份历史数据的研究和数据工作�
 
 如果只是查一只股票的最新价格，直接调用数据接口通常更轻。这个项目更适合需要持续积累、反复查询和复查结果的场景。
 
-## 30 秒试玩
-
-需要 Python 3.10+，无需 token、积分或账号：
-
-```bash
-pip install cnequity
-cne demo
-```
-
-`cne demo` 默认拉取 5 只股票最近约 30 个交易日的真实数据，写入独立目录 `data/cnequity-demo/`，不会覆盖正式数据湖。需要能访问 TDX 行情主机；如果连接失败，可以先检查：
-
-```bash
-cne doctor                 # 环境体检：不需要配置，也不需要网络
-cne sources probe --only tdx_protocol --config configs/cnequity.demo.toml
-```
-
-完全没有网络时，用 `cne demo --sample` 跑离线样例。
-
-完全无法连接 TDX 时，运行 `cne demo --sample`，可离线验证安装、Parquet 落盘和查询链路。合成行全部标记为 `source=mock`，不可用于研究。
-
-<p align="center">
-  <img src="docs/assets/cne-demo.png" alt="cne demo 分阶段采集真实日线并打印结果" width="820" />
-</p>
-
-然后在 Python 中读取：
-
-```python
-from cnequity.query import load
-
-bars = load("daily_bars", data_root="data/cnequity-demo")
-print(bars.tail())
-```
-
-想直接比较原始价格与后复权口径：
-
-```bash
-cne demo --research --symbols 600519.SH
-```
-
-## 5 分钟开始建湖
-
-```bash
-pip install cnequity
-cne config init            # 生成 configs/cnequity.toml
-cne init                   # 全市场标的，默认回溯最近 3 年
-cne run daily              # 之后每个交易日执行这一条
-```
-
-默认策略是“浅而不窄”：历史先取最近 3 年，但全市场标的一个不缺。这样不会因为只保留今天仍上市的股票，提前把幸存者偏差写进数据湖。每个数据集的真实起点会记录在 `coverage_start`。
-
-需要更长历史时可以一次拉满，也可以以后补深：
-
-```bash
-cne init --profile full
-
-# 或对单个数据集补历史
-cne backfill daily_bars --start 2016-01-01 --end <coverage_start>
-```
-
-默认初始化通常是小时级、GB 级，实际取决于网络、数据源状态和机器配置。详细安装说明见[快速开始](docs/getting-started/quickstart.md)和[安装指南](docs/getting-started/installation.md)。
-
-## 能回答哪些问题
-
-| 研究问题 | 推荐入口 |
-|---|---|
-| 茅台过去五年复权后涨了多少 | `load("daily_bars", symbols=[...], adjust="hfq")` |
-| 茅台 PE 在自身五年历史中的分位数 | `valuation_metrics` + 窗口分位 |
-| 2018 年财报因子的 IC，且不使用未来数据 | `load("financial_statement_items", as_of="2018-04-30")` |
-| 退市股退市前 60 天的价格形态 | `delisting_events` + `daily_bars` |
-| 三年前的沪深 300 成分或申万行业 | `index_constituents` · `industry_members` |
-| 今天的龙虎榜、未来解禁和板块资金流 | `dragon_tiger` · `share_unlock_schedule` · `sector_fund_flow` |
-
-常用查询：
-
-```python
-from cnequity.query import load
-
-bars = load(
-    "daily_bars",
-    start="2020-01-01",
-    end="2025-12-31",
-    symbols=["600519.SH"],
-    adjust="hfq",
-)
-
-roe = load(
-    "financial_statement_items",
-    items=["roe"],
-    as_of="2024-04-30",
-)
-```
-
 ## 架构
 
 <p align="center">
@@ -247,21 +283,6 @@ roe = load(
 <p align="center"><sub>公开数据源 → 适配与编排 → 本地 Parquet 湖 → 质量、查询与只读服务</sub></p>
 
 架构上的边界比较简单：适配器负责把多源数据取回来；编排层负责 DAG、批次和重试；数据先进入 staging，再压实为 curated 并计算 derived；质量层持续审计；查询和服务层只读消费。展开见[架构说明](docs/architecture/overview.md)。
-
-## 数据运维页面
-
-建好湖之后，日常要确认的是覆盖有没有跟上、哪里断了、上次审计留下了什么。`cne serve` 打开只读控制台：
-
-```bash
-cne serve                 # http://127.0.0.1:8787
-```
-
-<p align="center">
-  <img src="docs/assets/cne-serve-hero-demo.png" alt="cne serve 数据运维页面：湖状态、覆盖热力与行动项" width="1100" />
-</p>
-<p align="center"><sub>示意截图，图中标有 ILLUSTRATIVE DEMO；完整覆盖热力不是对当前生产湖的声明。</sub></p>
-
-概览页给出健康状态、Fresh / Stale 计数、覆盖热力和行动项。另外三个页面分别看数据集契约与水位、跑批时间线，以及审计 findings、跨源比对和隔离区。控制台不写湖：采集、重试和清理仍走 CLI，页面只显示该复制的命令。非回环地址必须加 `--token`。
 
 ## 日常使用与运维
 
@@ -314,19 +335,6 @@ cne mcp --config "$(pwd)/configs/cnequity.toml"
 - “过去三年退市的股票，退市前 60 天有什么共同形态？”
 
 还没有正式湖时，可以先运行 `cne demo`，再使用生成的 demo 配置。完整说明见[MCP 参考](docs/reference/mcp.md)。
-
-## 与 AkShare、Tushare、Qlib 有什么不同
-
-AkShare 和其它取数工具解决“怎样调用数据源”，Tushare 提供云端数据服务，Qlib / vn.py 更偏研究或交易平台。CNEquity 做的是中间的数据基础设施：把多源数据落成可日更、可复查、可溯源的本地 Parquet 湖。
-
-| 你在意的能力 | CNEquity | 常规取数工具 | 云端数据服务 | 研究 / 交易平台 |
-|---|---|---|---|---|
-| 本地可续跑的数据底座 | **内置** | 通常自建 | 通常不提供 | 依平台而定 |
-| 历史结果能否复查 | **行级溯源** | 缺少统一契约 | 依平台字段 | 依模块而定 |
-| 复权 / universe / PIT | **统一在 `load()`** | 自己拼接 | 自己拼接 | 使用平台口径 |
-| 单一数据源故障 | **按批失败，可单独重试** | 调用方处理 | 平台处理 | 依模块而定 |
-
-更完整的逐项比较见[项目对比](docs/comparison.md)。
 
 ## 常见问题
 

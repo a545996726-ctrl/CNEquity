@@ -23,15 +23,6 @@
 
 CNEquity is open financial data infrastructure for China markets. It starts with A-shares and turns fragmented market, fundamental, event, flow, industry, and macro sources into an open, local data layer with provenance and a stable research contract.
 
-## Architecture
-
-<p align="center">
-  <img src="docs/assets/architecture-diagram-v3.png" alt="CNEquity architecture diagram" width="1100" />
-</p>
-<p align="center"><sub>Public sources → adapters and orchestration → local Parquet lake → quality, query, and read-only services</sub></p>
-
-The boundary is deliberate: adapters fetch, the orchestrator schedules and retries, staging becomes curated and derived, quality audits the result, and query / service layers stay read-only. More: [architecture overview](docs/architecture/overview.md).
-
 ## Data in ~30 seconds
 
 ```bash
@@ -70,6 +61,21 @@ cne demo --research --symbols 600519.SH
 # raw return -24.25% → hfq return -14.39% (example output; changes with the as-of date)
 ```
 
+## Glance at the lake
+
+Once the lake is up, `cne serve` is the read-only operations console. The
+overview shows health, Fresh / Stale counts, the coverage heatmap and action
+items; datasets, runs and quality are separate pages. It never writes the
+lake — ingestion, retry and cleanup stay on the CLI.
+
+```bash
+cne serve     # http://127.0.0.1:8787
+cne sources probe   # health of 14 upstream hosts (probe on CLI, display on serve)
+```
+
+Details: [serve](docs/modules/serve.md) ·
+[source-health](docs/operations/source-health.md).
+
 ## Why a lake
 
 <p align="center">
@@ -89,6 +95,36 @@ afterthought on a coverage list.
 ```bash
 python scripts/survivorship_gap.py --svg docs/assets/survivorship-gap.svg
 ```
+
+## Why not just AkShare / Tushare / a fetch skill
+
+AkShare and agent fetch skills answer "how do I fetch?" — a snapshot of now,
+with no history contract. Tushare is cloud wide tables. Qlib / vn.py are
+research / trading platforms. **CNE** owns the middle: many sources, one
+contract, a resumable local Parquet lake.
+
+| What you care about | **CNEquity** | AkShare / efinance | Tushare Pro | Baostock | Qlib / vn.py |
+|--|--|--|--|--|--|
+| Local, resumable data base | **Lake + daily jobs** | On-demand; you orchestrate | Cloud credits | Session fetch, no lake | Platform-tied |
+| Provenance | **Row-level + validated on write** | No shared contract | Platform fields | No lake contract | Varies |
+| Research semantics | **`load()`: adjust / universe / PIT** | DIY | DIY | DIY | Platform |
+| Delisted names kept | **Yes — no survivorship bias** | Up to caller | Per endpoint | Per endpoint | Per source |
+| When a source fails | **Fail the batch**, retry by batch | Up to caller | Up to vendor | Up to vendor | Varies |
+| Signup / token needed | **No** | No | Credits required | No | Per source |
+
+Point by point: [comparison](docs/comparison.md).
+
+## What you can ask it
+
+| What you want to know | How you get it |
+|--|--|
+| Moutai five-year return, adjusted | `load("daily_bars", symbols=[...], adjust="hfq")` |
+| ★ Moutai PE historical percentile | `valuation_metrics` + window percentile |
+| ★ Factor IC in 2018, no look-ahead | `load("financial_statement_items", as_of="2018-04-30")` |
+| ★ Last 60 sessions before delisting | `delisting_events` + `daily_bars` |
+| ★ Equal-weight return, no survivorship bias | `scripts/survivorship_gap.py` (chart above) |
+| Dragon-tiger / unlocks / sector flow | `dragon_tiger` · `share_unlock_schedule` · `sector_fund_flow` |
+| ★ CSI 300 / Shenwan membership years ago | `index_constituents` · `industry_members` |
 
 ## Your own lake, in four commands
 
@@ -135,34 +171,6 @@ them. **Fetch tools give you now; a lake gives you history.**
   <a href="#faq">FAQ</a>
 </p>
 
-## What you can ask it
-
-| What you want to know | How you get it |
-|--|--|
-| Moutai five-year return, adjusted | `load("daily_bars", symbols=[...], adjust="hfq")` |
-| ★ Moutai PE historical percentile | `valuation_metrics` + window percentile |
-| ★ Factor IC in 2018, no look-ahead | `load("financial_statement_items", as_of="2018-04-30")` |
-| ★ Last 60 sessions before delisting | `delisting_events` + `daily_bars` |
-| ★ Equal-weight return, no survivorship bias | `scripts/survivorship_gap.py` (chart above) |
-| Dragon-tiger / unlocks / sector flow | `dragon_tiger` · `share_unlock_schedule` · `sector_fund_flow` |
-| ★ CSI 300 / Shenwan membership years ago | `index_constituents` · `industry_members` |
-
-## Why not just AkShare / Tushare / a fetch skill
-
-AkShare and agent fetch skills answer "how do I fetch?" — a snapshot of now,
-with no history contract. Tushare is cloud wide tables. Qlib / vn.py are
-research / trading platforms. **CNE** owns the middle: many sources, one
-contract, a resumable local Parquet lake.
-
-| What you care about | **CNEquity** | AkShare / fetch skills | Tushare Pro | Qlib / vn.py |
-|--|--|--|--|--|
-| Local, resumable data base | **Lake + daily jobs** | On-demand; you own orchestration | Cloud credits | Platform-tied |
-| Provenance | **Row-level** | Usually no shared contract | Platform fields | Varies |
-| Research semantics | **`load()`: adjust / universe / PIT** | DIY | DIY | Platform |
-| When a source fails | **Fail the batch**, retry by batch | Up to caller | Up to vendor | Varies |
-
-Point by point: [comparison](docs/comparison.md).
-
 ## Datasets
 
 **42** registered datasets (synced with `domain/datasets.py`). Columns:
@@ -183,6 +191,15 @@ Point by point: [comparison](docs/comparison.md).
 
 Intraday (1m / 5m / ticks) is **off by default** — see
 [runbook](docs/operations/runbook.md#日内数据minute_bars--minute_bars_5m).
+
+## Architecture
+
+<p align="center">
+  <img src="docs/assets/architecture-diagram-v3.png" alt="CNEquity architecture diagram" width="1100" />
+</p>
+<p align="center"><sub>Public sources → adapters and orchestration → local Parquet lake → quality, query, and read-only services</sub></p>
+
+The boundary is deliberate: adapters fetch, the orchestrator schedules and retries, staging becomes curated and derived, quality audits the result, and query / service layers stay read-only. More: [architecture overview](docs/architecture/overview.md).
 
 ## Keeping it current
 
@@ -231,21 +248,6 @@ claude mcp add cnequity -- cne mcp --config /abs/path/to/cnequity.toml
 `--config` must be an **absolute** path. Six tools by question shape (not one
 per dataset); the contract travels in the responses. Details:
 [MCP reference](docs/reference/mcp.md).
-
-## Glance at the lake
-
-Once the lake is up, `cne serve` is the read-only operations console. The
-overview shows health, Fresh / Stale counts, the coverage heatmap and action
-items; datasets, runs and quality are separate pages. It never writes the
-lake — ingestion, retry and cleanup stay on the CLI.
-
-```bash
-cne serve     # http://127.0.0.1:8787
-cne sources probe   # health of 14 upstream hosts (probe on CLI, display on serve)
-```
-
-Details: [serve](docs/modules/serve.md) ·
-[source-health](docs/operations/source-health.md).
 
 ## FAQ
 
