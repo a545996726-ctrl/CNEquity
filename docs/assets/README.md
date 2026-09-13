@@ -73,8 +73,9 @@ lake with something in it.
 
 | File | Shows |
 |------|--------|
-| `cne-serve-hero-demo.png` | Synthetic README illustration: a clearly labelled full-coverage heatmap |
-| `cne-serve-hero.png` | 1440×820 factual current overview: health, 42 datasets, KPIs, coverage heatmap and action state |
+| `cne-serve-datasets.png` | 1440×900 factual capture of the datasets console — embedded at the top of **both** READMEs. Real numbers, no disclaimer needed, and it carries more of the contract (tier, fetch semantics, granularity, watermark, rows, size) than the overview does |
+| `cne-serve-hero-demo.png` | Synthetic README illustration: a clearly labelled full-coverage heatmap. Used **further down** in both READMEs (Chinese 数据运维页面, English "Glance at the lake") so the two dashboard images never repeat on one page |
+| `cne-serve-hero.png` | 1440×820 factual current overview: health, 42 datasets, KPIs, coverage heatmap and action state. Kept for docs/QA — it shows real staleness and audit state, which is honest but not a first screen |
 | `cne-serve.png` | 1440px-wide full-page overview (source / docs) |
 | `cne-serve-dataset.png` | `trade_ticks` metadata tab (for docs; not in README) |
 

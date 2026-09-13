@@ -16,10 +16,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/cne-serve-hero-demo.png" alt="CNEquity illustrative dashboard with synthetic full-coverage heatmap" width="1100" />
+  <img src="docs/assets/cne-serve-datasets.png" alt="cne serve console: tier, fetch semantics, partition granularity, watermark, rows and size for all 42 registered datasets" width="1100" />
 </p>
 
-> This is a synthetic README demo, explicitly marked `ILLUSTRATIVE DEMO`; the full-coverage heatmap is not a claim about current production data.
+<p align="center"><sub><code>cne serve</code>, read-only console — a real capture: tier, fetch semantics, partition granularity, watermark, row count and size per dataset</sub></p>
 
 CNEquity is open financial data infrastructure for China markets. It starts with A-shares and turns fragmented market, fundamental, event, flow, industry, and macro sources into an open, local data layer with provenance and a stable research contract.
 
@@ -61,6 +61,20 @@ cne demo --research --symbols 600519.SH
 # raw return -24.25% → hfq return -14.39% (example output; changes with the as-of date)
 ```
 
+## What it gives you
+
+| | |
+|---|---|
+| **Ingestion** | 42 datasets · 14 upstream sources · primary/backup routing · per-batch retry, resume and watermark reconciliation |
+| **Research semantics** | Adjustment (hfq / qfq derived at query time) · historical index and industry membership · point-in-time fundamentals · **delisted names kept** |
+| **Data contract** | Schema validated before write · row-level provenance (`source` / `data_version` / `fetched_at`) · breaking changes require a version bump |
+| **Quality** | 84 audit checks · cross-source comparison · coverage-gap and staleness detection · configurable publication gate |
+| **Storage** | Local Parquet + DuckDB · per-dataset partition granularity · atomic writes · immutable generations and time travel |
+| **Consumption** | `load()` · DuckDB views · Polars · 6 MCP tools · read-only operations console |
+| **Operations** | Daily orchestration · launchd / cron templates · source health probes · portable snapshots and delta packages |
+
+Everything runs locally. **No signup, token or credits.**
+
 ## Glance at the lake
 
 Once the lake is up, `cne serve` is the read-only operations console. The
@@ -72,6 +86,12 @@ lake — ingestion, retry and cleanup stay on the CLI.
 cne serve     # http://127.0.0.1:8787
 cne sources probe   # health of 14 upstream hosts (probe on CLI, display on serve)
 ```
+
+<p align="center">
+  <img src="docs/assets/cne-serve-hero-demo.png" alt="Lake overview: health, fresh/stale counts, coverage heatmap and action items" width="1100" />
+</p>
+
+<p align="center"><sub>Overview page. Synthetic README illustration, marked <code>ILLUSTRATIVE DEMO</code> in the image — the full-coverage heatmap is not a claim about current production data.</sub></p>
 
 Details: [serve](docs/modules/serve.md) ·
 [source-health](docs/operations/source-health.md).

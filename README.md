@@ -15,6 +15,12 @@
   <b>42 个数据集 · 39 curated + 3 derived · Python / DuckDB / Polars / MCP</b>
 </p>
 
+<p align="center">
+  <img src="docs/assets/cne-serve-datasets.png" alt="cne serve 控制台：42 个注册数据集的分层、语义、粒度、水位、行数与体积" width="1100" />
+</p>
+
+<p align="center"><sub><code>cne serve</code> 只读控制台 · 真实截图：每个数据集的分层、采集语义、分区粒度、水位、行数与体积</sub></p>
+
 
 <p align="center">
   <a href="https://rootsunc.github.io/CNEquity/getting-started/quickstart/">快速开始</a> ·
@@ -41,9 +47,21 @@ cne doctor                 # 环境体检：不需要配置，也不需要网络
 cne sources probe --only tdx_protocol --config configs/cnequity.demo.toml
 ```
 
-完全没有网络时，用 `cne demo --sample` 跑离线样例。
-
 完全无法连接 TDX 时，运行 `cne demo --sample`，可离线验证安装、Parquet 落盘和查询链路。合成行全部标记为 `source=mock`，不可用于研究。
+
+## 能力一览
+
+| | |
+|---|---|
+| **采集** | 42 个数据集 · 14 个上游源 · 主备路由 · 批次级重试、断点续跑与水位对账 |
+| **研究口径** | 复权（hfq / qfq 查询侧换算）· 历史指数与行业成分 · PIT 财报 · **保留退市股** |
+| **数据契约** | 写前 schema 校验 · 行级溯源（`source` / `data_version` / `fetched_at`）· 破坏性变更必须提版本 |
+| **质量** | 84 项审计检查 · 跨源比对 · 覆盖缺口与陈旧检测 · 可配置发布门禁 |
+| **存储** | 本地 Parquet + DuckDB · 按数据集选择分区粒度 · 原子写 · 不可变代与时间旅行 |
+| **消费** | `load()` · DuckDB 视图 · Polars · MCP 6 个工具 · 只读运维控制台 |
+| **运维** | 日更编排 · launchd / cron 模板 · 源健康探针 · 可移植快照与增量包 |
+
+全部本地运行，**不需要注册、token 或积分**。
 
 <p align="center">
   <img src="docs/assets/cne-demo.png" alt="cne demo 分阶段采集真实日线并打印结果" width="820" />
