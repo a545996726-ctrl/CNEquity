@@ -38,6 +38,13 @@ jobs:
         # deliberately makes no claim about vendor speed or availability.
         run: python scripts/benchmark_offline.py --check --max-elapsed-seconds 10 --max-concurrency 2
 
+      - name: Schema docs in sync
+        # docs/datasets/schema.md is hand-written prose around generated column
+        # tables. Nothing kept the tables honest: 11 of 42 datasets had no
+        # section at all, and a column added to domain/schemas.py reached the
+        # page only if someone remembered.
+        run: python scripts/sync_schema_docs.py --check
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

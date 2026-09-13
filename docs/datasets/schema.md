@@ -15,6 +15,24 @@ cnequity 的 curated 数据集统一带溯源列，并声明明确主键。
 | Schema 演进 | 只允许加列；破坏性变更须提升 `dataset_schema_version` |
 | `data_version` | 语义变更（不是加列）才提升；见下「成交量单位」 |
 
+### PIT 双时态扩展列
+
+仅适用于 PIT 数据集：`announcement_index`、`financial_statement_items`、`share_structure`、`shareholder_counts`、`top_holders`。**不适用于其他数据集**（此前本节误置于 `instruments` 下）。
+
+四列是可选存储列，不进 `DATASET_SCHEMAS` 的必需形状：旧 Parquet 没有它们照样可读，
+读侧会补齐。compact 时会写入磁盘，没有这些列的旧分区在下次 compact 时补写一次。
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| available_at | timestamp, nullable | 该事实在源端可用的时间；未知时必须为 null，不能用回填时的报告期代替 |
+| source_published_at | timestamp, nullable | 源端实际发布时间；当前东财历史回填通常未知 |
+| observed_at | timestamp, nullable | 湖实际观察到该行的时间；旧文件由 `fetched_at` 兼容补出 |
+| revision_id | string, nullable | 稳定的事实/版本身份；96 bit（24 位十六进制）截断 SHA-256，由业务字段和溯源确定性导出，**不含**观察时间戳 |
+
+`observed_at` 与 `fetched_at` 是同一件事的两个名字，因此二者都不参与 compact 的
+业务摘要比对——否则每次对账重抓都会被判成业务变更，铸出一个新 revision，
+而每个 revision 会整份复制该数据集。
+
 ### 分区键（curated）
 
 | 数据集 | 分区 |
@@ -62,47 +80,38 @@ cnequity 的 curated 数据集统一带溯源列，并声明明确主键。
 | 列 | 类型 | 说明 |
 |--------|------|-------|
 | symbol | string | 主键 |
-| name | string | |
+| name | string |  |
 | exchange | string | SH/SZ/BJ |
 | asset_type | string | stock/etf/index |
 | list_date | date | 可空 |
 | delist_date | date | 可空 |
 | prev_symbol | string | 可空 |
-| source | string | |
-| data_version | string | |
-| fetched_at | timestamp | |
-
-PIT 的双时态扩展列是可选列，旧 Parquet 没有这些列仍可读取：
-
-| 列 | 类型 | 说明 |
-|--------|------|-------|
-| available_at | timestamp, nullable | 该事实在源端可用的时间；未知时必须为 null，不能用回填时的报告期代替 |
-| source_published_at | timestamp, nullable | 源端实际发布时间；当前东财历史回填通常未知 |
-| observed_at | timestamp, nullable | 湖实际观察到该行的时间；旧文件由 `fetched_at` 兼容补出 |
-| revision_id | string, nullable | 稳定的事实/版本身份；读侧可由业务字段和溯源确定性补出 |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 #### trading_calendar
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
 | trade_date | date | 主键 |
-| is_trading | bool | |
-| source | string | |
-| data_version | string | |
-| fetched_at | timestamp | |
+| is_trading | bool |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 #### trading_status
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
-| is_trading | bool | |
+| symbol | string |  |
+| trade_date | date |  |
+| is_trading | bool |  |
 | status | string | **交易状态**：`normal` / `suspended` / `delisted` |
 | risk_warning | bool | **风险警示（ST/*ST）**，与 status 正交；可为 null（无证据） |
 | source | string | 退市行由 `instruments` 判定，标 `derived_delisted` |
-| data_version | string | |
-| fetched_at | timestamp | |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 `status` 与 `risk_warning` 是两件正交的事，必须分两列。旧版把两者塞进一个
 `status`，写入端用 `if 停牌 / elif ST` 解决冲突，结果**停牌会把 ST 标记冲掉**：
@@ -130,17 +139,17 @@ scripts/migrate_trading_status_risk_warning.py --config configs/cnequity.toml --
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
+| symbol | string |  |
+| trade_date | date |  |
 | open | float64 | 未复权 |
-| high | float64 | |
-| low | float64 | |
-| close | float64 | |
+| high | float64 |  |
+| low | float64 |  |
+| close | float64 |  |
 | volume | int64 | **股**（见下「成交量单位」）；`data_version=v2` 才保证 |
 | amount | float64 | 人民币 |
-| source | string | |
+| source | string |  |
 | data_version | string | `v2`=volume 为股；`v1`=按源而异，已弃用 |
-| fetched_at | timestamp | |
+| fetched_at | timestamp |  |
 
 ##### 成交量单位（`daily_bars.volume`）
 
@@ -188,14 +197,19 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | trade_date | date | 分区列；A 股无夜盘，恒等于 `bar_time` 的日期 |
 | bar_time | timestamp（naive） | **bar 的收盘分钟**，`Asia/Shanghai` 墙钟；见下「bar 语义」 |
 | frequency | string | `1m` / `5m` / `15m` / `30m` / `60m`；一个数据集只放一个频率 |
-| open / high / low / close | float64 | **未复权**；用 `load(..., adjust="hfq")` 在查询侧按 `(symbol, trade_date)` 关联当日因子 |
+| open | float64 | **未复权**；用 `load(..., adjust="hfq")` 在查询侧按 `(symbol, trade_date)` 关联当日因子 |
+| high | float64 | **未复权**；用 `load(..., adjust="hfq")` 在查询侧按 `(symbol, trade_date)` 关联当日因子 |
+| low | float64 | **未复权**；用 `load(..., adjust="hfq")` 在查询侧按 `(symbol, trade_date)` 关联当日因子 |
+| close | float64 | **未复权**；用 `load(..., adjust="hfq")` 在查询侧按 `(symbol, trade_date)` 关联当日因子 |
 | volume | int64 | **股**。TDX 日 K 是手、日内 K 原生就是股——日内路径**不得**复用日频的 ×100 换算 |
 | amount | float64 | 人民币元 |
-| source / data_version / fetched_at | | 溯源列 |
+| source | string | 溯源列 |
+| data_version | string | 溯源列 |
+| fetched_at | timestamp | 溯源列 |
 
 **bar 语义。** 标签是 bar 的**收盘时刻**（右标签）：1m 的 `09:31` 覆盖 09:30–09:31，5m 的 `09:35` 覆盖 09:30–09:35；`15:00` 含收盘集合竞价。交易时段为 `09:31–11:30` + `13:01–15:00`，午休无 bar。
 
@@ -223,14 +237,16 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | trade_date | date | 分区列；A 股无夜盘，恒等于 `trade_time` 的日期 |
 | tick_seq | int32 | **当日时间升序的 0-based 稠密序号**，行的身份所在（见下） |
 | trade_time | timestamp（naive） | **分钟精度**，秒位恒为 `00`——不是被截断，是协议从来没带过秒 |
 | price | float64 | **未复权**；`load(..., adjust="hfq")` 会给出 `adj_price` |
 | volume | int64 | **股**。源端是手，适配器 ×100，并由与日频的对账确证而非假定 |
 | direction | string | `buy` / `sell` / `neutral` / `after_hours`（见下） |
-| source / data_version / fetched_at | | 溯源列 |
+| source | string | 溯源列 |
+| data_version | string | 溯源列 |
+| fetched_at | timestamp | 溯源列 |
 
 **为什么主键是 `tick_seq` 而不是 `trade_time`。** 时间戳没有秒，一分钟里最多 20 条记录时间戳完全相同。
 用 `(symbol, trade_date, trade_time)` 会丢掉绝大多数行，而**同一分钟内的先后正是分笔的价值所在**。
@@ -277,11 +293,16 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 | name | string | 合约中文名 |
 | exchange | string | `SHF` / `DCE` / `CZC` / `INE` / `GFE` / `CMX` |
 | trade_date | date | 源交易所会话日（外盘为 COMEX 日历；与 A 股对齐在研究侧 as-of） |
-| open/high/low/close | float64 | |
+| open | float64 |  |
+| high | float64 |  |
+| low | float64 |  |
+| close | float64 |  |
 | volume | int64 | 手（东财口径；新浪外盘常为 0） |
 | amount | float64 | 成交额（外盘可空） |
 | open_interest | float64 | 可空 |
-| source / data_version / fetched_at | | 溯源（`eastmoney` / `sina`） |
+| source | string | 溯源（`eastmoney` / `sina`） |
+| data_version | string | 溯源（`eastmoney` / `sina`） |
+| fetched_at | timestamp | 溯源（`eastmoney` / `sina`） |
 
 主键：`(symbol, trade_date)`。分区：`trade_date`。  
 日更：`macro_risk` 组。历史：`cne backfill commodity_bars [--start 2020-01-01 --end …]`。  
@@ -291,17 +312,17 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| ex_date | date | |
+| symbol | string |  |
+| ex_date | date |  |
 | action_type | string | cash_dividend/bonus/transfer/allotment |
 | cash_dividend | float64 | **每股**（元，税前） |
 | bonus_ratio | float64 | **每股**（送股：每持有 1 股送出股数） |
 | transfer_ratio | float64 | **每股**（转股：每持有 1 股转增股数） |
 | allotment_ratio | float64 | **每股**（配股：每持有 1 股可配股数），可空 |
 | allotment_price | float64 | 配股价（元/股），**不是**比率，可空 |
-| source | string | |
-| data_version | string | |
-| fetched_at | timestamp | |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 > **单位契约（每股）。** 所有比率/金额均相对于「持有 1 股」，
 > 不是通达信（`xdxr`）/东财常见的「每 10 股」口径。Adapter 在入 staging 前
@@ -318,13 +339,13 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
+| symbol | string |  |
+| trade_date | date |  |
 | adjust_type | string | qfq/hfq |
 | factor | float64 | 累计因子；qfq：`1/sina_qfq_factor`，hfq：`sina_hfq_factor` |
 | source | string | sina（默认） |
-| data_version | string | |
-| fetched_at | timestamp | |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 #### financial_statement_items
 
@@ -333,15 +354,15 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | report_period | string | 如 ``2024Q1`` |
 | statement_type | string | income / balance / cashflow / indicator |
 | item_code | string | 见下表 |
 | item_value | float64 | 金额单位人民币元；比率类为百分数；每股类为元/股 |
 | announce_date | date | **PIT 轴** — 首次披露日（取自业绩报表 `RPT_LICO_FN_CPD`） |
-| source | string | |
-| data_version | string | |
-| fetched_at | timestamp | |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 **item_code 一览**（按 `statement_type`）：
 
@@ -370,72 +391,84 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
+| symbol | string |  |
+| trade_date | date |  |
 | main_net_inflow | float64 | 人民币 |
-| super_large_net_inflow | float64 | |
-| large_net_inflow | float64 | |
-| medium_net_inflow | float64 | |
-| small_net_inflow | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| super_large_net_inflow | float64 |  |
+| large_net_inflow | float64 |  |
+| medium_net_inflow | float64 |  |
+| small_net_inflow | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### margin_trading
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
-| margin_balance | float64 | |
-| margin_buy | float64 | |
-| short_balance | float64 | |
-| short_sell_volume | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| symbol | string |  |
+| trade_date | date |  |
+| margin_balance | float64 |  |
+| margin_buy | float64 |  |
+| short_balance | float64 |  |
+| short_sell_volume | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### northbound_holdings
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
+| symbol | string |  |
+| trade_date | date |  |
 | channel | string | 沪/深股通 |
-| holding_shares | float64 | |
-| holding_mv | float64 | |
-| holding_ratio | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| holding_shares | float64 |  |
+| holding_mv | float64 |  |
+| holding_ratio | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### northbound_flows
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| trade_date | date | |
+| trade_date | date |  |
 | channel | string | SH / SZ |
-| net_buy | float64 | |
-| buy_amount | float64 | |
-| sell_amount | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| net_buy | float64 |  |
+| buy_amount | float64 |  |
+| sell_amount | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### valuation_metrics
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
-| pe_ttm | float64 | |
-| pb | float64 | |
-| ps_ttm | float64 | |
-| total_mv | float64 | |
-| float_mv | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| symbol | string |  |
+| trade_date | date |  |
+| pe_ttm | float64 |  |
+| pb | float64 |  |
+| ps_ttm | float64 |  |
+| total_mv | float64 |  |
+| float_mv | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### sector_members
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| sector_code | string | |
-| sector_name | string | |
+| symbol | string |  |
+| sector_code | string |  |
+| sector_name | string |  |
 | as_of_date | date | 快照日 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### announcement_index
 
@@ -444,12 +477,14 @@ PIT 查询过滤 `announce_date <= as_of`。
 | 列 | 类型 | 说明 |
 |--------|------|-------|
 | announcement_id | string | 主键 |
-| symbol | string | |
-| title | string | |
+| symbol | string |  |
+| title | string |  |
 | announce_date | date | **PIT 轴** |
-| category | string | |
-| url | string | |
-| source / data_version / fetched_at | | 溯源 |
+| category | string |  |
+| url | string |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### earnings_disclosure_schedule
 
@@ -459,36 +494,42 @@ PIT 查询过滤 `announce_date <= as_of`。
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | report_period | string | 如 ``2026Q2``（分区键） |
 | scheduled_date | date | 当前有效预约披露日 |
 | first_scheduled_date | date | 首次预约披露日 |
 | actual_date | date | 实际披露日，未披露为 null |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### dragon_tiger
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
-| reason | string | |
-| buy_amount | float64 | |
-| sell_amount | float64 | |
-| net_amount | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| symbol | string |  |
+| trade_date | date |  |
+| reason | string |  |
+| buy_amount | float64 |  |
+| sell_amount | float64 |  |
+| net_amount | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### block_trades
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
-| price | float64 | |
-| volume | float64 | |
-| amount | float64 | |
+| symbol | string |  |
+| trade_date | date |  |
+| price | float64 |  |
+| volume | float64 |  |
+| amount | float64 |  |
 | premium_ratio | float64 | 相对收盘价折溢价 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### index_constituents
 
@@ -498,18 +539,22 @@ PIT 查询过滤 `announce_date <= as_of`。
 | symbol | string | 成分股 |
 | as_of_date | date | 快照 / 调样日 |
 | weight | float64 | 权重（百分比或比率，依源） |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### industry_members
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | classification_system | string | 如 ``sw``、``eastmoney`` |
-| industry_code | string | |
-| industry_name | string | |
+| industry_code | string |  |
+| industry_name | string |  |
 | as_of_date | date | 分类快照日 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### macro_indicators
 
@@ -517,9 +562,11 @@ PIT 查询过滤 `announce_date <= as_of`。
 |--------|------|-------|
 | indicator_id | string | 如 ``shibor_3m``、``cnbond_yield_10y``、``lpr_1y`` |
 | obs_date | date | 观测 / 发布日 |
-| value | float64 | |
+| value | float64 |  |
 | frequency | string | ``daily`` / ``monthly`` |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### market_breadth
 
@@ -527,50 +574,58 @@ PIT 查询过滤 `announce_date <= as_of`。
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| trade_date | date | |
+| trade_date | date |  |
 | metric_id | string | ``advance_count``、``decline_count``、``limit_up_count`` 等 |
-| value | float64 | |
-| source / data_version / fetched_at | | 溯源 |
+| value | float64 |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### share_unlock_schedule
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | unlock_date | date | 计划解禁日 |
-| unlock_shares | float64 | |
+| unlock_shares | float64 |  |
 | unlock_ratio | float64 | 占流通/总股本比例（依源） |
 | unlock_type | string | 如 IPO 限售、定向增发 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### regulatory_events
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
 | event_id | string | 主键 |
-| symbol | string | |
+| symbol | string |  |
 | event_date | date | 公告日 |
 | event_type | string | ``penalty``、``investigation``、``regulatory_letter`` 等 |
-| title | string | |
-| source / data_version / fetched_at | | 溯源 |
+| title | string |  |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### institutional_holdings
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | holder_type | string | ``fund``、``qfii``、``social_security`` 等 |
 | report_period | string | 如 ``2024Q1`` |
 | holding_shares | float64 | 持股数量或家数（依源） |
 | holding_ratio | float64 | 占流通/总股本百分比 |
 | holding_mv | float64 | 市值 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### analyst_consensus
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
+| symbol | string |  |
 | forecast_date | date | 发布 / 更新日期 |
 | forecast_year | int64 | 目标财年 |
 | eps_forecast | float64 | 一致预期 EPS |
@@ -578,7 +633,9 @@ PIT 查询过滤 `announce_date <= as_of`。
 | target_price | float64 | 平均目标价 |
 | rating | string | 如 买入/增持 |
 | analyst_count | int64 | 覆盖机构数 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### sentiment_scores
 
@@ -586,12 +643,14 @@ PIT 查询过滤 `announce_date <= as_of`。
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol | string | |
-| trade_date | date | |
+| symbol | string |  |
+| trade_date | date |  |
 | score_channel | string | 主键维度；``announcement_keywords`` / ``stock_news_nlp`` |
 | sentiment_score | float64 | [-1, 1] |
 | headline_count | int64 | 计入评分的标题数 |
-| source / data_version / fetched_at | | 溯源 |
+| source | string | 溯源 |
+| data_version | string | 溯源 |
+| fetched_at | timestamp | 溯源 |
 
 #### stock_news（按需缓存）
 
@@ -609,6 +668,187 @@ PIT 查询过滤 `announce_date <= as_of`。
 | aggregate_sentiment | float64 | 条目分数均值 |
 | headline_count | int64 | |
 | source / data_version / fetched_at | | 溯源 |
+
+#### share_structure
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol | string |  |
+| change_date | date |  |
+| total_shares | float64 |  |
+| float_shares | float64 |  |
+| restricted_shares | float64 |  |
+| free_float_shares | float64 |  |
+| change_reason | string |  |
+| announce_date | date |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### shareholder_counts
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol | string |  |
+| count_date | date |  |
+| holder_count | float64 |  |
+| holder_count_change_pct | float64 |  |
+| avg_float_shares | float64 |  |
+| avg_holding_value | float64 |  |
+| announce_date | date |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### top_holders
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol | string |  |
+| record_date | date |  |
+| holder_scope | string |  |
+| holder_rank | int32 |  |
+| holder_name | string |  |
+| holding_shares | float64 |  |
+| holding_pct | float64 |  |
+| is_institution | bool |  |
+| holder_type | string |  |
+| announce_date | date |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### industry_index
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| trade_date | date |  |
+| industry_code | string |  |
+| level | string |  |
+| weighting | string |  |
+| ret | float64 |  |
+| n_members | int64 |  |
+| n_priced | int64 |  |
+| n_excluded | int64 |  |
+| amount | float64 |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### hot_rank
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol | string |  |
+| trade_date | date |  |
+| rank | int64 |  |
+| rank_change | int64 |  |
+| hist_rank | int64 |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### sector_bars
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| sector_code | string |  |
+| sector_name | string |  |
+| board_type | string |  |
+| trade_date | date |  |
+| open | float64 |  |
+| high | float64 |  |
+| low | float64 |  |
+| close | float64 |  |
+| volume | int64 |  |
+| amount | float64 |  |
+| change_pct | float64 |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### sector_fund_flow
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| sector_code | string |  |
+| sector_name | string |  |
+| board_type | string |  |
+| trade_date | date |  |
+| main_net_inflow | float64 |  |
+| change_pct | float64 |  |
+| turnover_pct | float64 |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### news_headlines
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| news_id | string |  |
+| publish_date | date |  |
+| publish_time | string |  |
+| title | string |  |
+| summary | string |  |
+| related_symbols | string |  |
+| channel | string |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### flash_news_wire
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| wire_id | string |  |
+| wire_source | string |  |
+| item_hash | string |  |
+| publish_date | date |  |
+| publish_time | string |  |
+| title | string |  |
+| summary | string |  |
+| related_symbols | string |  |
+| importance | int8 |  |
+| channel | string |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### economic_calendar
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| event_id | string |  |
+| event_date | date |  |
+| event_time | string |  |
+| country | string |  |
+| indicator | string |  |
+| importance | int8 |  |
+| forecast | float64 |  |
+| previous | float64 |  |
+| actual | float64 |  |
+| unit | string |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
+
+#### delisting_events
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol | string |  |
+| first_trade_date | date |  |
+| last_trade_date | date |  |
+| ending_pattern | string |  |
+| final_close | float64 |  |
+| halt_gap_days | int64 |  |
+| worst_final_return | float64 |  |
+| final_window_return | float64 |  |
+| bars | int64 |  |
+| source | string |  |
+| data_version | string |  |
+| fetched_at | timestamp |  |
 
 ### Compact 去重
 
