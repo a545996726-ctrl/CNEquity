@@ -36,7 +36,7 @@ scripts/install_scheduler.sh
   `CNE_TRADE_DATE=...`（全组定点）
 - **海外 Mac**：保 `core`（+ 本地 derive breadth）即可；东财组留给
   国内机器 `scripts/run_catchup.py --all-groups` / 全组 pipeline。SOCKS 出口不够，见
-  [troubleshooting](troubleshooting.md#云主机--socks-能开-ipinfo-但东财-empty-reply)。
+  [troubleshooting](troubleshooting.md#东财-502--连接被重置海外出口)。
 
 ```bash
 launchctl list | grep cnequity

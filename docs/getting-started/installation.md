@@ -54,7 +54,7 @@ cne query --config configs/cnequity.demo.toml --sql "SELECT count(*) FROM daily_
 
 ```bash
 git clone https://github.com/rootSunc/CNEquity.git
-cd cnequity
+cd CNEquity
 python3 -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip   # PEP 735 --group 需要 pip >= 25.1
 pip install -e . --group dev
@@ -65,7 +65,7 @@ Windows（PowerShell）：
 
 ```powershell
 git clone https://github.com/rootSunc/CNEquity.git
-cd cnequity
+cd CNEquity
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip

@@ -15,6 +15,7 @@ from cnequity.config import load_config
 
 USER_CONFIG = "configs/cnequity.toml"
 EXAMPLE_CONFIG = "configs/cnequity.example.toml"
+DEMO_CONFIG = "configs/cnequity.demo.toml"
 DEFAULT_CONFIG = USER_CONFIG
 
 
@@ -37,10 +38,24 @@ def resolve_config_path(config_path: str):
 
     path = Path(config_path)
     if config_path == USER_CONFIG and not path.exists():
+        # `cne demo` writes the demo config, not the user one, so every
+        # command it points at afterwards ("if this fails, run `cne sources
+        # probe ...`") used to die here on a second, unrelated error — at
+        # exactly the moment the user was already trying to recover. Name the
+        # config that does exist rather than falling back to it silently:
+        # `cne init` against a demo data_root is destructive enough that the
+        # choice has to stay the user's.
+        hint = ""
+        if Path(DEMO_CONFIG).exists():
+            hint = (
+                f"\nFound {DEMO_CONFIG} from `cne demo` — to act on the demo lake, "
+                f"add `--config {DEMO_CONFIG}`."
+            )
         raise click.ClickException(
             f"Config not found: {USER_CONFIG}. "
             "Run `cne config init` to write one from the packaged example "
             f"(or copy {EXAMPLE_CONFIG} if you have the repo checkout)."
+            f"{hint}"
         )
     if not path.exists():
         raise click.ClickException(f"Config not found: {path}")

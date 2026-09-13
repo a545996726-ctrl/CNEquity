@@ -53,7 +53,7 @@ cne demo --sample
 | `--resume` | 续跑最近未完成 init |
 | `--run-id` | 续跑指定 init run（隐含 resume） |
 | `--keep-going` | phase 失败后继续后续 phase |
-| `--profile full\|quick` | 回填多少历史。`quick` = 最近 3 年，`full`（默认）= 各 step 自己的起点（`daily_bars` 为 2016-01-01） |
+| `--profile full\|quick` | 回填多少历史。`quick`（默认）= 最近 3 年，`full` = 各 step 自己的起点（`daily_bars` 为 2016-01-01，实测约 3 倍耗时） |
 | `--since YYYY-MM-DD` | 显式指定历史起点，覆盖 `--profile` |
 | `--quiet` | 只留 warning 及以上，不打逐批进度 |
 

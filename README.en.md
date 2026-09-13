@@ -41,7 +41,9 @@ cne demo --sample            # deterministic synthetic lake; no network
 ```
 
 Measured at about 25 seconds. Needs **TDX quote hosts** reachable (mainland access is more reliable);
-if it fails, try `cne sources probe --only tdx_protocol`. The demo writes to its own
+if it fails, run `cne doctor` (no config or network needed), then
+`cne sources probe --only tdx_protocol --config configs/cnequity.demo.toml`.
+With no network at all, `cne demo --sample` builds an offline lake instead. The demo writes to its own
 `data/cnequity-demo/` directory and never touches a full lake.
 
 If TDX is unreachable, `cne demo --sample` still verifies installation, Parquet writes,

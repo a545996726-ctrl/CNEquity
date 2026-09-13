@@ -173,8 +173,11 @@ def _write_demo_instruments(cfg: Config, symbols: list[str]) -> list[str]:
         )
     if kept.is_empty():
         raise click.ClickException(
-            "None of the demo symbols were returned by TDX. "
-            "Check connectivity with `cne sources probe --only tdx_protocol` or pass --symbols."
+            "None of the demo symbols were returned by TDX.\n"
+            "  Check the environment first: `cne doctor` (no config or network needed).\n"
+            "  Then the route: `cne sources probe --only tdx_protocol "
+            "--config configs/cnequity.demo.toml`.\n"
+            "  No network at all? `cne demo --sample` builds an offline lake instead."
         )
     df = validate_dataframe(
         with_provenance(kept, source="tdx_protocol", data_version="v1"),

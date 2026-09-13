@@ -19,7 +19,7 @@ derive_workers = 4
 # Maximum in-flight requests per source.  Pacing (`min_interval_seconds`) is
 # still the QPS guard; these caps protect upstream connection capacity when
 # independent DAG steps or derives overlap.
-source_concurrency = { eastmoney = 4, ths = 2, ths_pages = 1, ths_bonus = 1, cninfo = 2, pboc = 2, nbs = 2, exchange = 2, sina = 4, sina_bars = 2, bse = 2, baostock = 1, tushare = 2, ths_official = 2 }
+source_concurrency = { tdx_protocol = 4, eastmoney = 4, ths = 2, ths_pages = 1, ths_bonus = 1, cninfo = 2, pboc = 2, nbs = 2, exchange = 2, sina = 4, sina_bars = 2, bse = 2, baostock = 1, tushare = 2, ths_official = 2 }
 batch_size = 100
 max_retries = 3
 retry_backoff_seconds = 5

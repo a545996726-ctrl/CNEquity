@@ -21,3 +21,12 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+
+  # SECURITY.md asks reporters to flag keys found in git history, but nothing
+  # stopped one getting there. This scans staged content before the commit
+  # exists; `.github/workflows/security.yml` scans the full history, because a
+  # local hook only protects clones that installed it.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

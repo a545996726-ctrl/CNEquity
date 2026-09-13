@@ -189,10 +189,25 @@ def rate_limit_if_unconfigured(client: object, config: Config | None) -> None:
 def is_transport_fail_fast(exc: BaseException) -> bool:
     """True for failures that retrying the same request will not fix.
 
-    A connect refusal, a TLS/protocol drop or a dead proxy is a property of
-    the route, not of this request: retrying spends the backoff and fails
-    identically. Read timeouts are excluded on purpose — those do come back
-    on a second try when EastMoney is merely busy.
+    A connect refusal, a TLS/protocol drop, a dead proxy or an edge 5xx is a
+    property of the route, not of this request: retrying spends the backoff
+    and fails identically.
+
+    Timeouts are included deliberately, and this is the counter-intuitive
+    part. A blocked or throttled egress to EastMoney surfaces as a *timeout*,
+    not a refusal, and it stays blocked for the whole run — `commodity_bars`
+    measured 151 s per daily run (15 contracts x 5 attempts x backoff) to
+    return nothing before the timeout case was made fail-fast. `bars.py` also
+    feeds this predicate into a consecutive-failure circuit breaker, which
+    only works if a dead route is reported as dead on the first request.
+
+    This is NOT a "retry transient errors" predicate, and EastMoney's own
+    transient conditions do not reach it: throttling arrives as an
+    application-level busy message in the response body and is raised as
+    ``_ServerBusy`` (see ``datacenter.py``), which falls through to False here
+    and *is* retried with backoff. Making timeouts retryable here would
+    re-open the 151 s regression; change it only with a measurement that says
+    otherwise.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response is not None and exc.response.status_code >= 500

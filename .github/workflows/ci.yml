@@ -141,8 +141,14 @@ jobs:
           set +e
           pytest tests/unit -q | tee pytest-out.txt
           code=${PIPESTATUS[0]}
-          if grep -E '[0-9]+ passed' pytest-out.txt >/dev/null \
-            && ! grep -E 'FAILED |ERROR collecting|[1-9][0-9]* failed' pytest-out.txt >/dev/null; then
+          # This may only mask the post-session atexit noise described above —
+          # never a real result. The previous predicate missed errored tests
+          # entirely: pytest reports a blown-up fixture as "1 passed, 1 error"
+          # with exit 1, which matched "passed" and none of the negative
+          # patterns, so the job went green with a broken test suite.
+          if grep -Eq '[0-9]+ passed' pytest-out.txt \
+            && ! grep -Eq '^(FAILED|ERROR) ' pytest-out.txt \
+            && ! grep -Eq '[0-9]+ (failed|error)' pytest-out.txt; then
             exit 0
           fi
           exit "$code"

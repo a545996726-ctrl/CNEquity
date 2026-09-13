@@ -207,11 +207,22 @@ def test_config_source_request_caps_concurrent_calls_across_call_sites(tmp_path)
 
 
 def test_config_source_request_combines_qps_spacing_with_inflight_cap(tmp_path):
-    """Pacing and the shared lease both apply at the actual call boundary."""
+    """Pacing and the shared lease both apply at the actual call boundary.
+
+    The interval is deliberately far larger than scheduler jitter. At 40 ms
+    the tolerance was 24 ms, which is the same order as the descheduling a
+    loaded machine imposes between the limiter releasing a thread and that
+    thread reading the clock: the measured gap collapsed to 11 ms and failed
+    here while the limiter was behaving correctly (`peak <= 2` held). Timing
+    assertions only mean something when the quantity under test dominates the
+    noise, so the interval leads the jitter by an order of magnitude.
+    """
+    interval = 0.2
+    hold = 0.5  # > interval, so two requests genuinely overlap in the cap
     cfg = Config(
         data_root=tmp_path / "data",
         workers=4,
-        source_intervals={"eastmoney": 0.04},
+        source_intervals={"eastmoney": interval},
         source_concurrency={"eastmoney": 2},
     )
     active = 0
@@ -222,12 +233,20 @@ def test_config_source_request_combines_qps_spacing_with_inflight_cap(tmp_path):
     def _request(_index: int) -> None:
         nonlocal active, peak
         with cfg.source_request("eastmoney"):
+            # Stamp before contending for `lock`, not inside it. Taking the
+            # timestamp under the mutex measures "when this thread won the
+            # mutex", so a thread descheduled between the limiter releasing it
+            # and the mutex being acquired records late — which compresses the
+            # *measured* gap below the interval the limiter actually enforced
+            # and failed this assertion under full-suite load (observed 11 ms
+            # for a 40 ms interval, while `peak <= 2` still held).
+            started = time.perf_counter()
             with lock:
-                starts.append(time.perf_counter())
+                starts.append(started)
                 active += 1
                 peak = max(peak, active)
             try:
-                time.sleep(0.12)
+                time.sleep(hold)
             finally:
                 with lock:
                     active -= 1
@@ -238,8 +257,8 @@ def test_config_source_request_combines_qps_spacing_with_inflight_cap(tmp_path):
     assert peak <= 2
     assert len(starts) == 3
     ordered = sorted(starts)
-    assert ordered[1] - ordered[0] >= 0.04 * 0.6
-    assert ordered[2] - ordered[1] >= 0.04 * 0.6
+    assert ordered[1] - ordered[0] >= interval * 0.6
+    assert ordered[2] - ordered[1] >= interval * 0.6
 
 
 def test_source_aliases_share_the_narrowest_configured_vendor_cap(tmp_path):

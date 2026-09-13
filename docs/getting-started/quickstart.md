@@ -100,7 +100,7 @@ init 耗时较长（全市场日线分页回填），建议在稳定网络下运
 
 ```bash
 git clone https://github.com/rootSunc/CNEquity.git
-cd cnequity
+cd CNEquity
 python scripts/accept_backfill.py snapshot --out /tmp/curated-counts.json
 # 同窗口重跑 daily 后对比
 python scripts/accept_backfill.py check --compare /tmp/curated-counts.json

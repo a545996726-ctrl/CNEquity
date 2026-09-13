@@ -4,7 +4,18 @@ site_url: https://rootsunc.github.io/CNEquity/
 repo_name: rootSunc/CNEquity
 repo_url: https://github.com/rootSunc/CNEquity
 edit_uri: edit/main/docs/
-exclude_docs: "/README.md"
+# `/README.md` is the in-repo docs index, not a site page. The three
+# `*（已迁移/已并入）` stubs are redirect tombstones for links that predate the
+# docs reorg; they have no inbound links left inside the tree and only added
+# dead-end search hits. `assets/README.md` is an internal inventory of the
+# image sources. All still resolve on GitHub, which is where the old links
+# point.
+exclude_docs: |
+  /README.md
+  /architecture.md
+  /ops-runbook.md
+  /datasets/README.md
+  /assets/README.md
 
 theme:
   name: material
@@ -45,6 +56,11 @@ extra_css:
 # The repository also keeps links to root-level contributor/legal files and
 # source paths that are intentionally outside the published docs tree. MkDocs
 # should preserve those links while still failing on broken entries in `nav`.
+#
+# `anchors` is deliberately NOT ignored: with the Unicode slugifier configured
+# below, in-page anchors are checkable, and `mkdocs build --strict` is what
+# keeps a renamed Chinese heading from silently orphaning every link to it.
+# `not_found` stays ignored only because of the out-of-tree links above.
 validation:
   nav:
     omitted_files: ignore
@@ -52,7 +68,7 @@ validation:
     absolute_links: ignore
     unrecognized_links: ignore
     not_found: ignore
-    anchors: ignore
+    anchors: warn
 
 markdown_extensions:
   - admonition
@@ -64,6 +80,12 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+      # Python-Markdown's default slugifier strips every non-ASCII character,
+      # so a pure-CJK heading collapses to a positional `_1` and a mixed one
+      # loses its Chinese entirely (`## 调度组` -> `_1`). Every in-repo anchor
+      # link was written against pymdownx's Unicode slugifier, which is what
+      # this restores: `## 调度组` -> `#调度组`.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
 
 nav:
   - 首页: index.md
@@ -80,20 +102,26 @@ nav:
       - 数据集目录: datasets/catalog.md
       - Schema: datasets/schema.md
       - 数据契约: datasets/contract.md
+      - 数据源: datasets/sources.md
       - 查询指南: datasets/query-guide.md
       - Universe 画像: reference/universe-profiles.md
+      - CLI 参考: reference/cli.md
       - Python API: reference/python-api.md
       - MCP: reference/mcp.md
   - 运维:
       - Runbook: operations/runbook.md
       - 排障: operations/troubleshooting.md
       - 数据源健康度: operations/source-health.md
+      - 运维脚本: operations/scripts.md
   - 架构:
       - 总览: architecture/overview.md
+      - 设计原则: architecture/design-principles.md
       - 数据流: architecture/data-flow.md
       - 数据湖布局: architecture/lake-layout.md
+      - 模块索引: modules/README.md
       - ADR: adr/README.md
   - 贡献与合规:
+      - 项目对比: comparison.md
       - 开发约定: development/conventions.md
       - 测试: development/testing.md
       - 新增数据集: development/adding-dataset.md

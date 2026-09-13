@@ -159,8 +159,11 @@ cne demo
 `cne demo` 默认拉取 5 只股票最近约 30 个交易日的真实数据，写入独立目录 `data/cnequity-demo/`，不会覆盖正式数据湖。需要能访问 TDX 行情主机；如果连接失败，可以先检查：
 
 ```bash
-cne sources probe --only tdx_protocol
+cne doctor                 # 环境体检：不需要配置，也不需要网络
+cne sources probe --only tdx_protocol --config configs/cnequity.demo.toml
 ```
+
+完全没有网络时，用 `cne demo --sample` 跑离线样例。
 
 完全无法连接 TDX 时，运行 `cne demo --sample`，可离线验证安装、Parquet 落盘和查询链路。合成行全部标记为 `source=mock`，不可用于研究。
 

@@ -3030,13 +3030,21 @@ def _withhold_unbacked_disputes(
 
 
 def _append_diff(path: Path, frame: pl.DataFrame) -> None:
-    """Accumulate the diff across chunks, so a long sweep survives inspection."""
+    """Accumulate the diff across chunks, so a long sweep survives inspection.
+
+    Writes through ``write_parquet_atomic``: this was the one parquet writer
+    in the tree that truncated its destination inode in place, which a
+    reader holding the previous footer sees as a corrupt file, and which
+    would silently damage any generation that hardlinks this path.
+    """
+    from cnequity.storage.atomic import write_parquet_atomic
+
     if frame.is_empty():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         frame = pl.concat([pl.read_parquet(path), frame], how="vertical")
-    frame.write_parquet(path)
+    write_parquet_atomic(path, frame)
 
 
 def repair_deep_history_ths_official(
