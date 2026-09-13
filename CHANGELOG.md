@@ -6,6 +6,21 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/sync_schema_docs.py`, gated in CI.** `docs/datasets/schema.md` was
+  hand-maintained and had drifted: 11 of the 42 registered datasets had no
+  section at all (`top_holders`, `share_structure`, `delisting_events`,
+  `news_headlines`, …), and nothing tied a column added in `domain/schemas.py`
+  to the page. The script syncs column names, order and types from the registry
+  while carrying the hand-written `说明` cell across by column name — including
+  rows that stand for a group (`open / high / low / close`), whose shared note
+  now reaches each column instead of being dropped. Prose sections are never
+  touched; `--check` fails the build when the two disagree.
+
+- **`PIT 双时态扩展列` is its own section.** It sat under `#### instruments`,
+  which is not a PIT dataset, so it read as a property of the wrong table.
+
 ### Fixed
 
 - **The bitemporal PIT columns now reach disk.** `available_at`,
