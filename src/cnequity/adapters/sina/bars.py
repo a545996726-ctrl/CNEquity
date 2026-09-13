@@ -64,6 +64,7 @@ _HEADERS = {
 # the endpoint's ceiling rather than an arbitrary page size.
 _FULL_HISTORY_LEN = 5000
 _PROBE_TAIL_LEN = 10
+_WINDOW_TAIL_BUFFER_DAYS = 14
 _SYNTHETIC_COPY_GAP = timedelta(days=90)
 
 _OUTPUT_COLS = [c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at")]
@@ -174,6 +175,24 @@ def _without_synthetic_terminal_copies(rows: list[dict]) -> list[dict]:
     return cleaned
 
 
+def _datalen_for_window(start: date | None, *, today: date | None = None) -> int:
+    """Smallest safe tail for a requested window anchored at the latest bar.
+
+    Sina cannot filter on dates server-side: ``datalen`` always means the most
+    recent N bars.  Calendar days since ``start`` are an upper bound on the
+    number of trading bars required, and a small buffer absorbs clock/session
+    lag.  Historical/full-series callers keep the endpoint ceiling.
+    """
+    if start is None:
+        return _FULL_HISTORY_LEN
+    anchor = today or date.today()
+    calendar_days = max(0, (anchor - start).days) + 1
+    return min(
+        _FULL_HISTORY_LEN,
+        max(_PROBE_TAIL_LEN, calendar_days + _WINDOW_TAIL_BUFFER_DAYS),
+    )
+
+
 def symbol_exists(symbol: str, *, client: httpx.Client | None = None, config=None) -> date | None:
     """Last trading date Sina has for *symbol*, or None if it never traded.
 
@@ -220,7 +239,7 @@ def fetch_daily_bars_sina(
     *,
     start: date | None = None,
     end: date | None = None,
-    datalen: int = _FULL_HISTORY_LEN,
+    datalen: int | None = None,
     client: httpx.Client | None = None,
     config=None,
 ) -> pl.DataFrame:
@@ -230,10 +249,11 @@ def fetch_daily_bars_sina(
     sweeping the code space depends on being able to tell "never issued" from
     "request failed", and a transport failure still raises.
     """
+    request_len = _datalen_for_window(start) if datalen is None else int(datalen)
     if config is None:
-        rows = _request(symbol, datalen, client)
+        rows = _request(symbol, request_len, client)
     else:
-        rows = _request(symbol, datalen, client, config=config)
+        rows = _request(symbol, request_len, client, config=config)
     if not rows:
         return pl.DataFrame(schema={c: DAILY_BARS_SCHEMA[c] for c in _OUTPUT_COLS})
     rows = _without_synthetic_terminal_copies(rows)

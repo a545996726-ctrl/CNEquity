@@ -528,6 +528,7 @@ class Manifest:
         batch_ids: list[str],
         *,
         superseded_by: str,
+        replacement_pending: bool = False,
     ) -> int:
         """Resolve prior retryable attempts after one verified successful retry.
 
@@ -539,7 +540,11 @@ class Manifest:
         if not ids:
             return 0
         placeholders = ",".join("?" for _ in ids)
-        message = f"superseded by successful retry batch {superseded_by}"
+        message = (
+            f"superseded by pending retry scope {superseded_by}"
+            if replacement_pending
+            else f"superseded by successful retry batch {superseded_by}"
+        )
         with self._connect() as conn:
             cur = conn.execute(
                 f"""

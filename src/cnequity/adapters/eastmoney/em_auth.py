@@ -6,9 +6,11 @@ The client is therefore plain ``httpx``: one connection pool, the headers the
 quote page sends, and the ``nid`` cookie the datacenter endpoints want.
 
 Users without a mainland route (overseas, some cloud egress) set
-``[sources.eastmoney].proxy`` to an HTTP(S) proxy that has one. That is the
-single supported lever, and it applies to every EastMoney host rather than to
-one CDN. What used to live here instead — Chrome JA3 impersonation via
+``[sources.eastmoney].proxy`` to an HTTP(S) proxy that has one. It applies to
+every EastMoney host. Deployments where the proxy itself is less reliable for
+historical K-lines may explicitly enable ``direct_fallback``; that retries only
+``push2his`` once, and stays off by default so mandatory proxy policy is never
+silently bypassed. What used to live here instead — Chrome JA3 impersonation via
 curl_cffi, ``CURLOPT_RESOLVE`` pinning against a ladder of DoH/dig/hardcoded
 edge IPs, a sticky last-good IP persisted across runs, and a circuit breaker
 to make that ladder's failure mode affordable — solved the same problem for
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -68,6 +71,7 @@ _CHROME_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/150.0.0.0 Safari/537.36"
 )
+_DIRECT_FALLBACK_STATUS_CODES = frozenset({502, 503, 504})
 
 
 def fetch_nid(client: httpx.Client | None = None, *, config: Config | None = None) -> str:
@@ -230,18 +234,48 @@ class EastMoneyClient:
             if timeout_sec is None:
                 timeout = float(getattr(config, "eastmoney_timeout_sec", 15.0) or 15.0)
         self._timeout = timeout
+        self.last_route_outcome: dict[str, object] = {}
+        self._direct_client: httpx.Client | None = None
+        self._direct_client_lock = threading.Lock()
+        self._client = self._make_client(proxy=self._proxy)
+
+    def _make_client(self, *, proxy: str | None, direct: bool = False) -> httpx.Client:
         # httpx>=0.28 removed ``proxies``; older httpx still needs it. The mootdx
         # pin that forced <0.26 is gone, but the floor is still 0.25.
-        client_kwargs: dict = {"timeout": timeout, "follow_redirects": True}
-        if self._proxy is not None:
-            client_kwargs["proxy"] = self._proxy
+        client_kwargs: dict = {"timeout": self._timeout, "follow_redirects": True}
+        if direct:
+            # A real direct retry must not inherit HTTPS_PROXY/HTTP_PROXY from
+            # the process after the explicit proxy route has failed.
+            client_kwargs["trust_env"] = False
+        if proxy is not None:
+            client_kwargs["proxy"] = proxy
         try:
-            self._client = httpx.Client(**client_kwargs)
+            return httpx.Client(**client_kwargs)
         except TypeError:
-            if self._proxy is not None:
+            if proxy is not None:
                 client_kwargs.pop("proxy", None)
-                client_kwargs["proxies"] = self._proxy
-            self._client = httpx.Client(**client_kwargs)
+                client_kwargs["proxies"] = proxy
+            return httpx.Client(**client_kwargs)
+
+    def _can_fallback_direct(self, url: str) -> bool:
+        host = (httpx.URL(url).host or "").lower()
+        return bool(
+            self._proxy
+            and getattr(self.config, "eastmoney_direct_fallback", False)
+            and (host == "push2his.eastmoney.com" or host.endswith(".push2his.eastmoney.com"))
+        )
+
+    def _get_direct_client(self) -> httpx.Client:
+        if self._direct_client is None:
+            with self._direct_client_lock:
+                if self._direct_client is None:
+                    self._direct_client = self._make_client(proxy=None, direct=True)
+        return self._direct_client
+
+    def _get_direct(self, url: str, *, headers: dict[str, str], **kwargs) -> httpx.Response:
+        logger.warning("EastMoney push2his proxy route failed; retrying once via direct route")
+        with source_request(self.config, "eastmoney"):
+            return self._get_direct_client().get(url, headers=headers, **kwargs)
 
     def _throttle(self) -> None:
         if self.config is not None:
@@ -278,8 +312,48 @@ class EastMoneyClient:
             # httpx>=0.25, so a fresh `pip install cnequity` hit exactly this.
             # copy_merge_params behaves identically on both versions.
             url = str(httpx.URL(url).copy_merge_params(params))
-        with source_request(self.config, "eastmoney"):
-            return self._client.get(url, headers=headers, **kwargs)
+        self.last_route_outcome = {
+            "primary_route": "proxy" if self._proxy else "direct",
+            "proxy_failed": False,
+            "direct_failed": False,
+            "direct_succeeded": False,
+        }
+        try:
+            with source_request(self.config, "eastmoney"):
+                response = self._client.get(url, headers=headers, **kwargs)
+        except (
+            httpx.TimeoutException,
+            httpx.ConnectError,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+        ) as exc:
+            self.last_route_outcome["primary_error"] = type(exc).__name__
+            if not self._can_fallback_direct(url):
+                raise
+            self.last_route_outcome["proxy_failed"] = True
+            try:
+                direct = self._get_direct(url, headers=headers, **kwargs)
+            except Exception as direct_exc:
+                self.last_route_outcome["direct_failed"] = True
+                self.last_route_outcome["direct_error"] = type(direct_exc).__name__
+                raise
+            self.last_route_outcome["direct_succeeded"] = True
+            self.last_route_outcome["status_code"] = direct.status_code
+            return direct
+        if response.status_code in _DIRECT_FALLBACK_STATUS_CODES and self._can_fallback_direct(url):
+            self.last_route_outcome["proxy_failed"] = True
+            self.last_route_outcome["primary_status_code"] = response.status_code
+            try:
+                direct = self._get_direct(url, headers=headers, **kwargs)
+            except Exception as direct_exc:
+                self.last_route_outcome["direct_failed"] = True
+                self.last_route_outcome["direct_error"] = type(direct_exc).__name__
+                raise
+            self.last_route_outcome["direct_succeeded"] = True
+            self.last_route_outcome["status_code"] = direct.status_code
+            return direct
+        self.last_route_outcome["status_code"] = response.status_code
+        return response
 
     def post(self, url: str, **kwargs) -> httpx.Response:
         if self.config is None:
@@ -291,6 +365,8 @@ class EastMoneyClient:
 
     def close(self) -> None:
         self._client.close()
+        if self._direct_client is not None:
+            self._direct_client.close()
 
     def __enter__(self) -> EastMoneyClient:
         return self

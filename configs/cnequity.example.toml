@@ -80,6 +80,10 @@ timeout_sec = 30
 # push2/push2his. Point it at any proxy that has one (Clash, ssh -D, a China
 # VPS). When unset, httpx still honors HTTPS_PROXY / HTTP_PROXY env vars.
 # proxy = "http://127.0.0.1:7890"
+# Optional failover for proxy instability: only push2his historical K-lines
+# retry once with trust_env=false. Keep false where policy requires all traffic
+# to use the proxy.
+direct_fallback = false
 
 [sources.ths]
 # 同花顺 — primary source for sector_bars (board index OHLC), history and daily.

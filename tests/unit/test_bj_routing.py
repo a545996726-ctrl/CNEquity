@@ -303,18 +303,20 @@ def test_sina_bars_retries_transient_rate_limit(tmp_path, monkeypatch):
         retry_backoff_seconds=5,
     )
     attempts = 0
-    sleeps: list[float] = []
+    deferrals: list[tuple[str, float]] = []
     request = httpx.Request("GET", "https://example.test/sina")
 
     def flaky(symbol, client):
         nonlocal attempts
         attempts += 1
-        if attempts < 3:
+        if attempts < 2:
             response = httpx.Response(456, request=request)
             raise httpx.HTTPStatusError("rate limited", request=request, response=response)
         return _bars(symbol, [date(2026, 7, 21)])
 
-    monkeypatch.setattr("cnequity.steps.bars.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        cfg, "defer_source", lambda source, seconds: deferrals.append((source, seconds))
+    )
     result = fetch_bars_via_sina(
         cfg,
         ["920000.BJ"],
@@ -324,10 +326,49 @@ def test_sina_bars_retries_transient_rate_limit(tmp_path, monkeypatch):
         fetch=flaky,
     )
 
-    assert attempts == 3
-    assert sleeps == [5.0, 10.0]
+    assert attempts == 2
+    assert deferrals == [("sina_bars", 30.0)]
     assert result["rows_written"] == 1
     assert "failed_symbols" not in result
+    assert result["source_outcomes"]["sina"]["failure_reasons"] == {}
+
+
+def test_sina_bars_opens_circuit_after_repeated_rate_limit(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        sources={"sina": True, "sina_bars": True},
+        source_intervals={"sina_bars": 0.0},
+        source_concurrency={"sina_bars": 1},
+    )
+    attempts = 0
+    deferrals: list[tuple[str, float]] = []
+    request = httpx.Request("GET", "https://example.test/sina")
+
+    def blocked(symbol, client):
+        nonlocal attempts
+        attempts += 1
+        response = httpx.Response(456, request=request)
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    monkeypatch.setattr(
+        cfg, "defer_source", lambda source, seconds: deferrals.append((source, seconds))
+    )
+    result = fetch_bars_via_sina(
+        cfg,
+        ["920000.BJ", "920001.BJ"],
+        date(2026, 7, 21),
+        date(2026, 7, 21),
+        "run-circuit",
+        fetch=blocked,
+    )
+
+    assert attempts == 2
+    assert deferrals == [("sina_bars", 30.0), ("sina_bars", 120.0)]
+    assert result["failed_symbols"] == 2
+    assert result["source_outcomes"]["sina"]["failure_reasons"] == {
+        "circuit_open": 1,
+        "rate_limited": 1,
+    }
 
 
 # --- instruments ------------------------------------------------------------

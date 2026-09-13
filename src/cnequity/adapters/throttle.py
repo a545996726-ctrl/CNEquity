@@ -20,6 +20,8 @@ def _source_family(source: str) -> str:
         return "cninfo"
     if text.startswith("eastmoney") or text in {"em", "datacenter"}:
         return "eastmoney"
+    if text.startswith("sina"):
+        return "sina"
     return text
 
 
@@ -89,6 +91,15 @@ class SourceRateLimiters:
         limiter = self._limiters.get(source)
         if limiter is not None:
             limiter.wait()
+
+    def defer(self, source: str, seconds: float) -> None:
+        """Apply a vendor-wide cooling-off deadline to every pacing alias."""
+        family = _source_family(source)
+        matching = [
+            limiter for name, limiter in self._limiters.items() if _source_family(name) == family
+        ]
+        for limiter in matching:
+            limiter.defer(seconds)
 
     def _get_concurrency(self, source: str) -> SourceConcurrencyLimiter:
         family = _source_family(source)

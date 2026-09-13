@@ -220,6 +220,11 @@ class Config:
     # Keep the option at the end so historical positional Config(...) callers
     # retain their argument order.
     negative_evidence_ttl_days: int = 7
+    # Keep new compatibility options at the end for the same reason. If an
+    # explicit proxy fails only for push2his, this permits one retry without
+    # proxy/environment routing; default-off avoids bypassing mandatory proxy
+    # policies in existing deployments.
+    eastmoney_direct_fallback: bool = False
 
     def __post_init__(self) -> None:
         """Normalize path-like fields for programmatic configurations.
@@ -248,6 +253,17 @@ class Config:
 
             self._rate_limiters = SourceRateLimiters(self)
         self._rate_limiters.wait(source)  # type: ignore[union-attr]
+
+    def defer_source(self, source: str, seconds: float) -> None:
+        """Share a source cooling-off deadline with all local processes."""
+        self._validate_source_limits()
+        if self._rate_limiters is None:
+            from cnequity.adapters.throttle import SourceRateLimiters
+
+            self._rate_limiters = SourceRateLimiters(self)
+        limiters = self._rate_limiters
+        if hasattr(limiters, "defer"):
+            limiters.defer(source, seconds)  # type: ignore[union-attr]
 
     @contextmanager
     def source_slot(
@@ -525,6 +541,7 @@ def load_config(path: str | Path) -> Config:
     sources: dict[str, bool] = {}
     source_intervals: dict[str, float] = {}
     eastmoney_proxy: str | None = None
+    eastmoney_direct_fallback = False
     eastmoney_timeout_sec = 15.0
     baostock_batch_size = 20
     baostock_batch_rest_seconds = 120.0
@@ -552,6 +569,8 @@ def load_config(path: str | Path) -> Config:
                     break
             if name == "eastmoney" and val.get("proxy"):
                 eastmoney_proxy = str(val["proxy"]).strip() or None
+            if name == "eastmoney" and val.get("direct_fallback") is not None:
+                eastmoney_direct_fallback = bool(val["direct_fallback"])
             if name == "eastmoney" and val.get("timeout_sec") is not None:
                 eastmoney_timeout_sec = float(val["timeout_sec"])
             # No eastmoney batch_size / batch_rest_seconds: the batch cool-down
@@ -691,6 +710,7 @@ def load_config(path: str | Path) -> Config:
         sources=sources,
         source_intervals=source_intervals,
         eastmoney_proxy=eastmoney_proxy,
+        eastmoney_direct_fallback=eastmoney_direct_fallback,
         eastmoney_timeout_sec=eastmoney_timeout_sec,
         baostock_batch_size=baostock_batch_size,
         baostock_batch_rest_seconds=baostock_batch_rest_seconds,

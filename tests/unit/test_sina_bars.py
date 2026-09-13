@@ -69,6 +69,43 @@ def test_symbol_exists_and_fetch_filters(monkeypatch):
     assert df["amount"][0] is None
 
 
+def test_recent_window_requests_a_small_tail(monkeypatch):
+    seen: list[int] = []
+
+    def request(symbol, datalen, client):
+        seen.append(datalen)
+        return None
+
+    monkeypatch.setattr(sina, "_request", request)
+    monkeypatch.setattr(
+        sina,
+        "date",
+        SimpleNamespace(today=lambda: date(2026, 9, 13), fromisoformat=date.fromisoformat),
+    )
+
+    sina.fetch_daily_bars_sina(
+        "600519.SH",
+        start=date(2026, 9, 1),
+        end=date(2026, 9, 11),
+    )
+
+    assert seen == [27]
+
+
+def test_explicit_datalen_and_full_history_are_preserved(monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(
+        sina,
+        "_request",
+        lambda symbol, datalen, client: seen.append(datalen) or None,
+    )
+
+    sina.fetch_daily_bars_sina("600519.SH", datalen=123)
+    sina.fetch_daily_bars_sina("600519.SH")
+
+    assert seen == [123, sina._FULL_HISTORY_LEN]
+
+
 def test_fetch_skips_nonfinite_numeric_rows(monkeypatch):
     monkeypatch.setattr(
         sina,

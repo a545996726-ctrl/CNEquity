@@ -142,7 +142,7 @@ def is_risk_warning(status: str | None, risk_warning: bool | None = None) -> boo
 DERIVED_BAR_GAP_SOURCE = "derived_bar_gap"
 
 #: Feeds that report current state rather than a session's record.
-CURRENT_SNAPSHOT_SOURCES = frozenset({"eastmoney", "tdx_protocol"})
+CURRENT_SNAPSHOT_SOURCES = frozenset({"eastmoney", "eastmoney_cached", "tdx_protocol"})
 
 #: The closing auction ends at 15:00 Asia/Shanghai. A current-state board read
 #: before then describes a session that had not finished happening.

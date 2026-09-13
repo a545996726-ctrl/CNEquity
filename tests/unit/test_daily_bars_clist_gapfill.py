@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import polars as pl
@@ -13,7 +14,11 @@ from cnequity.domain.schemas import with_provenance
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.steps.bars import (
     _finish_daily_bars,
+    _gapfill_complete_symbols_via_exchange,
+    _gapfill_missing_keys_via_ths,
+    _gapfill_multiday_via_kline,
     _gapfill_tip_via_clist,
+    _mark_unresolved_daily_bar_batches,
     _reject_preopen_placeholder,
     _resolve_recovered_daily_batches,
     _staged_daily_bar_partial_symbols,
@@ -61,6 +66,274 @@ def _bar_frame(symbols: list[str], d: date, *, volume: int = 100) -> pl.DataFram
         source="tdx_protocol",
         data_version="v1",
     )
+
+
+def test_exchange_gapfill_uses_bulk_dates_and_writes_only_missing_keys(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.sources["exchange"] = True
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("backfill")
+    first = date(2026, 7, 20)
+    second = date(2026, 7, 21)
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars",
+        run_id,
+        "tdx-0000",
+        _bar_frame(["000001.SZ"], first),
+    )
+    calls: list[date] = []
+
+    def fetch_szse(day, *, config=None):
+        calls.append(day)
+        return _bar_frame(["000001.SZ"], day).drop("source", "data_version", "fetched_at")
+
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.daily_quotes.fetch_szse_daily_quotes",
+        fetch_szse,
+    )
+
+    result = _gapfill_complete_symbols_via_exchange(
+        cfg,
+        run_id,
+        symbols=["000001.SZ"],
+        start=first,
+        end=second,
+    )
+
+    assert calls == [first, second]
+    assert result["complete_symbols"] == ["000001.SZ"]
+    assert result["rows_written"] == 1
+    staged = pl.read_parquet(
+        cfg.staging_root / "daily_bars" / f"run_id={run_id}" / "part-exchange-gapfill.parquet"
+    )
+    assert staged.select("symbol", "trade_date").rows() == [("000001.SZ", second)]
+    assert staged["source"].unique().to_list() == ["exchange"]
+
+
+def test_exchange_gapfill_skips_long_windows_before_network_calls(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.sources["exchange"] = True
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.daily_quotes.fetch_szse_daily_quotes",
+        lambda *args, **kwargs: pytest.fail("long windows must skip exchange daily files"),
+    )
+
+    result = _gapfill_complete_symbols_via_exchange(
+        cfg,
+        run_id,
+        symbols=["000001.SZ"],
+        start=date(2026, 1, 1),
+        end=date(2026, 3, 31),
+    )
+
+    assert result["source_outcomes"]["exchange"]["status"] == "skipped_long_window"
+    assert result["source_outcomes"]["exchange"]["requests"] == 0
+
+
+def test_ths_final_fallback_writes_only_requested_missing_keys(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.sources["ths"] = True
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("backfill")
+    first = date(2026, 7, 20)
+    second = date(2026, 7, 21)
+
+    monkeypatch.setattr(
+        "cnequity.adapters.ths.stock_bars.fetch_stock_bars",
+        lambda *args, **kwargs: [
+            {
+                "symbol": "000001.SZ",
+                "trade_date": first,
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.5,
+                "volume": 100,
+                "amount": 1000.0,
+            },
+            {
+                "symbol": "000001.SZ",
+                "trade_date": second,
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.5,
+                "volume": 100,
+                "amount": 1000.0,
+            },
+        ],
+    )
+
+    result = _gapfill_missing_keys_via_ths(
+        cfg,
+        run_id,
+        missing_keys={("000001.SZ", second)},
+        start=first,
+        end=second,
+    )
+
+    assert result["rows_written"] == 1
+    staged = pl.read_parquet(
+        cfg.staging_root / "daily_bars" / f"run_id={run_id}" / "part-ths-kline-gapfill.parquet"
+    )
+    assert staged.select("symbol", "trade_date").rows() == [("000001.SZ", second)]
+
+
+def test_one_source_empty_is_not_enough_to_certify_no_data(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.sources.update({"exchange": False, "ths": False, "eastmoney": False})
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    day = date(2026, 7, 21)
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbol_names": ["561833.SH"],
+            "empty_symbol_names": ["561833.SH"],
+        },
+    )
+
+    result = _gapfill_multiday_via_kline(
+        cfg,
+        run_id,
+        symbols=["561833.SH"],
+        start=day,
+        end=day,
+    )
+
+    assert result["complete"] is False
+    assert result["expected_no_data_symbols"] == []
+
+
+def test_sina_rate_limit_and_eastmoney_disconnect_fall_through_to_ths(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.sources.update({"exchange": False, "ths": True, "eastmoney": True})
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    day = date(2026, 7, 21)
+    symbol = "600519.SH"
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [],
+            "source_outcomes": {
+                "sina": {
+                    "status": "failed",
+                    "failure_reasons": {"rate_limited": 1, "circuit_open": 1},
+                    "empty_symbols": 0,
+                }
+            },
+        },
+    )
+
+    def disconnected(symbols, start, end, *, diagnostics, **kwargs):
+        diagnostics.update(
+            {
+                "failed_symbols": {symbol: "transport_error"},
+                "empty_symbols": [],
+                "route_outcomes": {
+                    symbol: {
+                        "proxy_failed": True,
+                        "direct_failed": True,
+                        "direct_succeeded": False,
+                    }
+                },
+            }
+        )
+        return pl.DataFrame()
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
+        disconnected,
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.ths.stock_bars.fetch_stock_bars",
+        lambda *args, **kwargs: [
+            {
+                "symbol": symbol,
+                "trade_date": day,
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.5,
+                "volume": 100,
+                "amount": 1000.0,
+            }
+        ],
+    )
+
+    result = _gapfill_multiday_via_kline(
+        cfg,
+        run_id,
+        symbols=[symbol],
+        start=day,
+        end=day,
+    )
+
+    assert result["complete"] is True
+    assert result["rows_written"] == 1
+    assert result["source_outcomes"]["eastmoney"]["proxy_failed"] == 1
+    assert result["source_outcomes"]["eastmoney"]["direct_failed"] == 1
+    assert result["source_outcomes"]["ths"]["status"] == "success"
+    staged = pl.read_parquet(
+        cfg.staging_root / "daily_bars" / f"run_id={run_id}" / "part-ths-kline-gapfill.parquet"
+    )
+    assert staged["source"].unique().to_list() == ["ths"]
+
+
+def test_interior_gaps_schedule_exact_single_day_retry_batches(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.batch_size = 2
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("backfill")
+    first = date(2026, 7, 20)
+    second = date(2026, 7, 21)
+    manifest.start_batch(
+        run_id,
+        "original-wide-batch",
+        "daily_bars",
+        "daily_bars",
+        symbols=["000001.SZ", "000002.SZ", "000003.SZ", "600519.SH"],
+        window_start=first.isoformat(),
+        window_end=second.isoformat(),
+    )
+    manifest.finish_batch(
+        run_id,
+        "original-wide-batch",
+        "failed",
+        error_message="partial coverage",
+    )
+
+    _mark_unresolved_daily_bar_batches(
+        cfg,
+        run_id,
+        {
+            ("000001.SZ", first),
+            ("000002.SZ", first),
+            ("000003.SZ", first),
+            ("600519.SH", second),
+        },
+    )
+
+    batches = sorted(manifest.get_batches_for_run(run_id), key=lambda row: row["batch_id"])
+    assert len(batches) == 4
+    original = next(row for row in batches if row["batch_id"] == "original-wide-batch")
+    assert original["status"] == "superseded"
+    children = [row for row in batches if row["batch_id"] != "original-wide-batch"]
+    assert all(row["status"] == "stale" for row in children)
+    assert all(row["window_start"] == row["window_end"] for row in children)
+    actual = {
+        (row["window_start"], tuple(sorted(json.loads(row["symbols_json"])))) for row in children
+    }
+    assert actual == {
+        (first.isoformat(), ("000001.SZ", "000002.SZ")),
+        (first.isoformat(), ("000003.SZ",)),
+        (second.isoformat(), ("600519.SH",)),
+    }
 
 
 def test_fetch_daily_bars_clist_stamps_trade_date(monkeypatch):
@@ -892,8 +1165,9 @@ def test_multiday_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
         )
 
 
-def test_multiday_accepts_explicit_no_data_from_fallback(tmp_path, monkeypatch):
+def test_multiday_requires_two_independent_source_empty_observations(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
+    cfg.sources["ths"] = True
     run_id = Manifest(cfg.manifest_path).start_run("backfill")
     start, end = date(2024, 6, 20), date(2024, 6, 28)
 
@@ -910,6 +1184,10 @@ def test_multiday_accepts_explicit_no_data_from_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.ths.stock_bars.fetch_stock_bars",
+        lambda *args, **kwargs: [],
     )
 
     result = _finish_daily_bars(
@@ -930,7 +1208,7 @@ def test_multiday_accepts_explicit_no_data_from_fallback(tmp_path, monkeypatch):
 
     assert result["rows_written"] == 0
     findings = result["context_updates"]["audit_findings"]
-    assert any(f["check"] == "daily_bars_sina_expected_no_data" for f in findings)
+    assert any(f["check"] == "daily_bars_multi_source_no_data" for f in findings)
 
 
 def test_resolve_recovered_daily_batches_does_not_close_unrelated_failures(tmp_path):

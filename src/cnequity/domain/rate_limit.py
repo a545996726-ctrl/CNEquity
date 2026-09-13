@@ -50,6 +50,41 @@ class RateLimiter:
     state_dir: Path
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS
 
+    def defer(self, seconds: float) -> None:
+        """Push this source's next request slot into the future.
+
+        Unlike a local ``sleep``, the deadline is persisted under the same
+        cross-process lock as normal pacing.  A vendor-wide refusal can
+        therefore stop already queued workers and other CLI processes from
+        continuing to hit the source during its cooling-off window.
+        """
+        seconds = float(seconds)
+        if not math.isfinite(seconds) or seconds <= 0:
+            return
+
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_dir / f"{self.name}.lock"
+        state_path = self.state_dir / f"{self.name}.json"
+        with exclusive_lock(lock_path, timeout=self.lock_timeout):
+            state = _read_json(state_path)
+            try:
+                previous_last = float(state.get("last", 0.0))
+            except (TypeError, ValueError):
+                previous_last = 0.0
+            try:
+                previous_next = float(state.get("next_allowed_at", 0.0))
+            except (TypeError, ValueError):
+                previous_next = 0.0
+            if not math.isfinite(previous_last) or previous_last < 0:
+                previous_last = 0.0
+            if not math.isfinite(previous_next) or previous_next < 0:
+                previous_next = 0.0
+            deadline = max(previous_next, time.time() + seconds)
+            _write_json(
+                state_path,
+                {"last": previous_last, "next_allowed_at": deadline},
+            )
+
     def wait(self) -> None:
         if self.min_interval <= 0:
             return

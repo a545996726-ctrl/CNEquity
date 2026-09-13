@@ -129,6 +129,7 @@ def fetch_daily_bars(
     client: EastMoneyClient | None = None,
     config=None,
     timeout_sec: float | None = None,
+    diagnostics: dict | None = None,
 ) -> pl.DataFrame:
     """Per-symbol historical kline (slow). Prefer :func:`fetch_daily_bars_clist` for tip."""
     owns = client is None
@@ -140,6 +141,11 @@ def fetch_daily_bars(
     rows: list[dict] = []
     rejected = 0
     consecutive_transport_failures = 0
+    if diagnostics is not None:
+        diagnostics.setdefault("failed_symbols", {})
+        diagnostics.setdefault("empty_symbols", [])
+        diagnostics.setdefault("rows_by_symbol", {})
+        diagnostics.setdefault("route_outcomes", {})
     try:
         for index, sym in enumerate(symbols):
             params = {
@@ -157,6 +163,13 @@ def fetch_daily_bars(
                 klines = (resp.json().get("data") or {}).get("klines") or []
             except Exception as exc:
                 logger.warning("EastMoney kline failed for %s: %s", sym, exc)
+                if diagnostics is not None:
+                    diagnostics["failed_symbols"][sym] = (
+                        "transport_error" if is_transport_fail_fast(exc) else "request_error"
+                    )
+                    diagnostics["route_outcomes"][sym] = dict(
+                        getattr(client, "last_route_outcome", {}) or {}
+                    )
                 if is_transport_fail_fast(exc):
                     consecutive_transport_failures += 1
                     if consecutive_transport_failures >= _MAX_CONSECUTIVE_TRANSPORT_FAILURES:
@@ -172,7 +185,16 @@ def fetch_daily_bars(
                 continue
 
             consecutive_transport_failures = 0
+            if diagnostics is not None:
+                diagnostics["route_outcomes"][sym] = dict(
+                    getattr(client, "last_route_outcome", {}) or {}
+                )
+            if not klines:
+                if diagnostics is not None:
+                    diagnostics["empty_symbols"].append(sym)
+                continue
 
+            before = len(rows)
             for line in klines:
                 parts = str(line).split(",")
                 if len(parts) < 7:
@@ -210,6 +232,8 @@ def fetch_daily_bars(
                         "amount": amount,
                     }
                 )
+            if diagnostics is not None:
+                diagnostics["rows_by_symbol"][sym] = len(rows) - before
     finally:
         if owns:
             client.close()

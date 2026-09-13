@@ -33,6 +33,17 @@ def test_rate_limiter_enforces_minimum_interval(tmp_path):
     assert time.perf_counter() - t0 >= MIN_OBSERVED
 
 
+def test_rate_limiter_defer_persists_a_shared_cooldown(tmp_path, monkeypatch):
+    state_dir = tmp_path / "rate_limits"
+    limiter = RateLimiter("sina_bars", 1.0, state_dir)
+    monkeypatch.setattr("cnequity.domain.rate_limit.time.time", lambda: 100.0)
+
+    limiter.defer(30.0)
+
+    state = json.loads((state_dir / "sina_bars.json").read_text(encoding="utf-8"))
+    assert state["next_allowed_at"] == 130.0
+
+
 def _worker_wait(state_dir: str) -> float:
     t0 = time.perf_counter()
     wait_source(state_dir, "test", INTERVAL)
@@ -243,6 +254,20 @@ def test_source_aliases_share_the_narrowest_configured_vendor_cap(tmp_path):
             (cfg.meta_root / "rate_limits" / "concurrency-ths.json").read_text(encoding="utf-8")
         )
         assert state["limit"] == 1
+
+
+def test_sina_endpoint_aliases_share_one_vendor_cap(tmp_path):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        workers=8,
+        source_concurrency={"sina": 4, "sina_bars": 2},
+    )
+
+    with cfg.source_slot("sina_bars"):
+        state = json.loads(
+            (cfg.meta_root / "rate_limits" / "concurrency-sina.json").read_text(encoding="utf-8")
+        )
+        assert state["limit"] == 2
 
 
 def _hold_source_slot(args: tuple[str, float]) -> tuple[float, float]:
