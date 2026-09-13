@@ -152,14 +152,24 @@ def normalize_pit_storage_columns(
             out = out.with_columns(pl.lit(None, dtype=PIT_STORAGE_DTYPES[column]).alias(column))
 
     if derive_revision and "revision_id" in out.columns:
-        values: list[str | None] = []
-        for row in out.iter_rows(named=True):
-            existing = row.get("revision_id")
-            if existing is None or not str(existing).strip():
-                values.append(revision_id_for_row(row))
-            else:
-                values.append(str(existing))
-        out = out.with_columns(pl.Series("revision_id", values, dtype=pl.Utf8))
+        # Hashing is per-row by definition, but deciding *whether* any row
+        # needs it is not. The unconditional `iter_rows` below cost 3.5 us a
+        # row whatever the column held: 19 s to read
+        # `financial_statement_items` and 17 s for `top_holders`, spent
+        # recomputing digests that were already on disk. Check first, and only
+        # walk the frame when something is actually missing.
+        stripped = pl.col("revision_id").cast(pl.Utf8, strict=False).str.strip_chars()
+        missing = out.select((stripped.is_null() | (stripped == "")).alias("__m"))["__m"]
+        if missing.any():
+            values: list[str] = []
+            for row, needs in zip(out.iter_rows(named=True), missing, strict=True):
+                if needs:
+                    values.append(revision_id_for_row(row))
+                else:
+                    values.append(str(row["revision_id"]).strip())
+            out = out.with_columns(pl.Series("revision_id", values, dtype=pl.Utf8))
+        else:
+            out = out.with_columns(stripped.alias("revision_id"))
     return out
 
 

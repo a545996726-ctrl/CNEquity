@@ -404,18 +404,14 @@ def _read_dataset(
 
     if dataset in DATASET_SCHEMAS:
         # Bitemporal PIT columns are an additive, optional storage contract.
-        # ``validate_dataframe`` intentionally returns the canonical schema
-        # and therefore drops unknown columns; preserve and normalise these
-        # four columns around validation so mixed legacy/new Parquet remains
-        # readable while the writer schema is still backwards compatible.
-        pit_columns = (
-            normalize_pit_storage_columns(df, dataset).select(PIT_STORAGE_COLUMNS)
-            if dataset in PIT_DATASETS
-            else None
-        )
+        # ``validate_dataframe`` carries them through when the frame already
+        # has them, so normalising first is enough: a file written before the
+        # columns existed gains them here, a current one keeps what it stores.
+        # This used to split them out and ``hstack`` them back on, because
+        # validation dropped every unregistered column.
+        if dataset in PIT_DATASETS:
+            df = normalize_pit_storage_columns(df, dataset)
         df = validate_dataframe(df, dataset)
-        if pit_columns is not None:
-            df = df.hstack(pit_columns)
         return dedupe_by_primary_key(df, dataset)
     return df
 

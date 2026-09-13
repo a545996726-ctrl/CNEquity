@@ -213,3 +213,110 @@ def test_as_of_is_still_required(tmp_path):
 
     with pytest.raises(ReaderError, match="requires as_of"):
         load(_DATASET, config=cfg)
+
+
+def test_validate_dataframe_carries_pit_columns_only_for_pit_datasets():
+    """The optional bitemporal columns must survive schema projection.
+
+    `validate_dataframe` selects exactly the registered columns, which used to
+    drop these four on the way to disk — so a PIT dataset could never store
+    one, and every reader re-derived them instead.
+    """
+    from cnequity.domain.pit import PIT_STORAGE_COLUMNS, normalize_pit_storage_columns
+    from cnequity.domain.schemas import validate_dataframe
+
+    frame = normalize_pit_storage_columns(
+        _frame([_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")]), _DATASET
+    )
+    kept = validate_dataframe(frame, _DATASET)
+    assert set(PIT_STORAGE_COLUMNS).issubset(kept.columns)
+    assert kept["revision_id"].null_count() == 0
+    assert kept.schema["observed_at"] == pl.Datetime("us", "UTC")
+
+    # A frame that never had them must not gain them here: this function
+    # carries columns through, it does not manufacture them.
+    bare = validate_dataframe(
+        _frame([_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")]), _DATASET
+    )
+    assert not set(PIT_STORAGE_COLUMNS) & set(bare.columns)
+
+
+def test_compact_persists_pit_columns_without_minting_a_revision(tmp_path):
+    """Migration writes the columns; it is not itself a business change."""
+    from cnequity.domain.pit import PIT_STORAGE_COLUMNS
+
+    cfg = Config(data_root=tmp_path / "data")
+    _write_curated(cfg, [_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")])
+    StagingWriter(cfg.staging_root).write_batch(
+        _DATASET, "run-1", "batch-0", _frame([_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")])
+    )
+    changed: list = []
+    compact_dataset(
+        cfg.staging_root,
+        cfg.curated_root,
+        _DATASET,
+        "run-1",
+        partition_col="report_period",
+        changed_files=changed,
+    )
+    out = cfg.curated_root / _DATASET / "report_period=2024Q1" / "part-merged.parquet"
+    stored = pl.read_parquet(out)
+    assert set(PIT_STORAGE_COLUMNS).issubset(stored.columns)
+    assert stored["revision_id"].null_count() == 0
+    assert changed == []
+
+
+def test_refetch_with_new_fetched_at_stays_a_physical_no_op(tmp_path):
+    """`observed_at` aliases `fetched_at` and must not count as evidence.
+
+    Without this the bitemporal columns would re-mint a revision on every
+    reconciliation pass, and each revision copies the whole dataset into a new
+    generation.
+    """
+    cfg = Config(data_root=tmp_path / "data")
+    _write_curated(cfg, [_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")])
+    out = cfg.curated_root / _DATASET / "report_period=2024Q1" / "part-merged.parquet"
+
+    StagingWriter(cfg.staging_root).write_batch(
+        _DATASET, "run-1", "batch-0", _frame([_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00+00:00")])
+    )
+    compact_dataset(
+        cfg.staging_root,
+        cfg.curated_root,
+        _DATASET,
+        "run-1",
+        partition_col="report_period",
+        changed_files=[],
+    )
+    inode = out.stat().st_ino
+
+    # Same fact, observed later.
+    StagingWriter(cfg.staging_root).write_batch(
+        _DATASET, "run-2", "batch-0", _frame([_row(_ORIGINAL, 100.0, "2026-01-02T09:00:00+00:00")])
+    )
+    changed: list = []
+    compact_dataset(
+        cfg.staging_root,
+        cfg.curated_root,
+        _DATASET,
+        "run-2",
+        partition_col="report_period",
+        changed_files=changed,
+    )
+    assert changed == []
+    assert out.stat().st_ino == inode
+
+    # A real restatement must still be detected.
+    StagingWriter(cfg.staging_root).write_batch(
+        _DATASET, "run-3", "batch-0", _frame([_row(_RESTATED, 80.0, "2026-01-03T09:00:00+00:00")])
+    )
+    real: list = []
+    compact_dataset(
+        cfg.staging_root,
+        cfg.curated_root,
+        _DATASET,
+        "run-3",
+        partition_col="report_period",
+        changed_files=real,
+    )
+    assert real, "a restatement must mint a revision"

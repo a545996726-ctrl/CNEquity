@@ -4,6 +4,12 @@ from datetime import datetime, timezone
 
 import polars as pl
 
+from cnequity.domain.pit import (
+    PIT_DATASET_NAMES,
+    PIT_STORAGE_COLUMNS,
+    PIT_STORAGE_DTYPES,
+)
+
 PROVENANCE = ["source", "data_version", "fetched_at"]
 
 FETCHED_AT_DTYPE = pl.Datetime(time_unit="us", time_zone="UTC")
@@ -881,8 +887,22 @@ def validate_dataframe(
     if schema is None:
         return df
 
+    # The bitemporal columns are deliberately absent from DATASET_SCHEMAS (see
+    # domain/pit.py: optional until every writer can fill them), but the
+    # projection below selects exactly the registered columns — which silently
+    # dropped them on the way to disk, so a PIT dataset could never actually
+    # store one. Carry them through when the caller already has them, without
+    # making them part of the registered shape.
+    pit_passthrough: tuple[str, ...] = ()
+    if dataset in PIT_DATASET_NAMES:
+        pit_passthrough = tuple(
+            col for col in PIT_STORAGE_COLUMNS if col in df.columns and col not in schema
+        )
+
     if df.is_empty():
-        return pl.DataFrame(schema=schema)
+        empty_schema = dict(schema)
+        empty_schema.update({col: PIT_STORAGE_DTYPES[col] for col in pit_passthrough})
+        return pl.DataFrame(schema=empty_schema)
 
     if dataset == "trading_status":
         # Rows written before ST moved out of `status` into its own column are
@@ -922,8 +942,10 @@ def validate_dataframe(
             casts.append(pl.col(col).str.to_date(strict=False).alias(col))
         else:
             casts.append(pl.col(col).cast(dtype, strict=False))
+    for col in pit_passthrough:
+        casts.append(pl.col(col).cast(PIT_STORAGE_DTYPES[col], strict=False))
     try:
-        normalized = df.with_columns(casts).select(columns)
+        normalized = df.with_columns(casts).select([*columns, *pit_passthrough])
     except pl.exceptions.PolarsError as exc:
         # ``strict=False`` turns many bad scalar casts into nulls, but Polars
         # still raises for some Utf8 -> Boolean conversions. Keep all schema

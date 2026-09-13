@@ -9,6 +9,11 @@ import polars as pl
 from cnequity.domain.canonical import dedupe_by_primary_key
 from cnequity.domain.datasets import granularity_for_dataset
 from cnequity.domain.partitions import Granularity
+from cnequity.domain.pit import (
+    PIT_DATASET_NAMES,
+    PIT_STORAGE_COLUMNS,
+    normalize_pit_storage_columns,
+)
 from cnequity.domain.schemas import PRIMARY_KEYS, sanitize_dataset_rows, validate_dataframe
 from cnequity.storage.atomic import write_parquet_atomic
 from cnequity.storage.revisions import sha256_file
@@ -22,8 +27,17 @@ def _business_digest(frame: pl.DataFrame) -> str:
     a semantic no-op into a new curated file and revision.  Keep source and
     data-version in the digest: switching source or changing the value
     contract is evidence, even when the current row happens to compare equal.
+
+    ``observed_at`` is excluded for the same reason and not a second one: it
+    is ``fetched_at`` under its bitemporal name (domain/pit.py aliases it), so
+    counting it would re-mint a revision on every reconciliation pass and undo
+    the physical no-op this digest exists to detect.  ``available_at``,
+    ``source_published_at`` and ``revision_id`` stay in: the first two are
+    genuine source-side evidence, and the third is derived from the business
+    content with the observation timestamps deliberately excluded.
     """
-    columns = sorted(column for column in frame.columns if column != "fetched_at")
+    ignored = {"fetched_at", "observed_at"}
+    columns = sorted(column for column in frame.columns if column not in ignored)
     rows = [
         json.dumps(
             {column: row.get(column) for column in columns},
@@ -104,6 +118,21 @@ class CuratedWriter:
         return path
 
 
+def _pit_columns_absent(path: Path, dataset: str) -> bool:
+    """True when *path* is a PIT dataset file that predates the PIT columns.
+
+    Reads the parquet footer only — the whole point is to avoid the row-wise
+    derivation that a file without these columns forces on every reader.
+    """
+    if dataset not in PIT_DATASET_NAMES or not path.is_file():
+        return False
+    try:
+        stored = set(pl.read_parquet_schema(path))
+    except Exception:
+        return False
+    return not set(PIT_STORAGE_COLUMNS).issubset(stored)
+
+
 def _partition_values(df: pl.DataFrame, partition_col: str, granularity: Granularity) -> pl.Series:
     """Directory value per row for *partition_col*.
 
@@ -163,6 +192,18 @@ def compact_dataset(
     if pk:
         combined = dedupe_by_primary_key(combined, dataset)
 
+    def _pit(frame: pl.DataFrame) -> pl.DataFrame:
+        """Materialize the bitemporal columns so they reach disk.
+
+        They were previously derived on every read instead (19 s of row-wise
+        hashing for one `financial_statement_items` scan). Applied to both
+        sides of the digest comparison below so adding them is never mistaken
+        for a business change.
+        """
+        return normalize_pit_storage_columns(frame, dataset)
+
+    combined = _pit(combined)
+
     if partition_col not in combined.columns:
         out_dir = curated.curated_root / dataset
         out_path = out_dir / "part-merged.parquet"
@@ -181,12 +222,17 @@ def compact_dataset(
                 ],
                 how="diagonal_relaxed",
             )
+            existing = _pit(existing)
             combined = pl.concat([existing, combined], how="diagonal_relaxed")
             if pk:
                 combined = dedupe_by_primary_key(combined, dataset)
         out_dir.mkdir(parents=True, exist_ok=True)
         business_changed = _business_digest(existing) != _business_digest(combined)
-        should_write = business_changed or had_fragments or not out_path.is_file()
+        # One-time migration: a file written before the bitemporal columns
+        # existed keeps deriving them on every read until it is rewritten, and
+        # the digest above cannot see that because both sides are normalized.
+        pit_missing = _pit_columns_absent(out_path, dataset)
+        should_write = business_changed or had_fragments or pit_missing or not out_path.is_file()
         if should_write:
             write_parquet_atomic(out_path, combined, compression="zstd")
             for stale in out_dir.rglob("*.parquet"):
@@ -229,12 +275,17 @@ def compact_dataset(
                 existing = pl.concat(existing_files, how="diagonal_relaxed")
                 if pk:
                     existing = dedupe_by_primary_key(existing, dataset)
+                existing = _pit(existing)
                 frames.append(existing)
         merged = pl.concat(frames, how="diagonal_relaxed")
         if pk:
             merged = dedupe_by_primary_key(merged, dataset)
+        merged = _pit(merged)
         business_changed = _business_digest(existing) != _business_digest(merged)
-        should_write = business_changed or had_fragments or not out_path.is_file()
+        # See the unpartitioned branch: rewrite once so the columns stop being
+        # recomputed on every read.
+        pit_missing = _pit_columns_absent(out_path, dataset)
+        should_write = business_changed or had_fragments or pit_missing or not out_path.is_file()
         if should_write:
             written = curated.write_partition(
                 dataset, partition_col, val_str, merged, "part-merged.parquet"

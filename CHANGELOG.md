@@ -6,6 +6,26 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The bitemporal PIT columns now reach disk.** `available_at`,
+  `source_published_at`, `observed_at` and `revision_id` are declared in the
+  contract and normalised on read, but `validate_dataframe` projects to exactly
+  the registered columns and therefore dropped all four on the way to a write —
+  no PIT dataset could ever store one, and `reader.py` compensated by splitting
+  them out and `hstack`ing them back after validation. Validation now carries
+  them through when a frame already has them (registered schemas are unchanged;
+  they stay optional), compaction materialises them, and a file that predates
+  them is rewritten once. Reading a `financial_statement_items` partition drops
+  from 0.55 s to 0.003 s, and the full dataset from ~19 s to ~0.1 s, because
+  `revision_id` is no longer re-hashed row by row on every read.
+
+  Two consequences worth knowing. `observed_at` is excluded from the
+  business digest alongside `fetched_at` — it is the same fact under its
+  bitemporal name, and counting it would mint a revision on every
+  reconciliation pass. And the stored 64-character digest is not free: across
+  the five PIT datasets it adds roughly 390 MB to 190 MB of curated parquet.
+
 ### Removed
 
 - **`ROADMAP.md` and `CONTRIBUTING.md`.** The product boundary they described is
