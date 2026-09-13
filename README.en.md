@@ -23,6 +23,45 @@
 
 CNEquity is open financial data infrastructure for China markets. It starts with A-shares and turns fragmented market, fundamental, event, flow, industry, and macro sources into an open, local data layer with provenance and a stable research contract.
 
+## Why a lake
+
+<p align="center">
+  <img src="docs/assets/survivorship-gap.svg" alt="Same basket, same dates — the only difference is whether the delisted names are still in it" width="820" />
+</p>
+
+The same equal-weight buy-and-hold, the same dates. The only difference is
+**whether names that later delisted are still in the basket**. Use "stocks that
+exist today" as a historical universe — all a current-roster vendor can give
+you — and the 2016–2021 five-year return goes from **5.9% to 12.0%**, twice
+what it was.
+
+The error **is not visible**: those names are not zero, they are absent.
+Delisted names, adjustment factors, and PIT are first-class here — not an
+afterthought on a coverage list.
+
+```bash
+python scripts/survivorship_gap.py --svg docs/assets/survivorship-gap.svg
+```
+
+## Why not just AkShare / Tushare / a fetch skill
+
+AkShare and agent fetch skills answer "how do I fetch?" — a snapshot of now,
+with no history contract. Tushare is cloud wide tables. Qlib / vn.py are
+research / trading platforms. **CNE** owns the middle: many sources, one
+contract, a resumable local Parquet lake.
+
+| What you care about | **CNEquity** | AkShare / efinance | Tushare Pro | Baostock | Qlib / vn.py |
+|--|--|--|--|--|--|
+| Local, resumable data base | **Lake + daily jobs** | On-demand; you orchestrate | Cloud credits | Session fetch, no lake | Platform-tied |
+| Provenance | **Row-level + validated on write** | No shared contract | Platform fields | No lake contract | Varies |
+| Research semantics | **`load()`: adjust / universe / PIT** | DIY | DIY | DIY | Platform |
+| Delisted names kept | **Yes — no survivorship bias** | Up to caller | Per endpoint | Per endpoint | Per source |
+| When a source fails | **Fail the batch**, retry by batch | Up to caller | Up to vendor | Up to vendor | Varies |
+| Signup / token needed | **No** | No | Credits required | No | Per source |
+
+Point by point: [comparison](docs/comparison.md).
+
+
 ## Data in ~30 seconds
 
 ```bash
@@ -95,44 +134,6 @@ cne sources probe   # health of 14 upstream hosts (probe on CLI, display on serv
 
 Details: [serve](docs/modules/serve.md) ·
 [source-health](docs/operations/source-health.md).
-
-## Why a lake
-
-<p align="center">
-  <img src="docs/assets/survivorship-gap.svg" alt="Same basket, same dates — the only difference is whether the delisted names are still in it" width="820" />
-</p>
-
-The same equal-weight buy-and-hold, the same dates. The only difference is
-**whether names that later delisted are still in the basket**. Use "stocks that
-exist today" as a historical universe — all a current-roster vendor can give
-you — and the 2016–2021 five-year return goes from **5.9% to 12.0%**, twice
-what it was.
-
-The error **is not visible**: those names are not zero, they are absent.
-Delisted names, adjustment factors, and PIT are first-class here — not an
-afterthought on a coverage list.
-
-```bash
-python scripts/survivorship_gap.py --svg docs/assets/survivorship-gap.svg
-```
-
-## Why not just AkShare / Tushare / a fetch skill
-
-AkShare and agent fetch skills answer "how do I fetch?" — a snapshot of now,
-with no history contract. Tushare is cloud wide tables. Qlib / vn.py are
-research / trading platforms. **CNE** owns the middle: many sources, one
-contract, a resumable local Parquet lake.
-
-| What you care about | **CNEquity** | AkShare / efinance | Tushare Pro | Baostock | Qlib / vn.py |
-|--|--|--|--|--|--|
-| Local, resumable data base | **Lake + daily jobs** | On-demand; you orchestrate | Cloud credits | Session fetch, no lake | Platform-tied |
-| Provenance | **Row-level + validated on write** | No shared contract | Platform fields | No lake contract | Varies |
-| Research semantics | **`load()`: adjust / universe / PIT** | DIY | DIY | DIY | Platform |
-| Delisted names kept | **Yes — no survivorship bias** | Up to caller | Per endpoint | Per endpoint | Per source |
-| When a source fails | **Fail the batch**, retry by batch | Up to caller | Up to vendor | Up to vendor | Varies |
-| Signup / token needed | **No** | No | Credits required | No | Per source |
-
-Point by point: [comparison](docs/comparison.md).
 
 ## What you can ask it
 

@@ -7,6 +7,7 @@ import pytest
 
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient
 from cnequity.config import Config, load_config
+from cnequity.config.bootstrap import path_for_toml
 
 
 def test_eastmoney_client_passes_config_proxy(tmp_path):
@@ -37,7 +38,7 @@ def test_eastmoney_direct_fallback_config_is_explicit(tmp_path):
     path = tmp_path / "cnequity.toml"
     path.write_text(
         f'''[data]
-root = "{tmp_path / "data"}"
+root = "{path_for_toml(tmp_path / "data")}"
 [sources.eastmoney]
 enabled = true
 proxy = "http://127.0.0.1:7890"
