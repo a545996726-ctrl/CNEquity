@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from cnequity.domain.symbols import is_all_a_symbol, is_cdr_symbol, parse_symbol
 from cnequity.query.canonical import dedupe_by_primary_key, dedupe_lazy_by_primary_key
 from cnequity.query.parquet_scan import (
     collect_parquet_root,
+    dataset_has_parquet,
     scan_parquet_files,
     scan_parquet_root,
 )
@@ -35,6 +37,11 @@ ST_COVERAGE_CLAIM = "historical_st_evidence"
 # securities. Keep this explicit instead of retrying 580 symbols forever and
 # then presenting a partial receipt as if it covered the full all-A universe.
 ST_EVIDENCE_UNSUPPORTED_EXCHANGES = frozenset({"BJ"})
+#: The exchange board reads BJ status every session. It cannot answer for a
+#: date it did not observe, so it is evidence for a trailing window only —
+#: never for the deep history Baostock and Tushare serve.
+BSE_ST_SOURCE = "bse"
+ST_EVIDENCE_SOURCES = ("baostock", "tushare", BSE_ST_SOURCE)
 ST_EVIDENCE_COMPATIBLE_UNIVERSES = frozenset({"all_a", "all_a_sz", "all_a_sh_sz"})
 _RECEIPT_INTEGRITY_CACHE_LIMIT = 64
 _receipt_integrity_cache: dict[tuple[str, str, str, str], bool] = {}
@@ -198,6 +205,111 @@ def _tushare_floor_symbols(
     }
 
 
+def _bj_symbols(symbols: Iterable[str]) -> list[str]:
+    out = []
+    for symbol in symbols:
+        try:
+            if parse_symbol(symbol).exchange in ST_EVIDENCE_UNSUPPORTED_EXCHANGES:
+                out.append(symbol)
+        except ValueError:
+            continue
+    return sorted(set(out))
+
+
+def bse_st_observed_window(
+    config: Config | None,
+    symbols: Iterable[str],
+) -> tuple[date, date] | None:
+    """The trailing run of sessions the exchange board answered completely.
+
+    The board is a live snapshot: it cannot say what a name was two years ago,
+    but it says what every listed name is today, and the daily job has been
+    recording that since the board was wired in. Those observations are the
+    same kind of evidence the historical sweep produces — one row per symbol
+    per session, from the exchange itself — so a window built from them can
+    back a research claim without a vendor that sells the past. It grows by a
+    session a day; nothing fills it backwards.
+
+    A session that was answered for only some names ends the run instead of
+    being interpolated: 2026-09-16 came back 343 of 344, and a window drawn
+    straight through it would be claiming something about a name nobody
+    observed. The run is therefore taken from the newest session backwards,
+    stopping at the first incomplete one.
+    """
+    if config is None:
+        return None
+    bj = set(_bj_symbols(symbols))
+    if not bj:
+        return None
+    bars_root = config.curated_root / "daily_bars"
+    status_root = config.curated_root / "trading_status"
+    if not dataset_has_parquet(bars_root) or not dataset_has_parquet(status_root):
+        return None
+
+    scanned = scan_parquet_root(status_root, partition_col="trade_date", symbols=sorted(bj))
+    if "source" not in scanned.collect_schema().names():
+        # Rows that do not say where they came from cannot be attributed to the
+        # board, and an unattributed row is not an observation.
+        return None
+    observed = (
+        scanned.filter(pl.col("source") == BSE_ST_SOURCE)
+        .select("symbol", "trade_date")
+        .unique()
+        .collect(engine="streaming")
+    )
+    if observed.is_empty():
+        return None
+    first_observed = observed.get_column("trade_date").min()
+    traded = (
+        scan_parquet_root(
+            bars_root,
+            partition_col="trade_date",
+            start=first_observed,
+            symbols=sorted(bj),
+        )
+        .filter(pl.col("volume") > 0)
+        .select("symbol", "trade_date")
+        .unique()
+        .collect(engine="streaming")
+    )
+    if traded.is_empty():
+        return None
+
+    by_session: dict[date, set[str]] = {}
+    for row in traded.iter_rows(named=True):
+        by_session.setdefault(row["trade_date"], set()).add(row["symbol"])
+    answered: dict[date, set[str]] = {}
+    for row in observed.iter_rows(named=True):
+        answered.setdefault(row["trade_date"], set()).add(row["symbol"])
+
+    sessions = sorted(by_session, reverse=True)
+    window: list[date] = []
+    for session in sessions:
+        if by_session[session] <= answered.get(session, set()):
+            window.append(session)
+            continue
+        break
+    if not window:
+        return None
+    return min(window), max(window)
+
+
+def _bse_covers(
+    config: Config | None,
+    symbols: Iterable[str],
+    start: date | None,
+    end: date | None,
+) -> bool:
+    """Whether the board's observed window contains the requested one."""
+    if start is None or end is None:
+        return False
+    window = bse_st_observed_window(config, symbols)
+    if window is None:
+        return False
+    observed_start, observed_end = window
+    return observed_start <= start and observed_end >= end
+
+
 def st_evidence_unsupported_symbols(
     symbols: list[str],
     *,
@@ -218,13 +330,18 @@ def st_evidence_unsupported_symbols(
     unsupported: list[str] = []
     tushare_enabled = _tushare_st_enabled(config)
     floor_symbols = _tushare_floor_symbols(config, symbols, start, end)
+    # The board covers BJ for the window it actually observed. Asked for an
+    # earlier one it stays unsupported, which keeps the deep-history answer
+    # ("no source serves this") distinct from the recent one ("observed").
+    board_covers = _bse_covers(config, symbols, start, end)
     for symbol in symbols:
         try:
             parsed = parse_symbol(symbol)
             if parsed.exchange in ST_EVIDENCE_UNSUPPORTED_EXCHANGES and (
                 not tushare_enabled or symbol in floor_symbols
             ):
-                unsupported.append(symbol)
+                if not board_covers:
+                    unsupported.append(symbol)
         except ValueError:
             continue
     return sorted(set(unsupported))
@@ -269,6 +386,13 @@ def st_evidence_source_symbols(
             if parse_symbol(symbol).exchange in ST_EVIDENCE_UNSUPPORTED_EXCHANGES
             and symbol not in unsupported
         )
+    if source == BSE_ST_SOURCE:
+        # Tushare owns BJ whenever it is configured: it reaches back to 2016,
+        # and two sources claiming the same symbols would demand two receipts
+        # for one fact. The board is what answers when nothing was bought.
+        if _tushare_st_enabled(config) or not _bse_covers(config, symbols, start, end):
+            return []
+        return _bj_symbols(symbols)
     raise ValueError(f"unknown historical ST evidence source: {source}")
 
 
@@ -505,6 +629,49 @@ def publish_st_coverage_receipt(config: Config, checkpoint: dict[str, Any]) -> P
     return path
 
 
+def publish_bse_st_observation_receipt(config: Config) -> Path | None:
+    """Turn the board's completed sessions into a receipt the gate can read.
+
+    The rows were already in `trading_status`; what was missing was the proof
+    that every BJ name was asked on every session, which is the only thing a
+    research claim can rest on. Without it the daily observation was invisible
+    to `cne audit`: a lake could watch the exchange for a year and still be
+    told its BJ history was unverifiable.
+
+    Republished rather than extended: the window's start, end and symbol set
+    all move, so each day is a new immutable scope rather than an edit to
+    yesterday's. Composition is left to the historical sweeps, whose windows
+    overlap; consecutive days do not.
+    """
+    universe = getattr(config, "ingest_universe", "all_a")
+    if universe not in ST_EVIDENCE_COMPATIBLE_UNIVERSES:
+        universe = "all_a"
+    symbols = current_st_universe(config, universe=universe)
+    window = bse_st_observed_window(config, symbols)
+    if window is None:
+        return None
+    start, end = window
+    bj = _bj_symbols(symbols)
+    if not bj:
+        return None
+    scope = build_st_scope(bj, start, end, universe=universe, source=BSE_ST_SOURCE)
+    counts = _st_row_counts(config, scope, set(bj))
+    checkpoint = {
+        "scope": scope,
+        "completed_symbols": sorted(bj),
+        "unresolved_symbols": [],
+        "evidence_rows_by_symbol": {symbol: int(counts.get(symbol, 0)) for symbol in bj},
+        "status": "complete",
+    }
+    try:
+        return publish_st_coverage_receipt(config, checkpoint)
+    except ValueError:
+        # The publisher re-reads the rows it is asked to certify. If they are
+        # not all there, no receipt is better than one nobody checked.
+        logger.warning("BJ board observation did not certify; no receipt published")
+        return None
+
+
 def publish_st_receipts_for_compacted_run(config: Config, run_id: str) -> list[Path]:
     """Publish completed scopes only after this run's staging was compacted."""
     root = config.meta_root / "state" / ST_COVERAGE_CLAIM / f"v{ST_EVIDENCE_VERSION}"
@@ -533,6 +700,11 @@ def publish_st_receipts_for_compacted_run(config: Config, run_id: str) -> list[P
         composed = compose_st_coverage_receipt(config, receipt)
         if composed is not None and composed not in published:
             published.append(composed)
+    # The board's own observation is published on the same rule as the sweeps:
+    # only once this run's rows are in curated storage.
+    observed = publish_bse_st_observation_receipt(config)
+    if observed is not None and observed not in published:
+        published.append(observed)
     return published
 
 
@@ -902,7 +1074,7 @@ def st_evidence_coverage_report(
             start=start,
             end=end,
         )
-        for source in ("baostock", "tushare")
+        for source in ST_EVIDENCE_SOURCES
     }
 
     best_by_source: dict[str, dict[str, Any]] = {}
