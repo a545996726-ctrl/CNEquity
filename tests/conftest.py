@@ -22,9 +22,10 @@ def _arm_subprocess_network_guard() -> None:
     """Put `tests/_subprocess_guard` on `PYTHONPATH` for every child process.
 
     The in-process fixture below cannot reach a `ProcessPoolExecutor` worker:
-    the start method is `spawn`, so the child is a fresh interpreter that
-    re-imports everything and inherits no patching. `sitecustomize` runs before
-    any user code in that child, which is the one hook early enough to matter.
+    the start method is `spawn` on Windows/macOS and `forkserver` on Linux 3.14+,
+    so the child is a fresh interpreter that re-imports everything and inherits
+    no patching. `sitecustomize` runs before any user code in that child, which
+    is the one hook early enough to matter.
 
     Set here rather than in the fixture because a child inherits the
     environment as it was when it started, and pools outlive individual tests.
@@ -108,15 +109,22 @@ def _no_outbound_network(request):
     connect_ex = socket.socket.connect_ex
     local: set[int] = set()
 
-    def _is_loopback(address) -> bool:
+    def _is_local(address) -> bool:
         # `cne serve` and `cne mcp` are exercised over a real loopback socket by
         # their own tests. Those are not the network this guards — nothing
         # outside the machine is reached — so they are let through by address.
-        host = address[0] if isinstance(address, tuple) else address
+        # AF_UNIX is the same class of traffic: Linux 3.14's forkserver talks
+        # to `/tmp/pymp-*/sock-*`, which is a filesystem path rather than
+        # `(host, port)`. Treating that path as a hostname made every
+        # ProcessPoolExecutor test fail on the interpreter CI added to close
+        # an untested-claim gap.
+        if not isinstance(address, tuple):
+            return True
+        host = address[0]
         return isinstance(host, str) and (host in ("localhost", "::1") or host.startswith("127."))
 
     def _refuse(self, address, *, _real):
-        if _is_loopback(address):
+        if _is_local(address):
             local.add(self.fileno())
             return _real(self, address)
         raise AssertionError(

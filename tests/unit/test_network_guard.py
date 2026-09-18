@@ -5,18 +5,23 @@ Nothing stopped one that reaches it by accident, and eight did — seven still
 passed, because the adapter fell back, so the only symptom was time. The guard
 turns that into one named failure.
 
-`worker_pool` runs on `ProcessPoolExecutor`, whose start method is `spawn`: a
-fresh interpreter that inherits no patching. Half a guard is worse than none,
-because the parent looks clean while the work happens elsewhere.
+`worker_pool` runs on `ProcessPoolExecutor`. The start method is `spawn` on
+Windows and macOS, and `forkserver` on Linux 3.14+: a fresh interpreter that
+inherits no patching. Half a guard is worse than none, because the parent
+looks clean while the work happens elsewhere.
 """
 
 from __future__ import annotations
 
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +60,43 @@ def _loopback_listener() -> tuple[socket.socket, int]:
     return server, server.getsockname()[1]
 
 
+@contextmanager
+def _unix_listener():
+    """A local AF_UNIX server on a short path.
+
+    pytest's tmp_path under /var/folders already exceeds macOS's ~104-byte
+    AF_UNIX limit. Multiprocessing itself uses `/tmp/pymp-*/sock-*`.
+    """
+    if not getattr(socket, "AF_UNIX", None):
+        pytest.skip("AF_UNIX not available")
+    bases: list[str] = []
+    if Path("/tmp").is_dir():
+        bases.append("/tmp")
+    tmp = tempfile.gettempdir()
+    if tmp not in bases:
+        bases.append(tmp)
+    last_exc: OSError | None = None
+    for base in bases:
+        directory = tempfile.mkdtemp(prefix="cnes", dir=base)
+        path = str(Path(directory) / "s")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(path)
+        except OSError as exc:
+            last_exc = exc
+            server.close()
+            shutil.rmtree(directory, ignore_errors=True)
+            continue
+        server.listen(1)
+        try:
+            yield server, path
+        finally:
+            server.close()
+            shutil.rmtree(directory, ignore_errors=True)
+        return
+    pytest.skip(f"AF_UNIX bind failed: {last_exc}")
+
+
 def test_this_process_cannot_reach_an_external_host():
     with pytest.raises(AssertionError, match="outbound connection"):
         socket.create_connection(("push2.eastmoney.com", 443), timeout=5)
@@ -69,6 +111,14 @@ def test_this_process_can_still_use_loopback():
         conn.close()
     finally:
         server.close()
+
+
+def test_this_process_can_still_use_a_unix_socket():
+    """Linux 3.14's forkserver talks to `/tmp/pymp-*/sock-*`; that is not outbound."""
+    with _unix_listener() as (_, path):
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.connect(path)
+        conn.close()
 
 
 def test_a_pool_worker_cannot_reach_an_external_host():
@@ -99,6 +149,22 @@ def test_a_plain_python_subprocess_is_covered_too():
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=30
     )
     assert done.stdout.strip() == "blocked", done
+
+
+def test_a_plain_python_subprocess_can_still_use_a_unix_socket():
+    """The sitecustomize half must allow the same local IPC the parent does."""
+    with _unix_listener() as (_, path):
+        script = (
+            "import socket\n"
+            "conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            f"conn.connect({path!r})\n"
+            "conn.close()\n"
+            "print('ok')\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=30
+        )
+        assert done.stdout.strip() == "ok", done
 
 
 @pytest.mark.network

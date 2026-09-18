@@ -81,6 +81,27 @@ def test_new_install_has_six_groups_and_rejects_empty_override(tmp_path):
         module.render_jobs(ROOT, tmp_path, groups="", vantage=None)
 
 
+def _noop_launchctl(directory: Path) -> Path:
+    """A load/unload stub CreateProcess can actually execute.
+
+    ``/usr/bin/true`` is not a file on Windows, and native Python does not
+    translate the Git Bash path, so pointing ``CNE_LAUNCHCTL`` there made the
+    installer fail with WinError 2 on the only job that runs this test on
+    Windows CI.
+    """
+    stub = directory / "launchctl.py"
+    stub.write_text("import sys\nraise SystemExit(0)\n", encoding="utf-8")
+    return stub
+
+
+def test_python_launchctl_stub_is_run_with_this_interpreter(tmp_path, monkeypatch):
+    stub = _noop_launchctl(tmp_path)
+    monkeypatch.setenv("CNE_LAUNCHCTL", str(stub))
+    assert module._launchctl_command() == [sys.executable, str(stub)]
+    monkeypatch.setenv("CNE_LAUNCHCTL", "launchctl")
+    assert module._launchctl_command() == ["launchctl"]
+
+
 def test_stale_time_override_is_scoped_and_survives_regeneration(tmp_path):
     dest = tmp_path / "installed"
     dest.mkdir()
@@ -88,7 +109,11 @@ def test_stale_time_override_is_scoped_and_survives_regeneration(tmp_path):
     daily = dest / "com.cnequity.daily.plist"
     daily.write_bytes(plistlib.dumps(old))
     before = daily.read_bytes()
-    env = dict(os.environ, CNE_SCHEDULER_DEST_DIR=str(dest), CNE_LAUNCHCTL="/usr/bin/true")
+    env = dict(
+        os.environ,
+        CNE_SCHEDULER_DEST_DIR=str(dest),
+        CNE_LAUNCHCTL=str(_noop_launchctl(tmp_path)),
+    )
     env.pop("CNE_GROUPS", None)
     env.pop("CNE_SOURCE_VANTAGE", None)
 

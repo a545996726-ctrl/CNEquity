@@ -10,7 +10,7 @@ CLI 是 `cne`，Python 包是 `cnequity`。推荐：`pip install cnequity` → `
 
 可搜索的在线文档站：[rootsunc.github.io/CNEquity](https://rootsunc.github.io/CNEquity/)。
 
-面向使用者的文档以中文为准；[CHANGELOG](../CHANGELOG.md) 与 [ADR](adr/) 保持英文。英文简介见 [README.en.md](../README.en.md)。
+面向使用者的文档以中文为准；[CHANGELOG](../CHANGELOG.md) 现为中文，[ADR](adr/) 保持英文。英文简介见 [README.en.md](../README.en.md)。
 
 ### 术语约定
 

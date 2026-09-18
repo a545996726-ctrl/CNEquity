@@ -206,3 +206,45 @@ def test_a_security_gets_one_row_at_its_weighted_price(monkeypatch):
     assert frame["volume"][0] == pytest.approx(40.0)
     assert frame["amount"][0] == pytest.approx(420.0)
     assert frame["price"][0] == pytest.approx(10.5), "weighted, not the first or the last"
+
+
+def test_the_exchange_route_carries_the_premium_column_the_schema_requires(monkeypatch):
+    """It failed on the first session it was asked to cover.
+
+    EastMoney could not serve 2026-09-18, the exchange backup fetched the day,
+    and `validate_dataframe` refused every row for `premium_ratio` — a column
+    neither exchange publishes and the frame never carried. The backup route is
+    only ever reached when the primary is already down, so the whole failure
+    mode lived in the one path nothing exercised.
+    """
+    from cnequity.domain.schemas import validate_dataframe, with_provenance
+
+    sz = pl.DataFrame(
+        {
+            "symbol": ["000001.SZ"],
+            "trade_date": [DAY],
+            "price": [10.0],
+            "volume": [1.0],
+            "amount": [10.0],
+        }
+    )
+    monkeypatch.setattr(bt, "fetch_szse_block_trades", lambda day, config=None: sz)
+    monkeypatch.setattr(bt, "fetch_sse_block_trades", lambda day, config=None: bt.EMPTY.clone())
+
+    frame = bt.fetch_block_trades_exchange(DAY)
+
+    assert "premium_ratio" in frame.columns
+    assert frame["premium_ratio"].to_list() == [None], "the exchanges do not publish one"
+    # The point of the column: the write path accepts the batch.
+    validate_dataframe(with_provenance(frame, source="exchange", data_version="v1"), "block_trades")
+
+
+def test_a_day_no_exchange_answered_is_still_dataset_shaped(monkeypatch):
+    """An empty frame reaches the same writer, so it needs the same columns."""
+    monkeypatch.setattr(bt, "fetch_szse_block_trades", lambda day, config=None: bt.EMPTY.clone())
+    monkeypatch.setattr(bt, "fetch_sse_block_trades", lambda day, config=None: bt.EMPTY.clone())
+
+    frame = bt.fetch_block_trades_exchange(DAY)
+
+    assert frame.is_empty()
+    assert "premium_ratio" in frame.columns

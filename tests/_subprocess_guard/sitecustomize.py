@@ -2,10 +2,11 @@
 
 `tests/conftest.py` patches `socket.socket.connect` in the *pytest* process.
 `worker_pool` uses `ProcessPoolExecutor`, and on every platform this project
-supports the start method is `spawn` — a fresh interpreter that re-imports
-everything and inherits none of that patching. A child was free to reach the
-network, which is the half of the guard nobody would notice was missing: the
-parent's tests look fast and clean while the work actually happens elsewhere.
+supports the child is a fresh interpreter (`spawn` on Windows/macOS,
+`forkserver` on Linux 3.14+) that re-imports everything and inherits none of
+that patching. A child was free to reach the network, which is the half of the
+guard nobody would notice was missing: the parent's tests look fast and clean
+while the work actually happens elsewhere.
 
 Python runs `sitecustomize` at interpreter start, before any user code, so
 putting the directory that holds this file on `PYTHONPATH` extends the guard to
@@ -24,13 +25,19 @@ if os.environ.get("CNE_TEST_NO_NETWORK") == "1":
     _connect = socket.socket.connect
     _connect_ex = socket.socket.connect_ex
 
-    def _loopback(address) -> bool:
-        host = address[0] if isinstance(address, tuple) else address
+    def _local(address) -> bool:
+        # Keep this predicate identical to `_is_local` in tests/conftest.py.
+        # AF_INET / AF_INET6 pass `(host, port[, ...])`. AF_UNIX passes a
+        # filesystem path or an abstract name — local IPC, including the
+        # Linux 3.14 forkserver socket under `/tmp/pymp-*/sock-*`.
+        if not isinstance(address, tuple):
+            return True
+        host = address[0]
         return isinstance(host, str) and (host in ("localhost", "::1") or host.startswith("127."))
 
     def _guard(real):
         def _wrapped(self, address):
-            if _loopback(address):
+            if _local(address):
                 return real(self, address)
             raise AssertionError(
                 f"pid {os.getpid()} opened an outbound connection to {address} from a "

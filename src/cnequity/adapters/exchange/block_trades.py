@@ -197,6 +197,23 @@ def fetch_sse_block_trades(trade_date: date, *, config=None) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=EMPTY.schema) if rows else EMPTY.clone()
 
 
+def _with_premium(frame: pl.DataFrame) -> pl.DataFrame:
+    """Carry the dataset's `premium_ratio`, as null.
+
+    Neither exchange publishes one: SZSE and SSE list the transaction, not its
+    distance from that day's close. The primary's value is EastMoney's own, and
+    deriving a substitute here from the lake's close would put two sources
+    inside one row — so absent is the honest answer.
+
+    The column still has to exist. Without it the write-time schema check
+    rejects the whole batch, which is how this route failed on the first
+    session it was actually asked to cover: EastMoney could not serve
+    2026-09-18, the backup fetched the day, and every row was refused for a
+    column the exchanges were never going to have.
+    """
+    return frame.with_columns(pl.lit(None, dtype=pl.Float64).alias("premium_ratio"))
+
+
 def fetch_block_trades_exchange(trade_date: date, *, config=None) -> pl.DataFrame:
     """Both exchanges for one session. A silent exchange contributes nothing.
 
@@ -210,7 +227,7 @@ def fetch_block_trades_exchange(trade_date: date, *, config=None) -> pl.DataFram
     ]
     live = [f for f in frames if not f.is_empty()]
     if not live:
-        return EMPTY.clone()
+        return _with_premium(EMPTY.clone())
     merged = pl.concat(live, how="vertical")
     # One row per security, as the primary writes it: across 176,093 (day,
     # security) pairs the lake has never held two. The exchanges publish each
@@ -224,7 +241,7 @@ def fetch_block_trades_exchange(trade_date: date, *, config=None) -> pl.DataFram
     # of its four decimals. Summing rather than deduplicating matters here —
     # 603382.SH traded twice at one price and size, and dropping the repeat made
     # the total exactly half of EastMoney's.
-    return (
+    return _with_premium(
         merged.group_by(["symbol", "trade_date"])
         .agg(
             pl.col("volume").sum(),

@@ -27,6 +27,20 @@ def local_time(value: str) -> dict[str, int]:
     return {"Hour": hour, "Minute": minute}
 
 
+def _launchctl_command() -> list[str]:
+    """Argv used to (un)load agents.
+
+    ``CNE_LAUNCHCTL`` is normally a single binary (``launchctl``). A path
+    ending in ``.py`` is run with this interpreter so a test can stub load
+    and unload on Windows, where ``/usr/bin/true`` is not a file CreateProcess
+    can execute.
+    """
+    raw = os.environ.get("CNE_LAUNCHCTL", "launchctl")
+    if raw.lower().endswith(".py"):
+        return [sys.executable, raw]
+    return [raw]
+
+
 def render_jobs(root: Path, dest: Path, *, groups: str | None, vantage: str | None) -> dict:
     daily = read_plist(dest / "com.cnequity.daily.plist")
     host_env = daily.get("EnvironmentVariables", {})
@@ -147,9 +161,9 @@ def main() -> int:
             finally:
                 temporary.unlink(missing_ok=True)
             if args.dry_run is None:
-                launchctl = os.environ.get("CNE_LAUNCHCTL", "launchctl")
-                subprocess.run([launchctl, "unload", str(path)], capture_output=True, check=False)
-                subprocess.run([launchctl, "load", str(path)], check=True)
+                launchctl = _launchctl_command()
+                subprocess.run([*launchctl, "unload", str(path)], capture_output=True, check=False)
+                subprocess.run([*launchctl, "load", str(path)], check=True)
             print(f"{'Rendered' if args.dry_run is not None else 'Loaded'} {path}")
         env = jobs[next(iter(jobs))]["EnvironmentVariables"]
         print(f"scheduler: groups={env['CNE_GROUPS']}; vantage={env['CNE_SOURCE_VANTAGE']}")
