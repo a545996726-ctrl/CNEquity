@@ -161,6 +161,31 @@ def audit(
             f"{validity['window']['start']}.."
             f"{validity['window']['end']}：{research_state}"
         )
+        supported = validity.get("supported_window")
+        # Only worth a line when it adds something: a READY gate with no
+        # computed window (a caller passing its own manifest) would otherwise
+        # print a contradiction.
+        if supported:
+            click.echo(
+                f"  可背书窗口：{supported['start']}..{supported['end']}"
+                "（证据支持的最长区间；研究窗口落在里面即可放行）"
+            )
+        elif not validity["universe_ready"]:
+            detail = validity.get("checks", {}).get("historical_st_labels", {})
+            blocked_by = detail.get("supported_window_blocked_by")
+            per_source = detail.get("supported_window_by_source") or {}
+            offered = "、".join(
+                f"{name} {item['start']}..{item['end']}"
+                for name, item in sorted(per_source.items())
+            )
+            short = detail.get("supported_window_missing_symbols")
+            total = detail.get("supported_window_current_symbols")
+            near = f"，最接近的回执差 {short}/{total} 只" if short and total else ""
+            click.echo(
+                "  可背书窗口：无"
+                + (f"（{blocked_by} 尚无覆盖当前股票池的回执{near}）" if blocked_by else "")
+                + (f"；各源现有区间：{offered}" if offered else "")
+            )
         for blocker in validity["blockers"]:
             click.echo(f"  [research] {blocker['message']}")
             if blocker.get("remediation"):

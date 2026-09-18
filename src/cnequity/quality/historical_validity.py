@@ -191,6 +191,12 @@ def historical_universe_validity(
         )
 
     observed_positive_st_start = st_coverage_start(config)
+    # What the lake can back, independent of what was asked for. A gate that
+    # only ever answers "not the whole history" tells a new install nothing it
+    # can act on; this says where research can start today.
+    from cnequity.quality.st_coverage import st_evidence_supported_window
+
+    supported = st_evidence_supported_window(config, universe=universe)
     st_evidence = st_evidence_coverage_report(
         config,
         requested_start,
@@ -216,10 +222,12 @@ def historical_universe_validity(
                 )
             else:
                 remediation = (
-                    "Enable [sources.tushare] and provide TUSHARE_TOKEN to cover BJ "
-                    "from 2016; symbols with bars before 2016 still require a deeper "
-                    "historical ST source. Alternatively exclude BJ from the research "
-                    "universe; do not treat unresolved symbols as normal."
+                    "Move the research window inside the supported window above: the "
+                    "exchange board answers BJ every session and that evidence grows "
+                    "daily, at no cost. For history before it, enable [sources.tushare] "
+                    "with TUSHARE_TOKEN (covers BJ from 2016; symbols with bars before "
+                    "2016 still require a deeper source), or exclude BJ from the "
+                    "research universe. Do not treat unresolved symbols as normal."
                 )
         else:
             message = (
@@ -359,6 +367,7 @@ def historical_universe_validity(
             "end": requested_end.isoformat() if requested_end else None,
         },
         "universe_ready": universe_ready,
+        "supported_window": supported.get("window"),
         "checks": {
             "daily_bars_window": {
                 "passed": window_valid,
@@ -372,6 +381,11 @@ def historical_universe_validity(
             },
             "historical_st_labels": {
                 "passed": st_valid,
+                "supported_window": supported.get("window"),
+                "supported_window_by_source": supported.get("by_source"),
+                "supported_window_blocked_by": supported.get("missing_source"),
+                "supported_window_missing_symbols": supported.get("missing_symbols"),
+                "supported_window_current_symbols": supported.get("current_symbols"),
                 "coverage_start": st_evidence.get("coverage_start"),
                 "coverage_end": st_evidence.get("coverage_end"),
                 "observed_positive_st_start": (

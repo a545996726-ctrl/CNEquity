@@ -1038,6 +1038,95 @@ def compose_st_coverage_receipt(
     return path
 
 
+def st_evidence_supported_window(
+    config: Config,
+    *,
+    universe: str = "all_a",
+) -> dict[str, Any]:
+    """What window this lake can actually back, and what each source offers.
+
+    The gate used to answer one question — "is the whole bar history
+    research-ready?" — whose answer is no for every lake that keeps BJ and has
+    not bought a vendor, forever. True, and useless: it never says what the
+    lake *can* support, so a fresh install reads a permanently red light on
+    day one instead of "you can research from here, and it grows by a session
+    a day".
+
+    Each source offers its most current intact receipt covering the symbols it
+    owns; the lake's window is their intersection. An empty intersection is
+    reported as such, with the per-source intervals, because "BJ was observed
+    last week and SH/SZ evidence stops a month ago" is a schedule problem the
+    operator can fix, and "no window" alone is not.
+    """
+    symbols = current_st_universe(config, universe=universe)
+    by_source: dict[str, dict[str, str]] = {}
+    intervals: list[tuple[date, date]] = []
+    for source in ST_EVIDENCE_SOURCES:
+        if source == BSE_ST_SOURCE:
+            group = [] if _tushare_st_enabled(config) else _bj_symbols(symbols)
+            if not group:
+                continue
+            window = bse_st_observed_window(config, group)
+            if window is None:
+                return {"window": None, "by_source": by_source, "missing_source": source}
+            best = window
+        else:
+            group = st_evidence_source_symbols(symbols, source, config=config)
+            if not group:
+                continue
+            best = None
+            # How near the best receipt came, for the case where none covers
+            # the current universe: "ten newly listed names short" is a
+            # schedule fact the operator can act on; "no receipt" is not.
+            nearest_short: int | None = None
+            for receipt in _receipts(config):
+                parsed = _valid_receipt_scope(receipt)
+                if parsed is None:
+                    continue
+                scope, scope_start, scope_end = parsed
+                if scope.get("evidence_version") != ST_EVIDENCE_VERSION:
+                    continue
+                if (
+                    scope.get("source") != source
+                    or scope.get("universe") not in ST_EVIDENCE_COMPATIBLE_UNIVERSES
+                ):
+                    continue
+                short = len(set(group) - set(receipt.get("completed_symbols", [])))
+                if short and (nearest_short is None or short < nearest_short):
+                    nearest_short = short
+                if short:
+                    continue
+                # Most current first, then deepest: a lake that ran the sweep
+                # twice should be judged on the evidence it has now.
+                if best is not None and (scope_end, -scope_start.toordinal()) <= (
+                    best[1],
+                    -best[0].toordinal(),
+                ):
+                    continue
+                if _receipt_rows_intact(config, receipt, scope, set(group)):
+                    best = (scope_start, scope_end)
+            if best is None:
+                return {
+                    "window": None,
+                    "by_source": by_source,
+                    "missing_source": source,
+                    "missing_symbols": nearest_short,
+                    "current_symbols": len(group),
+                }
+        by_source[source] = {"start": best[0].isoformat(), "end": best[1].isoformat()}
+        intervals.append(best)
+    if not intervals:
+        return {"window": None, "by_source": by_source, "missing_source": None}
+    window_start = max(item[0] for item in intervals)
+    window_end = min(item[1] for item in intervals)
+    if window_start > window_end:
+        return {"window": None, "by_source": by_source, "disjoint": True}
+    return {
+        "window": {"start": window_start.isoformat(), "end": window_end.isoformat()},
+        "by_source": by_source,
+    }
+
+
 def st_evidence_coverage_report(
     config: Config,
     start: date | None = None,

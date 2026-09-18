@@ -168,3 +168,40 @@ def test_no_observation_publishes_no_receipt(tmp_path):
     cfg = _lake(tmp_path, answered={})
 
     assert publish_bse_st_observation_receipt(cfg) is None
+
+
+def test_the_lake_reports_the_window_it_can_back(tmp_path):
+    """A gate that only says "not the whole history" tells a new lake nothing.
+
+    Every install that keeps BJ and buys no vendor fails the full-history
+    question forever, so the verdict alone is a permanently red light. The
+    supported window is the part that grows: it is what the evidence covers
+    today, and a research window inside it is backed.
+    """
+    from cnequity.quality.st_coverage import (
+        publish_bse_st_observation_receipt,
+        st_evidence_supported_window,
+    )
+
+    cfg = _lake(tmp_path, answered={s: BJ for s in SESSIONS})
+    publish_bse_st_observation_receipt(cfg)
+
+    supported = st_evidence_supported_window(cfg, universe="all_a")
+
+    assert supported["window"] == {
+        "start": SESSIONS[0].isoformat(),
+        "end": SESSIONS[-1].isoformat(),
+    }
+    assert supported["by_source"][BSE_ST_SOURCE]["start"] == SESSIONS[0].isoformat()
+
+
+def test_a_source_with_no_receipt_means_no_window_and_says_which(tmp_path):
+    """Naming the source turns "no window" into something to act on."""
+    from cnequity.quality.st_coverage import st_evidence_supported_window
+
+    cfg = _lake(tmp_path, answered={})
+
+    supported = st_evidence_supported_window(cfg, universe="all_a")
+
+    assert supported["window"] is None
+    assert supported["missing_source"] == BSE_ST_SOURCE
