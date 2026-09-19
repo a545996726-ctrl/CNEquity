@@ -31,6 +31,7 @@ from cnequity.domain.trading_status import (
 )
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.orchestrator.registry import register_step
+from cnequity.quality.failover import snapshot_trading_status_exchange
 from cnequity.quality.st_coverage import (
     ST_EVIDENCE_VERSION,
     build_st_scope,
@@ -83,7 +84,56 @@ def step_instruments(config: Config, trade_date: date, run_id: str, context: dic
     df = enrich_instrument_list_dates(config, df)
     if getattr(config, "_backfill", False):
         df = _merge_delisted_instruments(config, df)
+    df = _carry_lake_facts(config, df)
     return write_simple(config, run_id, "instruments", df)
+
+
+def _carry_lake_facts(config: Config, df: pl.DataFrame) -> pl.DataFrame:
+    """Keep the facts this lake knows and no vendor reports.
+
+    The catalogue is rebuilt from live sources every run, and none of them has
+    ever heard of `prev_symbol` — it is written by the BJ code migration, from
+    the lake's own old-code map. Compaction dedupes on `symbol` keeping the
+    newest row, so the fresh null won, and 246 of the 248 recorded renames were
+    erased on the next daily run: measured across the published revisions of
+    2026-09-18, 248 -> 2 -> 248, the last step being a manual re-run of the
+    migration. The rename lineage a survivorship-free universe depends on was
+    therefore true only on the days somebody re-ran it by hand.
+
+    Only fills nulls: a row that arrives carrying a rename is the authority on
+    it.
+    """
+    if "symbol" not in df.columns:
+        return df
+    existing = load_curated_instruments(config)
+    if existing is None or "prev_symbol" not in existing.columns:
+        return df
+    known = (
+        existing.select("symbol", pl.col("prev_symbol").alias("_prev_known"))
+        .filter(pl.col("_prev_known").is_not_null())
+        .unique(subset=["symbol"], keep="last")
+    )
+    if known.is_empty():
+        return df
+    if "prev_symbol" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("prev_symbol"))
+    carried = (
+        df.join(known, on="symbol", how="left")
+        .with_columns(
+            pl.when(pl.col("prev_symbol").is_null())
+            .then(pl.col("_prev_known"))
+            .otherwise(pl.col("prev_symbol"))
+            .alias("prev_symbol")
+        )
+        .drop("_prev_known")
+    )
+    filled = (
+        carried.filter(pl.col("prev_symbol").is_not_null()).height
+        - df.filter(pl.col("prev_symbol").is_not_null()).height
+    )
+    if filled:
+        logger.info("instruments: carried %d recorded rename(s) forward", filled)
+    return carried
 
 
 def _merge_bse_instruments(config: Config, df: pl.DataFrame, trade_date: date) -> pl.DataFrame:
@@ -702,6 +752,22 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
         _fetch,
         allow_empty=False,
     )
+    # Two requests and about three seconds, once per session, whatever the
+    # vendor path did. The exchange reading is only reachable today when
+    # EastMoney fails, so a normal day leaves no exchange-grade record of SH/SZ
+    # status — and the ST evidence receipt admits a board precisely because a
+    # board is not an aggregator. Snapshot only: authority is unchanged.
+    try:
+        captured = snapshot_trading_status_exchange(
+            config,
+            trade_date=trade_date,
+            symbols=_live_symbols(trade_date),
+            run_id=run_id,
+        )
+        if captured:
+            logger.info("trading_status: snapshotted %d exchange board row(s)", captured)
+    except Exception as exc:  # noqa: BLE001 — a record for later, never this run's verdict
+        logger.warning("trading_status: exchange board snapshot unavailable: %s", exc)
     if df.is_empty():
         result = {"rows_read": 0, "rows_written": 0}
         if _findings:
