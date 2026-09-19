@@ -233,6 +233,11 @@ class JobEngine:
             results: list[dict[str, Any]] = []
             total_read = 0
             total_written = 0
+            # What the run had already published before this call. An init
+            # phase joins a run its predecessors have been writing into, and
+            # this call's own totals start at zero — reporting those alone
+            # would walk the run's counters backwards once per phase.
+            base_read, base_written = self._published_run_rows(run_id)
             had_error = False
             had_warning = False
             finalized = False
@@ -248,6 +253,9 @@ class JobEngine:
                     total_written += wave_written
                     had_error = had_error or wave_error
                     had_warning = had_warning or wave_warning
+                    self.manifest.record_run_progress(
+                        run_id, base_read + total_read, base_written + total_written
+                    )
 
                     if "daily_bars" in wave.steps:
                         promoted = self.manifest.promote_running_to_stale(
@@ -321,8 +329,18 @@ class JobEngine:
         directly skips the manifest bookkeeping, which silently breaks anything
         that reads the batch log — notably staging cleanup, whose readiness test
         is "this run recorded a successful compact".
+        The interrupt contract is the same as ``run_job``'s, and for the same
+        reason: `cne run compact`, `cne backfill`'s finalize, `cne delisted`
+        and `cne maintain` all reach the manifest through here. Without it a
+        Ctrl-C during compact left the run `running` until the orphan
+        reconciler noticed a minute later — self-healing, but a minute of
+        `cne status` describing a process that had already exited.
         """
-        return self._run_step(name, trade_date, run_id, context or {})
+        try:
+            return self._run_step(name, trade_date, run_id, context or {})
+        except (KeyboardInterrupt, SystemExit):
+            self.manifest.interrupt_run(run_id, error_message="interrupted by operator")
+            raise
 
     def _reconcile_orphans(self) -> dict[str, int]:
         out = self.manifest.reconcile_orphaned_runs(
@@ -773,6 +791,13 @@ class JobEngine:
             if phases:
                 return list(phases)
         return list(self.config.init_phases or DEFAULT_INIT_PHASES)
+
+    def _published_run_rows(self, run_id: str) -> tuple[int, int]:
+        """Row counts already recorded on *run_id*, or zeros for a new run."""
+        run = self.manifest.get_run(run_id)
+        if run is None:
+            return 0, 0
+        return int(run["rows_read"] or 0), int(run["rows_written"] or 0)
 
     def _missing_init_steps(self, run_id: str) -> list[str]:
         phases = self._init_phases_list(run_id)

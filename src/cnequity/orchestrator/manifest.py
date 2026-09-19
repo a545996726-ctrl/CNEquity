@@ -344,6 +344,7 @@ class Manifest:
         task_id: str,
         dataset: str,
         batches: list[tuple[str, list[str], str | None, str | None]],
+        blocks_compaction: bool = True,
     ) -> int:
         """Register planned batches before any worker starts one.
 
@@ -370,6 +371,7 @@ class Manifest:
                 window_start,
                 window_end,
                 now,
+                int(blocks_compaction),
             )
             for batch_id, symbols, window_start, window_end in batches
         ]
@@ -378,9 +380,9 @@ class Manifest:
                 """
                 INSERT INTO ingestion_batches (
                     run_id, batch_id, task_id, dataset, status, symbols_json,
-                    window_start, window_end, started_at, retry_count,
-                    request_retry_count, blocks_compaction
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1)
+                    window_start, window_end, started_at, blocks_compaction,
+                    retry_count, request_retry_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                 ON CONFLICT(run_id, batch_id) DO NOTHING
                 """,
                 rows,
@@ -1447,6 +1449,28 @@ class Manifest:
         if not row:
             return {}
         return json.loads(row["metadata_json"] or "{}")
+
+    def record_run_progress(self, run_id: str, rows_read: int, rows_written: int) -> None:
+        """Publish a running run's row counts so far.
+
+        ``finish_run`` used to be the only writer, which made the two numbers
+        an epitaph: a run still working reported 0 rows while its own batch
+        metadata already held thousands, and a run that failed reported 0
+        forever — the case where "how far did it get" is the actual question.
+
+        Written per wave rather than per batch: the counts are for a human
+        reading `cne status`, and a write per batch would put a manifest
+        transaction in the path of every worker for no extra fidelity.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE ingestion_runs
+                SET rows_read = ?, rows_written = ?
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (int(rows_read), int(rows_written), run_id),
+            )
 
     def record_stage_metrics(
         self,

@@ -972,3 +972,85 @@ def test_a_run_lock_held_by_another_thread_says_so(tmp_path):
         holder.join(10)
 
     assert "another thread in this process" in failure[0]
+
+
+def test_a_running_run_reports_the_rows_it_has_already_written(tmp_path, monkeypatch):
+    """`finish_run` used to be the only writer of the run's row counts, which
+    made them an epitaph: a run still working reported 0 while its own batch
+    metadata held thousands, and a failed run reported 0 forever — the case
+    where "how far did it get" is the actual question."""
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    init_data_layout(cfg)
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    seen: list[tuple[int, int]] = []
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            run = Manifest(cfg.manifest_path).get_run(run_id)
+            seen.append((int(run["rows_read"] or 0), int(run["rows_written"] or 0)))
+            if name == "trading_calendar":
+                raise KeyboardInterrupt
+            return {"rows_read": 7, "rows_written": 5}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+
+    engine = JobEngine(cfg)
+    with pytest.raises(KeyboardInterrupt):
+        engine.run_job(
+            "daily",
+            date(2024, 6, 28),
+            waves=[
+                WaveConfig(name="w1", parallel=False, steps=["instruments"]),
+                WaveConfig(name="w2", parallel=False, steps=["trading_calendar"]),
+            ],
+        )
+
+    # Wave two saw what wave one had published, instead of a pair of zeros.
+    assert seen[0] == (0, 0)
+    assert seen[1] == (7, 5)
+    latest = Manifest(cfg.manifest_path).latest_run("daily")
+    assert (latest["rows_read"], latest["rows_written"]) == (7, 5)
+    assert latest["status"] == "failed"
+
+
+def test_an_init_phase_does_not_reset_the_runs_counters(tmp_path, monkeypatch):
+    """Each phase's own totals start at zero, so publishing them unqualified
+    would walk the run's counters backwards once per phase."""
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    cfg.init_phases = [
+        "phase1_reference",
+        "phase2a_corporate_actions",
+        "phase3_index_and_status",
+    ]
+    init_data_layout(cfg)
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    seen: dict[str, tuple[int, int]] = {}
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            run = Manifest(cfg.manifest_path).get_run(run_id)
+            seen[name] = (int(run["rows_read"] or 0), int(run["rows_written"] or 0))
+            return {"rows_read": 10, "rows_written": 4}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+
+    engine = JobEngine(cfg)
+    result = engine.run_init_phases(date(2024, 6, 28))
+
+    # Phase 1 runs instruments + trading_calendar in one job (20/8). Phase 2
+    # adds one step, and phase 3 reads the counters phase 2 published: without
+    # a baseline that read would be 10/4, the run's own history erased.
+    assert seen["corporate_actions"] == (20, 8), "phase two must see phase one's rows"
+    assert seen["index_bars"] == (30, 12), "phase three must see the running total"
+    run = Manifest(cfg.manifest_path).get_run(result["run_id"])
+    assert (run["rows_read"], run["rows_written"]) == (50, 20)
