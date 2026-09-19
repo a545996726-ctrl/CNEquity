@@ -333,6 +333,7 @@ def test_a_killed_init_is_resumed_not_refused(tmp_path, monkeypatch):
         seen.update(
             resume=resume,
             resume_run_id=resume_run_id,
+            backfill_start=getattr(self.config, "_backfill_start", None),
         )
         return {"run_id": resume_run_id, "status": "success", "phases": []}
 
@@ -342,7 +343,7 @@ def test_a_killed_init_is_resumed_not_refused(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "直接续跑而不是从头再来" in result.output
-    assert seen == {"resume": True, "resume_run_id": run_id}
+    assert seen == {"resume": True, "resume_run_id": run_id, "backfill_start": None}
 
 
 def test_a_live_init_is_still_refused(tmp_path, monkeypatch):

@@ -161,6 +161,7 @@ def test_demo_help_lists_command():
     assert "--symbols" in result.output
     assert "--days" in result.output
     assert "--research" in result.output
+    assert "--force" in result.output
     # `--sample` used to be a flag on `cne demo`; it is now a profile value,
     # which is what makes demo/sample/quick/full one axis instead of two forks.
     assert "demo|sample|quick|full" in result.output
@@ -198,6 +199,113 @@ def test_cne_demo_sample_needs_no_network(tmp_path, monkeypatch):
     bars = pl.read_parquet(list((data_root / "curated" / "daily_bars").glob("**/*.parquet")))
     assert bars.height == 10
     assert bars["source"].unique().to_list() == ["mock"]
+
+    status = CliRunner().invoke(cli, ["status", "--datasets", "--config", str(config_out)])
+    assert status.exit_code == 0, status.output
+    assert "sample 湖" in status.output
+    assert "STALE" not in status.output
+
+    audit = CliRunner().invoke(cli, ["audit", "--config", str(config_out)])
+    assert audit.exit_code == 0, audit.output
+    assert "0 error" in audit.output
+    assert "预期 info" in audit.output
+
+
+def test_sample_preserves_a_different_existing_config_without_force(tmp_path):
+    data_root = tmp_path / "sample-lake"
+    config_out = tmp_path / "existing.toml"
+    original = '[data]\nroot = "/important/lake"\n'
+    config_out.write_text(original, encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--profile",
+            "sample",
+            "--data-root",
+            str(data_root),
+            "--config-out",
+            str(config_out),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "配置已存在且内容不同" in result.output
+    assert "--force" in result.output
+    assert config_out.read_text(encoding="utf-8") == original
+    assert not data_root.exists()
+
+
+def test_sample_force_overwrites_a_different_existing_config(tmp_path):
+    data_root = tmp_path / "sample-lake"
+    config_out = tmp_path / "existing.toml"
+    config_out.write_text('[data]\nroot = "/old/lake"\n', encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--profile",
+            "sample",
+            "--days",
+            "2",
+            "--data-root",
+            str(data_root),
+            "--config-out",
+            str(config_out),
+            "--force",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    written = config_out.read_text(encoding="utf-8")
+    assert 'profile = "sample"' in written
+    assert str(data_root.resolve()) in written
+
+
+def test_demo_config_force_is_atomic_when_replacement_is_interrupted(tmp_path, monkeypatch):
+    from cnequity.cli.demo import _write_sample_toml
+
+    config_out = tmp_path / "existing.toml"
+    original = '[data]\nroot = "/important/lake"\n'
+    config_out.write_text(original, encoding="utf-8")
+
+    def interrupt_replace(source, destination):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cnequity.cli.demo.os.replace", interrupt_replace)
+
+    with pytest.raises(KeyboardInterrupt):
+        _write_sample_toml(config_out, tmp_path / "new-lake", force=True)
+
+    assert config_out.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".existing.toml.*.tmp")) == []
+
+
+def test_sample_allows_an_identical_existing_config_without_force(tmp_path):
+    from cnequity.cli.demo import _write_sample_toml
+
+    data_root = tmp_path / "sample-lake"
+    config_out = tmp_path / "sample.toml"
+    _write_sample_toml(config_out, data_root)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--profile",
+            "sample",
+            "--days",
+            "2",
+            "--data-root",
+            str(data_root),
+            "--config-out",
+            str(config_out),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def test_cne_demo_sample_rejects_live_only_modes(tmp_path):

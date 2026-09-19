@@ -22,6 +22,16 @@ def test_cli_reference_covers_the_research_demo_flag():
     assert "--research" in help_result.output
 
 
+def test_init_help_answers_the_scope_and_400_symbol_questions():
+    help_result = CliRunner().invoke(cli, ["init", "--help"])
+
+    assert help_result.exit_code == 0
+    assert "quick/full 都扫描配置的 universe" in help_result.output
+    assert "不是只拉 400 条数据" in help_result.output
+    assert "历史 ST" in help_result.output
+    assert "cne backfill trading_status" in help_result.output
+
+
 def test_source_health_note_does_not_describe_removed_eastmoney_sticky_state():
     from cnequity.diagnostics.source_health import PROBES_BY_KEY
 

@@ -49,6 +49,99 @@ CNEquity 开源、免注册、自托管。它不负责给出交易信号，而�
 
 那些股票不是收益为零，而是根本没有进入计算。CNEquity 因此把退市股、复权因子、历史成分和 PIT（按当时可获得的信息取数）放在数据层里处理，而不是交给每个下游脚本临时拼接。
 
+## 数据范围
+
+项目当前的主线是中国市场的 A 股研究，不追求把所有金融数据都收进来。已注册数据集覆盖：
+
+- 证券主数据、交易日历和交易状态；
+- 个股、指数、行业和板块的日线、分钟线、分笔与复权因子；
+- 公司行为、公告索引和业绩披露预约；
+- 财报、估值、股本、股东和分析师一致预期；
+- 北向、融资融券、龙虎榜、大宗交易和资金流；
+- 指数成分、行业分类、宏观指标和市场宽度；
+- 新闻、快讯、情绪、轮动，以及解禁和监管事件。
+
+当前注册表包含 **42 个数据集：39 个 curated + 3 个 derived**，按研究用途分为 L0–L8 九类。
+
+| 层次 | 研究用途 | 代表数据集 |
+|---|---|---|
+| L0 | 基础参考 | 证券主数据、交易日历、交易状态 |
+| L1 | 行情 | 日线、指数、复权因子、分钟线、分笔、退市事件 |
+| L2 | 公司事件 | 公司行为、公告索引、预约披露 |
+| L3 | 基本面 | 财报、估值、股本、股东、一致预期 |
+| L4 | 资金面 | 北向、融资融券、龙虎榜、大宗交易、资金流 |
+| L5 | 结构行业 | 指数成分、行业与板块成分 |
+| L6 | 宏观 | 宏观指标、市场宽度 |
+| L7 | 舆情与轮动 | 新闻、情绪、人气、板块行情与资金流 |
+| L8 | 风险合规 | 解禁日程、监管事件 |
+
+所有 curated 行都带有 `source`、`data_version` 和 `fetched_at`，可以追到来源和采集批次。分钟线、5 分钟线和分笔默认关闭，按需启用；部分只能获取当日快照的数据集不会被伪造成历史序列。
+
+完整字段、主键、历史模式和源端限制见[数据集目录](docs/datasets/catalog.md)。
+`events:*` 是 7×24 事件流组：公告和资讯周末也发，由 `cne run events` 按自然日跑，
+不受交易日门禁限制（见[配置 · 事件流调度组](docs/getting-started/configuration.md)）。
+
+<details>
+<summary><b>展开查看 42 个数据集及主备数据源</b></summary>
+
+| 数据集 | 说明 | 主源 | 备源 | 历史 | 调度组 |
+|---|---|---|---|---|---|
+| **L0 · 基础参考** | | | | | |
+| `instruments` | 证券主数据 | tdx_protocol | baostock | 可回补 | core |
+| `trading_calendar` | 交易日历 | tdx_protocol | exchange | 可回补 | core |
+| `trading_status` | 交易状态（停复牌/ST） | eastmoney | exchange | 回填 `baostock` | core |
+| **L1 · 行情** | | | | | |
+| `adj_factors` | 复权因子 | sina | baostock | 可回补 | — |
+| `commodity_bars` ○ | 商品期货主连 | sina | eastmoney | 可回补 | macro_risk |
+| `daily_bars` | 日线 | tdx_protocol | eastmoney | 可回补 | core |
+| `delisting_events` | 退市事件 | derived | — | 可回补 | — |
+| `index_bars` | 指数日线 | tdx_protocol | eastmoney | 可回补 | core |
+| `minute_bars` ○ | 1 分钟线 | tdx_protocol | — | 可回补 | intraday |
+| `minute_bars_5m` ○ | 5 分钟线 | tdx_protocol | — | 可回补 | intraday |
+| `trade_ticks` ○ | 分笔快照 | tdx_protocol | — | 可回补 | ticks |
+| **L2 · 公司事件** | | | | | |
+| `announcement_index` | 公告索引 | cninfo | — | 可回补 | events:disclosures |
+| `corporate_actions` | 公司行为 | eastmoney | tdx_protocol | 可回补（回填走 `tdx_protocol`） | core |
+| `earnings_disclosure_schedule` | 业绩披露预约 | eastmoney | — | 可回补 | fundamentals |
+| **L3 · 基本面** | | | | | |
+| `analyst_consensus` | 分析师一致预期 | eastmoney | — | 仅当日 | research |
+| `financial_statement_items` | 财务报表科目 | eastmoney | — | 可回补 | fundamentals |
+| `share_structure` | 股本结构 | eastmoney | — | 可回补 | fundamentals |
+| `shareholder_counts` | 股东户数 | eastmoney | — | 可回补 | fundamentals |
+| `top_holders` | 前十大股东 / 流通股东 | eastmoney | — | 可回补 | 按需回填 |
+| `valuation_metrics` | 估值指标 | eastmoney | — | 回填 `baostock` | capital |
+| **L4 · 资金面** | | | | | |
+| `block_trades` | 大宗交易 | eastmoney | exchange | 可回补 | signals |
+| `dragon_tiger` | 龙虎榜 | eastmoney | exchange | 可回补 | signals |
+| `fund_flow` | 个股资金流 | eastmoney | — | 仅当日 | capital |
+| `institutional_holdings` | 机构持股 | eastmoney | — | 可回补 | research |
+| `margin_trading` | 融资融券 | exchange | — | 可回补 | capital |
+| `northbound_flows` | 北向资金流向 | eastmoney | — | 可回补 | capital |
+| `northbound_holdings` | 北向持股 | eastmoney | — | 可回补 | capital |
+| **L5 · 结构行业** | | | | | |
+| `index_constituents` | 指数成分 | eastmoney | — | 回填 `cni` | fundamentals |
+| `industry_index` | 行业指数 | derived | — | 可回补 | — |
+| `industry_members` | 行业分类成分 | eastmoney | — | 回填 `sw` | fundamentals |
+| `sector_members` | 板块成分 | eastmoney | — | 仅当日 | capital |
+| **L6 · 宏观** | | | | | |
+| `macro_indicators` | 宏观指标 | eastmoney | pboc | 可回补 | macro_risk |
+| `market_breadth` | 市场宽度 | derived | — | 可回补 | macro_risk |
+| **L7 · 舆情 / 轮动** | | | | | |
+| `economic_calendar` ○ | 经济日历 | eastmoney | — | 仅当日 | — |
+| `flash_news_wire` | 7×24 快讯 | eastmoney | — | 仅当日 | events:news_wire |
+| `hot_rank` | 人气榜 | eastmoney | — | 仅当日 | research |
+| `news_headlines` | 新闻标题 | eastmoney | — | 仅当日 | events:news_wire |
+| `sector_bars` | 板块行情 | ths | — | 回填 `ths` | research |
+| `sector_fund_flow` | 板块资金流 | eastmoney | — | 仅当日 | research |
+| `sentiment_scores` | 情绪评分 | derived | eastmoney | 可回补 | research |
+| **L8 · 风险合规** | | | | | |
+| `regulatory_events` | 监管事件 | cninfo | — | 可回补 | events:regulatory |
+| `share_unlock_schedule` | 解禁日程 | eastmoney | — | 可回补 | macro_risk |
+
+○ 表示可选数据集，空表不算异常。逐项说明见[数据集目录](docs/datasets/catalog.md)，源端限制见[数据源说明](docs/datasets/sources.md)。
+
+</details>
+
 
 ## 与 AkShare、Tushare、Qlib 有什么不同
 
@@ -201,6 +294,23 @@ cne run daily --all-groups --config configs/cnequity.toml
 
 这里的“完整”不是“42 个数据集都有无限历史”：项目没有一条能拉取所有数据集全部历史的通用命令。`init` 负责证券、日历、公司行为、个股/指数日线、交易状态和派生因子等初始化主干；分钟线、5 分钟线和分笔默认关闭，快照型数据也无法回补源端没有提供的历史。需要某个可回补数据集的更早历史时，使用 `cne backfill <dataset> --start ... --end ...`；各数据集限制见[数据集目录](docs/datasets/catalog.md)。
 
+如果中途按了 Ctrl-C，不要删除 `data/`，也不需要从头开始：
+
+```bash
+# init：原命令再跑一次，会自动找到未完成的 run，并从失败批次继续
+cne init --profile full --config configs/cnequity.toml
+
+# 其它 run：按 status 打印的 run_id 重试失败批次
+cne run retry --run-id RUN_ID --config configs/cnequity.toml
+
+# 同时检查日期新鲜度和 init 是否真正完成
+cne status --datasets --config configs/cnequity.toml
+```
+
+Ctrl-C 后，命令会先停止/收拢正在执行的 worker，再把未完成批次记录为可立即重试的 `failed`；已成功批次不会重拉。即使进程被直接杀掉，下一次命令也会根据运行锁识别孤儿 run。未完成阶段会阻止后续阶段和 compact，因此一个小范围成功回填不会把只覆盖部分证券的数据误报成“初始化完整”。`status --datasets` 中的 `fresh` 只表示**已有数据的日期**够新；正式数据湖还会把最新日线截面与配置的 `[universe].ingest` 范围、当日 active 证券及明确停牌证据做轻量核对。每只范围内的 active 证券都必须有日线或明确停牌证据；缺少整个配置市场（例如 `all_a` 没有 BJ）时，初始化会在 instruments 阶段提前失败。未完成 init、任一证券缺少证据或无法验证截面都会另外报警并返回非零。
+
+`sample` 是例外：它只用于离线验证安装、Parquet 落盘和查询，日期不参与新鲜度门禁；`audit` 仍展示 `source=mock` 证据，但把它作为该 profile 的预期 info，而不是安装失败。真实 schema、读取等错误仍会使审计失败，且 sample 数据始终不可用于研究。demo/sample 的 `--config-out` 若已存在且内容不同，默认会保留原文件并报错；请改用另一个路径，或确认后显式加 `--force`。
+
 默认策略是“浅而不窄”：历史先取最近 3 年，但全市场标的一个不缺。这样不会因为只保留今天仍上市的股票，提前把幸存者偏差写进数据湖。每个数据集的真实起点会记录在 `coverage_start`。
 
 “全市场”含北交所：上市状态、停复牌与 ST 取自北交所自己的板块页，日线历史走 TDX，成交额由 TDX 补齐（Sina 从未发布过这一列）。默认 universe `all_a` 覆盖沪、深、京三市的 A 股。
@@ -216,98 +326,6 @@ cne backfill daily_bars --start 2016-01-01 --end COVERAGE_START
 
 默认初始化通常是小时级、GB 级；具体范围、耗时和 400 只历史 ST 上限见上表。详细安装说明见[快速开始](docs/getting-started/quickstart.md)和[安装指南](docs/getting-started/installation.md)。
 
-## 数据范围
-
-项目当前的主线是中国市场的 A 股研究，不追求把所有金融数据都收进来。已注册数据集覆盖：
-
-- 证券主数据、交易日历和交易状态；
-- 个股、指数、行业和板块的日线、分钟线、分笔与复权因子；
-- 公司行为、公告索引和业绩披露预约；
-- 财报、估值、股本、股东和分析师一致预期；
-- 北向、融资融券、龙虎榜、大宗交易和资金流；
-- 指数成分、行业分类、宏观指标和市场宽度；
-- 新闻、快讯、情绪、轮动，以及解禁和监管事件。
-
-当前注册表包含 **42 个数据集：39 个 curated + 3 个 derived**，按研究用途分为 L0–L8 九类。
-
-| 层次 | 研究用途 | 代表数据集 |
-|---|---|---|
-| L0 | 基础参考 | 证券主数据、交易日历、交易状态 |
-| L1 | 行情 | 日线、指数、复权因子、分钟线、分笔、退市事件 |
-| L2 | 公司事件 | 公司行为、公告索引、预约披露 |
-| L3 | 基本面 | 财报、估值、股本、股东、一致预期 |
-| L4 | 资金面 | 北向、融资融券、龙虎榜、大宗交易、资金流 |
-| L5 | 结构行业 | 指数成分、行业与板块成分 |
-| L6 | 宏观 | 宏观指标、市场宽度 |
-| L7 | 舆情与轮动 | 新闻、情绪、人气、板块行情与资金流 |
-| L8 | 风险合规 | 解禁日程、监管事件 |
-
-所有 curated 行都带有 `source`、`data_version` 和 `fetched_at`，可以追到来源和采集批次。分钟线、5 分钟线和分笔默认关闭，按需启用；部分只能获取当日快照的数据集不会被伪造成历史序列。
-
-完整字段、主键、历史模式和源端限制见[数据集目录](docs/datasets/catalog.md)。
-`events:*` 是 7×24 事件流组：公告和资讯周末也发，由 `cne run events` 按自然日跑，
-不受交易日门禁限制（见[配置 · 事件流调度组](docs/getting-started/configuration.md)）。
-
-<details>
-<summary><b>展开查看 42 个数据集及主备数据源</b></summary>
-
-| 数据集 | 说明 | 主源 | 备源 | 历史 | 调度组 |
-|---|---|---|---|---|---|
-| **L0 · 基础参考** | | | | | |
-| `instruments` | 证券主数据 | tdx_protocol | baostock | 可回补 | core |
-| `trading_calendar` | 交易日历 | tdx_protocol | exchange | 可回补 | core |
-| `trading_status` | 交易状态（停复牌/ST） | eastmoney | exchange | 回填 `baostock` | core |
-| **L1 · 行情** | | | | | |
-| `adj_factors` | 复权因子 | sina | baostock | 可回补 | — |
-| `commodity_bars` ○ | 商品期货主连 | sina | eastmoney | 可回补 | macro_risk |
-| `daily_bars` | 日线 | tdx_protocol | eastmoney | 可回补 | core |
-| `delisting_events` | 退市事件 | derived | — | 可回补 | — |
-| `index_bars` | 指数日线 | tdx_protocol | eastmoney | 可回补 | core |
-| `minute_bars` ○ | 1 分钟线 | tdx_protocol | — | 可回补 | intraday |
-| `minute_bars_5m` ○ | 5 分钟线 | tdx_protocol | — | 可回补 | intraday |
-| `trade_ticks` ○ | 分笔快照 | tdx_protocol | — | 可回补 | ticks |
-| **L2 · 公司事件** | | | | | |
-| `announcement_index` | 公告索引 | cninfo | — | 可回补 | events:disclosures |
-| `corporate_actions` | 公司行为 | eastmoney | tdx_protocol | 可回补（回填走 `tdx_protocol`） | core |
-| `earnings_disclosure_schedule` | 业绩披露预约 | eastmoney | — | 可回补 | fundamentals |
-| **L3 · 基本面** | | | | | |
-| `analyst_consensus` | 分析师一致预期 | eastmoney | — | 仅当日 | research |
-| `financial_statement_items` | 财务报表科目 | eastmoney | — | 可回补 | fundamentals |
-| `share_structure` | 股本结构 | eastmoney | — | 可回补 | fundamentals |
-| `shareholder_counts` | 股东户数 | eastmoney | — | 可回补 | fundamentals |
-| `top_holders` | 前十大股东 / 流通股东 | eastmoney | — | 可回补 | 按需回填 |
-| `valuation_metrics` | 估值指标 | eastmoney | — | 回填 `baostock` | capital |
-| **L4 · 资金面** | | | | | |
-| `block_trades` | 大宗交易 | eastmoney | exchange | 可回补 | signals |
-| `dragon_tiger` | 龙虎榜 | eastmoney | exchange | 可回补 | signals |
-| `fund_flow` | 个股资金流 | eastmoney | — | 仅当日 | capital |
-| `institutional_holdings` | 机构持股 | eastmoney | — | 可回补 | research |
-| `margin_trading` | 融资融券 | exchange | — | 可回补 | capital |
-| `northbound_flows` | 北向资金流向 | eastmoney | — | 可回补 | capital |
-| `northbound_holdings` | 北向持股 | eastmoney | — | 可回补 | capital |
-| **L5 · 结构行业** | | | | | |
-| `index_constituents` | 指数成分 | eastmoney | — | 回填 `cni` | fundamentals |
-| `industry_index` | 行业指数 | derived | — | 可回补 | — |
-| `industry_members` | 行业分类成分 | eastmoney | — | 回填 `sw` | fundamentals |
-| `sector_members` | 板块成分 | eastmoney | — | 仅当日 | capital |
-| **L6 · 宏观** | | | | | |
-| `macro_indicators` | 宏观指标 | eastmoney | pboc | 可回补 | macro_risk |
-| `market_breadth` | 市场宽度 | derived | — | 可回补 | macro_risk |
-| **L7 · 舆情 / 轮动** | | | | | |
-| `economic_calendar` ○ | 经济日历 | eastmoney | — | 仅当日 | — |
-| `flash_news_wire` | 7×24 快讯 | eastmoney | — | 仅当日 | events:news_wire |
-| `hot_rank` | 人气榜 | eastmoney | — | 仅当日 | research |
-| `news_headlines` | 新闻标题 | eastmoney | — | 仅当日 | events:news_wire |
-| `sector_bars` | 板块行情 | ths | — | 回填 `ths` | research |
-| `sector_fund_flow` | 板块资金流 | eastmoney | — | 仅当日 | research |
-| `sentiment_scores` | 情绪评分 | derived | eastmoney | 可回补 | research |
-| **L8 · 风险合规** | | | | | |
-| `regulatory_events` | 监管事件 | cninfo | — | 可回补 | events:regulatory |
-| `share_unlock_schedule` | 解禁日程 | eastmoney | — | 可回补 | macro_risk |
-
-○ 表示可选数据集，空表不算异常。逐项说明见[数据集目录](docs/datasets/catalog.md)，源端限制见[数据源说明](docs/datasets/sources.md)。
-
-</details>
 
 ## 适合什么场景
 

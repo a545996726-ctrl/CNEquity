@@ -20,6 +20,7 @@ from cnequity.cli._shared import (
     _run_status_exit_code,
     attach_log_file,
     config_option,
+    ingest_scope_label,
     parse_date_option,
     resolve_config_path,
 )
@@ -52,13 +53,73 @@ def _init_history_start(profile: str, since_str: str | None, trade_date: date) -
     return None
 
 
+def _echo_init_plan(
+    profile: str,
+    *,
+    since_str: str | None,
+    history_start: date | None,
+    trade_date: date,
+    resume: bool,
+    config_path: str,
+    ingest_universe: str,
+    st_history_budget: int,
+    baostock_enabled: bool,
+) -> None:
+    """Put the market width, time order and 400-symbol caveat before the wait."""
+    if resume:
+        override = (
+            f" 本次按显式 --since={history_start.isoformat()} 覆盖历史起点。"
+            if since_str and history_start
+            else " 原 run 的历史范围保持不变。"
+        )
+        click.echo(
+            "续跑计划：保留成功批次，只处理失败/缺失阶段；"
+            f"剩余耗时以批次进度和 ETA 为准。{override}"
+        )
+        return
+    scope = ingest_scope_label(ingest_universe)
+    if since_str:
+        click.echo(
+            f"初始化计划：{scope}，"
+            f"自定义历史窗口 {history_start.isoformat() if history_start else since_str}"
+            f" .. {trade_date.isoformat()}；耗时取决于窗口长度，以实时 ETA 为准。"
+        )
+    elif profile == "full":
+        click.echo(
+            f"初始化计划：full，{scope}，日线从 {BACKFILL_START.isoformat()} 起；"
+            "实测量级约 3 小时、GB 级。"
+        )
+    else:
+        click.echo(
+            f"初始化计划：quick，{scope}，最近 {QUICK_PROFILE_YEARS} 年；实测量级约 1 小时、GB 级。"
+        )
+    if not baostock_enabled:
+        click.echo(
+            "历史 ST 说明：[sources.baostock] 未启用，本次 init 不会执行 Baostock 历史 ST "
+            "扫描；这不是“只有 400 条数据”。如需该证据，请先启用数据源，再运行 "
+            f"`cne backfill trading_status --config {config_path}`。"
+        )
+    elif st_history_budget > 0:
+        click.echo(
+            f"范围说明：init 不是只拉 {st_history_budget} 条数据；"
+            f"{st_history_budget} 只证券上限仅用于最慢的历史 ST 状态扫描。"
+            "要补完这部分，init 后运行 `cne backfill trading_status --config "
+            f"{config_path}`（全市场整轮实测约 10–11 小时）。"
+        )
+    else:
+        click.echo(
+            "历史 ST 说明：本配置未设置每轮证券数上限，init 会尝试完成整轮扫描；"
+            "全市场实测约 10–11 小时，以实时进度为准。"
+        )
+
+
 # `cne init --profile demo|sample` used to be `cne demo`. It is the same
 # decision as `quick` vs `full` — how much of the market to build — and asking a
 # first-time user to choose between two commands before they have either was one
 # fork too many. The option sets stay disjoint, so each side refuses the other's
 # flags rather than accepting and ignoring them.
 DEMO_PROFILES = ("demo", "sample")
-_DEMO_ONLY = ("symbols", "days", "data_root", "config_out", "intraday", "research")
+_DEMO_ONLY = ("symbols", "days", "data_root", "config_out", "intraday", "research", "force")
 _LAKE_ONLY = ("config_path", "layout_only", "resume", "resume_run_id", "keep_going", "since_str")
 _FLAG_NAMES = {
     "config_path": "--config",
@@ -119,6 +180,11 @@ def _reject_foreign_options(profile: str, names: tuple[str, ...]) -> None:
     help="demo/sample：把那份小配置写到哪，供后续 `cne query` 使用。",
 )
 @click.option(
+    "--force",
+    is_flag=True,
+    help="demo/sample：允许覆盖内容不同的已有 --config-out；默认拒绝并保留原文件。",
+)
+@click.option(
     "--intraday",
     is_flag=True,
     help="demo/sample：同一批标的额外抓 1 分钟线（最多 5 个交易日）并打印一个交易日，"
@@ -170,6 +236,7 @@ def init(
     days: int,
     data_root: str,
     config_out: str,
+    force: bool,
     intraday: bool,
     research: bool,
     layout_only: bool,
@@ -200,6 +267,10 @@ def init(
 
     或者一开始就全量：`--profile full`。
 
+    quick/full 都扫描配置的 universe，不是只拉 400 条数据。400 只是默认配置中 init 最慢的
+    历史 ST 状态扫描每轮先处理的证券数；实际值以启动摘要为准，用
+    `cne backfill trading_status` 补完整轮。
+
     \b
     `--profile demo` 把几只标的建到独立的 `--data-root` 里，一分钟内就能看到进度和查询结果；
     `--profile sample` 做同样的事，但离线且确定。两者都不是一个市场，也都不碰 `--config` ——
@@ -218,6 +289,7 @@ def init(
             config_out=Path(config_out),
             intraday=intraday,
             research=research,
+            force=force,
         )
         return
 
@@ -236,13 +308,6 @@ def init(
     td = parse_date_option(trade_date, "--trade-date") or shanghai_today()
 
     history_start = _init_history_start(profile, since_str, td)
-    if history_start is not None:
-        cfg._backfill_start = history_start
-        click.echo(
-            f"历史窗口：{history_start.isoformat()} .. {td.isoformat()}"
-            f"（全市场标的，{profile if not since_str else 'custom'} 深度）。"
-            "以后可以用 `cne backfill daily_bars --start <更早的日期>` 补深。"
-        )
 
     engine = JobEngine(cfg)
 
@@ -268,9 +333,34 @@ def init(
             resume = True
             resume_run_id = str(incomplete["run_id"])
 
+    is_resume = resume or bool(resume_run_id)
+    # A default `--profile quick` is not an explicit request to shrink the
+    # history of an older full/custom run. Let the engine restore that run's
+    # recorded window. `--since` is the one deliberate resume-time override.
+    if history_start is not None and (not is_resume or since_str):
+        cfg._backfill_start = history_start
+        click.echo(
+            f"历史窗口：{history_start.isoformat()} .. {td.isoformat()}"
+            f"（{ingest_scope_label(cfg.ingest_universe)}，"
+            f"{profile if not since_str else 'custom'} 深度）。"
+            "以后可以用 `cne backfill daily_bars --start <更早的日期>` 补深。"
+        )
+
+    _echo_init_plan(
+        profile,
+        since_str=since_str,
+        history_start=history_start,
+        trade_date=td,
+        resume=is_resume,
+        config_path=config_path,
+        ingest_universe=cfg.ingest_universe,
+        st_history_budget=int(cfg.st_history_symbols_per_run),
+        baostock_enabled=bool(cfg.sources.get("baostock", False)),
+    )
+
     result = engine.run_init_phases(
         trade_date=td,
-        resume=resume or bool(resume_run_id),
+        resume=is_resume,
         resume_run_id=resume_run_id,
         keep_going=keep_going,
     )

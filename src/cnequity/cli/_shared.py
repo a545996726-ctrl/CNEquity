@@ -21,6 +21,15 @@ DEMO_CONFIG = "configs/cnequity.demo.toml"
 DEFAULT_CONFIG = USER_CONFIG
 
 
+def ingest_scope_label(universe: str) -> str:
+    """Human-readable ingest scope without overstating configured coverage."""
+    return {
+        "all_a": "沪深京全市场 A 股",
+        "all_a_sh_sz": "沪深 A 股（配置排除北交所）",
+        "all_instruments": "instruments 全部场内标的（含 ETF/LOF）",
+    }.get(universe, f"配置范围 {universe}")
+
+
 def config_option(func):
     """Attach the standard `--config` option.
 

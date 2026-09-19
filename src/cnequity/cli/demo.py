@@ -9,7 +9,9 @@ by a 5-symbol instruments file.
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import tempfile
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -43,15 +45,52 @@ def _banner(step: str, title: str) -> None:
     sys.stdout.flush()
 
 
-def _write_demo_toml(path: Path, data_root: Path) -> None:
+def _write_demo_config(path: Path, text: str, *, force: bool) -> None:
+    """Write a demo config without silently repointing an existing file."""
+    if path.exists():
+        if not path.is_file():
+            raise click.ClickException(f"配置输出路径不是普通文件：{path}")
+        try:
+            current = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise click.ClickException(f"无法读取已有配置 {path}：{exc}") from exc
+        if current == text:
+            return
+        if not force:
+            raise click.ClickException(
+                f"配置已存在且内容不同：{path}。原文件未改动；"
+                "请换一个 --config-out，或确认后加 --force 覆盖。"
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise click.ClickException(f"无法写入配置 {path}：{exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_demo_toml(path: Path, data_root: Path, *, force: bool = False) -> None:
     """Persist a tiny config so follow-up ``cne query --config …`` works."""
     from cnequity.config.bootstrap import path_for_toml
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     # POSIX form + TOML escape: bare ``C:\Users\…`` is invalid TOML (``\U`` etc.).
     root = path_for_toml(data_root)
-    path.write_text(
-        f"""# Auto-written by `cne init --profile demo`. Safe to delete with the demo data_root.
+    text = f"""# Auto-written by `cne init --profile demo`. Safe to delete with the demo data_root.
 [data]
 root = "{root}"
 # Says what this lake is, so whole-lake checks do not judge five symbols
@@ -67,19 +106,16 @@ enabled = true
 allow_mock = false
 min_interval_ms = 100
 servers = "auto"
-""",
-        encoding="utf-8",
-    )
+"""
+    _write_demo_config(path, text, force=force)
 
 
-def _write_sample_toml(path: Path, data_root: Path) -> None:
+def _write_sample_toml(path: Path, data_root: Path, *, force: bool = False) -> None:
     """Persist a read-only config for the generated, explicitly synthetic lake."""
     from cnequity.config.bootstrap import path_for_toml
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     root = path_for_toml(data_root)
-    path.write_text(
-        f"""# Auto-written by `cne init --profile sample`.
+    text = f"""# Auto-written by `cne init --profile sample`.
 # The rows are synthetic and carry source=mock. Never use this lake for research.
 [data]
 root = "{root}"
@@ -92,9 +128,8 @@ batch_size = 50
 [tdx_protocol]
 enabled = false
 allow_mock = false
-""",
-        encoding="utf-8",
-    )
+"""
+    _write_demo_config(path, text, force=force)
 
 
 def _demo_config(data_root: Path, config_path: Path | None = None) -> Config:
@@ -495,6 +530,7 @@ def run_sample_demo(
     config_out: Path | None = None,
     intraday: bool = False,
     research: bool = False,
+    force: bool = False,
 ) -> dict:
     """Write a deterministic no-network lake for installation and query checks."""
     from cnequity.domain.schemas import MOCK_SOURCE
@@ -519,7 +555,7 @@ def run_sample_demo(
 
     _banner("1/3", f"在 {data_root} 准备离线样例湖")
     click.echo("离线样例：生成的是合成价格，不是市场数据。")
-    _write_sample_toml(config_out, data_root)
+    _write_sample_toml(config_out, data_root, force=force)
     cfg = _demo_config(data_root, config_path=config_out.resolve())
     cfg.tdx_enabled = False
     init_data_layout(cfg)
@@ -579,6 +615,7 @@ def run_demo(
     config_out: Path | None = None,
     intraday: bool = False,
     research: bool = False,
+    force: bool = False,
 ) -> dict:
     """Run the mini real-source demo. Returns a small summary dict."""
     _configure_logging()
@@ -591,7 +628,7 @@ def run_demo(
     config_out = config_out or Path("configs/cnequity.demo.toml")
     steps = 8 if research and intraday else 7 if (research or intraday) else 6
     _banner(f"1/{steps}", f"在 {data_root} 准备 demo 湖")
-    _write_demo_toml(config_out, data_root)
+    _write_demo_toml(config_out, data_root, force=force)
     cfg = _demo_config(data_root, config_path=config_out.resolve())
     init_data_layout(cfg)
     click.echo(f"data_root = {cfg.data_root}")

@@ -12,6 +12,12 @@ SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 # daily dataset is expected to publish the session.
 A_SHARE_FINAL_AT = time(15, 5)
 
+# The Beijing Stock Exchange's first trading session. Before it, a lake with no
+# BJ securities is correct rather than truncated, so every gate that asks "should
+# this all-market lake contain Beijing names?" needs this date — which is why it
+# lives here rather than being spelled out in each of them.
+BSE_FIRST_SESSION = date(2021, 11, 15)
+
 
 def shanghai_now(now: datetime | None = None) -> datetime:
     """Return an aware current timestamp represented in exchange time."""

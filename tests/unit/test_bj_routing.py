@@ -505,6 +505,61 @@ def test_a_disabled_bse_source_is_not_consulted(tmp_path, monkeypatch):
     assert _merge_bse_instruments(cfg, live, date(2026, 9, 15)).equals(live)
 
 
+def test_a_new_all_a_lake_fails_before_publishing_without_beijing(tmp_path):
+    from cnequity.steps.reference import _require_beijing_instrument_scope
+
+    cfg = Config(data_root=tmp_path / "data", sources={"bse": True})
+
+    with pytest.raises(RuntimeError, match="拒绝把沪深子集发布成全市场"):
+        _require_beijing_instrument_scope(
+            cfg,
+            _live_instruments(["600519.SH", "000001.SZ"]),
+            date(2026, 9, 15),
+        )
+
+
+def test_an_established_all_a_lake_can_carry_beijing_through_a_board_outage(tmp_path):
+    from cnequity.steps.reference import _require_beijing_instrument_scope
+
+    cfg = Config(data_root=tmp_path / "data", sources={"bse": True})
+    root = cfg.curated_root / "instruments"
+    root.mkdir(parents=True)
+    _live_instruments(["600519.SH", "000001.SZ", "920001.BJ"]).write_parquet(
+        root / "part-0.parquet"
+    )
+
+    _require_beijing_instrument_scope(
+        cfg,
+        _live_instruments(["600519.SH", "000001.SZ"]),
+        date(2026, 9, 15),
+    )
+
+
+def test_sh_sz_scope_does_not_require_beijing(tmp_path):
+    from cnequity.steps.reference import _require_beijing_instrument_scope
+
+    cfg = Config(data_root=tmp_path / "data", ingest_universe="all_a_sh_sz")
+
+    _require_beijing_instrument_scope(
+        cfg,
+        _live_instruments(["600519.SH", "000001.SZ"]),
+        date(2026, 9, 15),
+    )
+
+
+def test_all_a_rejects_a_disabled_bse_source_even_with_old_beijing_rows(tmp_path):
+    from cnequity.steps.reference import _require_beijing_instrument_scope
+
+    cfg = Config(data_root=tmp_path / "data", sources={"bse": False})
+
+    with pytest.raises(RuntimeError, match=r"\[sources\.bse\] 已禁用"):
+        _require_beijing_instrument_scope(
+            cfg,
+            _live_instruments(["600519.SH", "000001.SZ", "920001.BJ"]),
+            date(2026, 9, 15),
+        )
+
+
 def test_recovered_beijing_names_are_enriched_not_stranded(tmp_path, monkeypatch):
     """Discovery and enrichment have to run in that order.
 

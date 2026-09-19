@@ -17,6 +17,7 @@ from cnequity.adapters.tdx_protocol.client import (
 )
 from cnequity.config import Config
 from cnequity.domain.frames import with_columns_unless_blank
+from cnequity.domain.market_time import BSE_FIRST_SESSION
 from cnequity.domain.schemas import with_provenance
 from cnequity.domain.symbols import (
     is_all_a_symbol,
@@ -81,11 +82,51 @@ def step_instruments(config: Config, trade_date: date, run_id: str, context: dic
     # been discovered and then never fetched.
     df = _merge_bse_instruments(config, df, trade_date)
     df = _merge_untdxable_instruments(config, df)
+    _require_beijing_instrument_scope(config, df, trade_date)
     df = enrich_instrument_list_dates(config, df)
     if getattr(config, "_backfill", False):
         df = _merge_delisted_instruments(config, df)
     df = _carry_lake_facts(config, df)
     return write_simple(config, run_id, "instruments", df)
+
+
+def _require_beijing_instrument_scope(
+    config: Config, frame: pl.DataFrame, trade_date: date
+) -> None:
+    """Fail a new all-market lake before an absent Beijing leg becomes truth."""
+    if config.ingest_universe not in {"all_a", "all_instruments"} or trade_date < BSE_FIRST_SESSION:
+        return
+    if not config.sources.get("bse", True):
+        raise RuntimeError(
+            "instruments: [universe].ingest 包含北交所，但 [sources.bse] 已禁用，"
+            "无法发现新上市 BJ 证券。请启用 [sources.bse]，或将 "
+            "[universe].ingest 明确设为 all_a_sh_sz。"
+        )
+    if "symbol" in frame.columns and frame["symbol"].str.ends_with(".BJ").any():
+        return
+
+    # A daily refresh may temporarily lose the board endpoint. Compaction keeps
+    # existing instruments, so an established lake can safely carry its active
+    # BJ rows forward; only a new/never-complete lake must fail here.
+    existing = load_curated_instruments(config)
+    if existing is not None and "symbol" in existing.columns:
+        beijing = existing.filter(pl.col("symbol").str.ends_with(".BJ"))
+        if "delist_date" in beijing.columns:
+            beijing = beijing.filter(
+                pl.col("delist_date").is_null() | (pl.col("delist_date") >= trade_date)
+            )
+        if not beijing.is_empty():
+            logger.warning(
+                "instruments: BSE snapshot unavailable; carrying %d existing active BJ row(s)",
+                beijing.height,
+            )
+            return
+
+    raise RuntimeError(
+        "instruments: 配置范围包含北交所，但没有取得任何 active BJ 证券，"
+        "拒绝把沪深子集发布成全市场。检查 BSE 板块接口后重试；"
+        "若只需要沪深，请将 [universe].ingest 设为 all_a_sh_sz。"
+    )
 
 
 def _carry_lake_facts(config: Config, df: pl.DataFrame) -> pl.DataFrame:

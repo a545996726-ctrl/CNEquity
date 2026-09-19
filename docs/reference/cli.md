@@ -113,6 +113,7 @@ Error: `cne retry` has moved. Use `cne run retry` instead.
 | `--profile sample` | 不访问网络，生成可用于验证安装、查询和 DuckDB 视图的合成样例；不可与 `--research` / `--intraday` 合用 |
 | `--trade-date` | 截至日 YYYY-MM-DD（默认今天 / 最近交易日） |
 | `--config-out` | 写出供后续 `cne query` 使用的小配置（默认 `configs/cnequity.demo.toml`） |
+| `--force` | 允许覆盖内容不同的已有 `--config-out`；默认保留原文件并报错，内容相同可直接重跑 |
 
 流程：建目录 → 探测 TDX → 拉 instruments 并裁成 demo 宇宙 → 交易日历 → `daily_bars` + compact → 打印样例表；加 `--research` 时再派生 Sina hfq 并校验 exact 覆盖，加 `--intraday` 时再跑 `minute_bars`。终端有分阶段进度与 INFO 日志。需要能访问 TDX；`allow_mock` 不会打开。
 

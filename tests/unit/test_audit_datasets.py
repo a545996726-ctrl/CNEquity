@@ -160,6 +160,31 @@ def test_audit_flags_mock_rows_in_trade_date_partition(tmp_path):
     assert mock[0]["severity"] == "error"
 
 
+def test_sample_profile_keeps_mock_findings_visible_but_non_gating(tmp_path):
+    from cnequity.quality.audit import _profile_adjusted_findings
+
+    cfg = Config(data_root=tmp_path / "data", lake_profile="sample")
+    findings = _profile_adjusted_findings(
+        cfg,
+        [
+            {"dataset": "daily_bars", "severity": "error", "check": "mock_source"},
+            {
+                "dataset": "sources",
+                "severity": "error",
+                "check": "unregistered_source",
+                "sources": {"mock": ["daily_bars"]},
+            },
+            {"dataset": "daily_bars", "severity": "error", "check": "schema_contract"},
+        ],
+    )
+
+    assert findings[0]["severity"] == "info"
+    assert findings[0]["expected_for_profile"] is True
+    assert findings[1]["severity"] == "info"
+    assert findings[1]["expected_for_profile"] is True
+    assert findings[2]["severity"] == "error"
+
+
 def test_audit_checks_pk_duplicates_beyond_sample_files(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     trade_date = date(2024, 6, 28)
@@ -725,3 +750,53 @@ def test_a_stale_dataset_shrink_is_reported_without_accusing_the_data(tmp_path):
     assert cold["severity"] == "info"
     assert cold["stale_dataset"] is True
     assert "cne status --datasets" in cold["message"]
+
+
+def test_sample_profile_only_downgrades_the_synthetic_source_checks():
+    """The profile allowance covers mock-source findings and nothing else, so
+    an unconditional "these are expected" would speak for errors it has never
+    seen — and the one error that is not expected is exactly the one such a
+    message would hide."""
+    from cnequity.quality.audit import _profile_adjusted_findings
+
+    class _Cfg:
+        lake_profile = "sample"
+
+    findings = [
+        {"check": "mock_source", "severity": "error", "message": "rows carry source=mock"},
+        {
+            "check": "unregistered_source",
+            "severity": "error",
+            "sources": {"mock": 5},
+            "message": "unknown source",
+        },
+        {"check": "daily_bars_amount_disagrees", "severity": "error", "message": "amount != vwap"},
+    ]
+
+    adjusted = _profile_adjusted_findings(_Cfg(), findings)
+
+    by_check = {item["check"]: item for item in adjusted}
+    assert by_check["mock_source"]["severity"] == "info"
+    assert by_check["mock_source"]["expected_for_profile"] is True
+    assert by_check["unregistered_source"]["severity"] == "info"
+    # Not a synthetic-source finding: it stays an error and must stay visible.
+    assert by_check["daily_bars_amount_disagrees"]["severity"] == "error"
+    assert "expected_for_profile" not in by_check["daily_bars_amount_disagrees"]
+
+
+def test_an_unregistered_source_that_is_not_only_mock_stays_an_error():
+    from cnequity.quality.audit import _profile_adjusted_findings
+
+    class _Cfg:
+        lake_profile = "sample"
+
+    findings = [
+        {
+            "check": "unregistered_source",
+            "severity": "error",
+            "sources": {"mock": 5, "mystery": 2},
+            "message": "unknown source",
+        }
+    ]
+
+    assert _profile_adjusted_findings(_Cfg(), findings)[0]["severity"] == "error"

@@ -136,6 +136,16 @@ def audit(
             f"  findings：{sev.get('error', 0)} error、"
             f"{sev.get('warning', 0)} warning、{sev.get('info', 0)} info"
         )
+        if getattr(cfg, "lake_profile", None) == "sample":
+            click.echo(
+                "  sample 湖：source=mock 是这个离线 profile 的预期证据，"
+                "不参与健康门禁；它仍不可用于研究。"
+            )
+            if sev.get("error", 0):
+                click.echo(
+                    f"  注意：剩下的 {sev['error']} 条 error 不属于合成数据的预期范围。",
+                    err=True,
+                )
         if health["empty_datasets"]:
             click.echo(f"  空数据集：{', '.join(health['empty_datasets'])}")
         if health.get("expected_empty_datasets"):
@@ -216,15 +226,29 @@ def audit(
     errors = int(by_severity.get("error", 0))
     warnings = int(by_severity.get("warning", 0))
     click.echo(f"审计完成：写入 {n} 条 findings（{errors} error，{warnings} warning）")
-    if getattr(cfg, "lake_profile", None) == "sample" and errors:
+    if getattr(cfg, "lake_profile", None) == "sample":
         # The fabricated-row check is doing its job here, loudly and correctly.
         # Say which lake it is looking at, so a first-time reader does not take
         # `cne init --profile sample` for a broken install.
-        click.echo(
-            "sample 湖：每一行都是刻意生成的合成数据（source=mock），所以下面那些"
-            "「伪造行」findings 正是这个 profile 在正常工作，不是缺陷。"
-            "要建真数据的湖，用 `cne init --profile demo`（或 `cne config create` + `cne init`）。"
-        )
+        #
+        # Conditional on what was actually downgraded. The profile allowance
+        # covers the synthetic-source checks and nothing else, so an
+        # unconditional "these are expected" would speak for errors it has
+        # never seen — and the one error that is not expected is exactly the
+        # one this message would hide.
+        expected = int(severities.get("audit_profile_expected_findings", 0) or 0)
+        if expected:
+            click.echo(
+                f"sample 湖：每一行都是刻意生成的合成数据（source=mock），其中 {expected} 条"
+                "「伪造行」findings 已降级为预期 info，不代表安装失败。"
+                "要建真数据的湖，用 `cne init --profile demo`（或 `cne config create` + `cne init`）。"
+            )
+        if errors:
+            click.echo(
+                f"注意：还有 {errors} 条 error 不在 sample profile 的预期范围内，"
+                "它们说的是真问题，不是合成数据本身。",
+                err=True,
+            )
     # Exit like `--full` does. Callers use this as a gate, and a mode that
     # records errors and still reports success is a gate that never fires —
     # the daily health check had to shell out and re-read the findings file to
@@ -604,8 +628,13 @@ def status(
 
         anchor = _last_trading_day(cfg, shanghai_today())
         df = list_datasets(config=cfg)
+        lake_profile = getattr(cfg, "lake_profile", None)
 
         def _freshness(row: dict) -> str:
+            if lake_profile == "sample":
+                return "sample" if row["has_data"] else "n/a"
+            if lake_profile == "demo" and not row["has_data"]:
+                return "n/a"
             if not row["has_data"]:
                 # "empty" alone cannot say whether the dataset is waiting
                 # for its first run or for a source that no longer exists.
@@ -650,6 +679,11 @@ def status(
         view = df if all_columns else df.select([c for c in freshness_columns if c in df.columns])
         with pl_mod.Config(tbl_rows=-1, tbl_cols=-1, fmt_str_lengths=32):
             click.echo(view)
+        if lake_profile == "sample":
+            click.echo(
+                "\nsample 湖：这些是 source=mock 的合成数据，日期不参与新鲜度门禁；"
+                "它只验证安装、Parquet 落盘和查询链路。"
+            )
         # A tolerated gap is invisible in freshness: the watermark moved over
         # the hole, so the dataset reads FRESH while still owing keys. The
         # ledger is the only place that knows, and nobody reads a json file

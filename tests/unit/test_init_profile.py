@@ -12,8 +12,9 @@ from datetime import date
 import pytest
 from click.testing import CliRunner
 
+from cnequity.cli._shared import ingest_scope_label
 from cnequity.cli.main import cli
-from cnequity.cli.setup_cmds import QUICK_PROFILE_YEARS, _init_history_start
+from cnequity.cli.setup_cmds import QUICK_PROFILE_YEARS, _echo_init_plan, _init_history_start
 from cnequity.config import Config
 from cnequity.config.bootstrap import path_for_toml
 from cnequity.domain.market_time import shanghai_today
@@ -64,6 +65,43 @@ def test_since_overrides_the_profile():
     assert _init_history_start("quick", "2019-01-01", date(2026, 8, 2)) == date(2019, 1, 1)
 
 
+@pytest.mark.parametrize(
+    ("universe", "label"),
+    [
+        ("all_a", "沪深京全市场 A 股"),
+        ("all_a_sh_sz", "沪深 A 股（配置排除北交所）"),
+        ("all_instruments", "instruments 全部场内标的（含 ETF/LOF）"),
+    ],
+)
+def test_ingest_scope_labels_do_not_overstate_the_configured_market(universe, label):
+    assert ingest_scope_label(universe) == label
+
+
+@pytest.mark.parametrize(
+    ("baostock_enabled", "budget", "expected"),
+    [
+        (True, 400, "400 只证券上限"),
+        (True, 200, "200 只证券上限"),
+        (True, 0, "未设置每轮证券数上限"),
+        (False, 400, "[sources.baostock] 未启用"),
+    ],
+)
+def test_init_plan_reports_the_effective_st_budget(capsys, baostock_enabled, budget, expected):
+    _echo_init_plan(
+        "quick",
+        since_str=None,
+        history_start=date(2023, 8, 2),
+        trade_date=date(2026, 8, 2),
+        resume=False,
+        config_path="configs/cnequity.toml",
+        ingest_universe="all_a",
+        st_history_budget=budget,
+        baostock_enabled=baostock_enabled,
+    )
+
+    assert expected in capsys.readouterr().out
+
+
 # --- the CLI wiring --------------------------------------------------------
 
 
@@ -86,6 +124,11 @@ def test_quick_profile_reaches_the_engine(tmp_path, monkeypatch):
     )
     assert start == date(2023, 8, 2)
     assert "2023-08-02" in output
+    assert "沪深京全市场" in output
+    assert "约 1 小时" in output
+    assert "[sources.baostock] 未启用" in output
+    assert "只有 400 条数据" in output
+    assert "cne backfill trading_status" in output
 
 
 def test_default_init_is_the_shallow_window(tmp_path, monkeypatch):
@@ -117,6 +160,43 @@ def test_full_profile_still_takes_everything(tmp_path, monkeypatch):
     start, output = _capture_backfill_start(tmp_path, monkeypatch, ["--profile", "full"])
     assert start is None
     assert "历史窗口" not in output
+    assert "日线从 2016-01-01 起" in output
+    assert "约 3 小时" in output
+
+
+def test_custom_init_window_does_not_claim_a_fixed_duration(tmp_path, monkeypatch):
+    _, output = _capture_backfill_start(
+        tmp_path,
+        monkeypatch,
+        ["--profile", "quick", "--since", "2020-01-01", "--trade-date", "2026-08-02"],
+    )
+
+    assert "自定义历史窗口 2020-01-01 .. 2026-08-02" in output
+    assert "耗时取决于窗口长度" in output
+    assert "约 1 小时" not in output
+    assert "约 3 小时" not in output
+
+
+def test_resume_reports_remaining_work_instead_of_the_full_run_estimate(tmp_path, monkeypatch):
+    start, output = _capture_backfill_start(tmp_path, monkeypatch, ["--resume"])
+
+    assert start is None
+    assert "续跑计划" in output
+    assert "只处理失败/缺失阶段" in output
+    assert "原 run 的历史范围保持不变" in output
+    assert "约 1 小时" not in output
+    assert "约 3 小时" not in output
+
+
+def test_resume_since_is_the_only_explicit_history_override(tmp_path, monkeypatch):
+    start, output = _capture_backfill_start(
+        tmp_path,
+        monkeypatch,
+        ["--resume", "--since", "2020-01-01", "--trade-date", "2026-08-02"],
+    )
+
+    assert start == date(2020, 1, 1)
+    assert "显式 --since=2020-01-01 覆盖历史起点" in output
 
 
 def test_quick_profile_prints_how_to_deepen(tmp_path, monkeypatch):
@@ -196,6 +276,11 @@ def test_resume_does_not_override_an_explicit_window(tmp_path, monkeypatch):
 
     engine.resume_init(date(2026, 8, 5), run_id=run_id)
     assert engine.config._backfill_start == date(2016, 1, 1)
+    assert engine.manifest.get_run_metadata(run_id)["history_start"] == "2016-01-01"
+
+    next_engine = JobEngine(Config(data_root=tmp_path / "data"))
+    next_engine.resume_init(date(2026, 8, 6), run_id=run_id)
+    assert next_engine.config._backfill_start == date(2016, 1, 1)
 
 
 def test_init_records_the_window_on_the_run(tmp_path, monkeypatch):
@@ -263,6 +348,7 @@ def test_a_tiny_lake_profile_routes_to_its_own_runner(profile, runner, monkeypat
     assert seen["runner"] == runner
     assert seen["days"] == 5
     assert seen["data_root"] == tmp_path / "lake"
+    assert seen["force"] is False
 
 
 def test_a_tiny_lake_profile_needs_no_config(monkeypatch, tmp_path):
@@ -282,6 +368,7 @@ def test_a_tiny_lake_profile_needs_no_config(monkeypatch, tmp_path):
         (["--profile", "quick", "--symbols", "600519.SH"], "--symbols"),
         (["--profile", "full", "--intraday"], "--intraday"),
         (["--profile", "quick", "--config-out", "x.toml"], "--config-out"),
+        (["--profile", "full", "--force"], "--force"),
     ],
 )
 def test_each_end_of_the_axis_refuses_the_other_end_options(args, rejected, monkeypatch):

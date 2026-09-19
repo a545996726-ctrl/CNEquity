@@ -28,6 +28,8 @@ cne init --profile sample
 
 会写入独立的 `data/cnequity-demo/` 与 `configs/cnequity.demo.toml`。  
 **不要**把 demo 的 `data_root` 拿去跑全量 `cne init`。
+如果 `configs/cnequity.demo.toml` 已存在且指向别的湖，命令会保留原文件并要求改用
+`--config-out`；只有显式 `--force` 才会覆盖。内容完全相同时允许直接重跑。
 
 接着可查：
 

@@ -185,6 +185,23 @@ Run the first two commands consecutively on the same day. If resuming on another
 
 “Complete” does not mean unlimited history for all 42 datasets: there is no single command that can fetch every dataset's entire history. `init` builds the reference/calendar, corporate actions, stock and index daily bars, trading status and derived-factor spine. Minute bars, 5-minute bars and ticks are off by default, while snapshot datasets cannot recreate history their sources do not expose. Use `cne backfill <dataset> --start ... --end ...` for an individually supported history; see the [dataset catalog](docs/datasets/catalog.md) for limits.
 
+If you press Ctrl-C, keep the lake and resume instead of starting over:
+
+```bash
+# init: repeat the same command; it finds the incomplete run automatically
+cne init --profile full --config configs/cnequity.toml
+
+# any other run: retry only failed batches using the id printed by status
+cne run retry --run-id RUN_ID --config configs/cnequity.toml
+
+# check both date freshness and whether initialization actually completed
+cne status --datasets --config configs/cnequity.toml
+```
+
+On Ctrl-C the command first winds down its workers, then records unfinished batches as immediately retryable `failed` batches; successful batches are not fetched again. If the process is killed outright, the next command detects the orphaned run from its released run lock. An incomplete phase blocks later phases and compaction, so a small successful backfill cannot make a partially initialized lake look complete. In `status --datasets`, `fresh` means only that the dates of the data already present are current. For a real lake, the command also makes a lightweight comparison of the latest daily-bars cross-section against the configured `[universe].ingest` scope, securities active that day, and explicit suspension evidence. Every active security in that scope must have either a bar or explicit non-trading evidence. If an entire configured market is absent—for example, `all_a` has no BJ instruments—initialization fails early in the instruments phase. An incomplete init, any missing evidence, or an unverified cross-section is reported separately and makes the command exit non-zero.
+
+`sample` is the exception: it verifies installation, Parquet writes and queries offline, so its dates do not participate in the freshness gate. `audit` still displays its `source=mock` evidence, but as expected information for that profile rather than an installation failure. Real schema or read errors still fail the audit, and sample data is never suitable for research. If a demo/sample `--config-out` already exists with different content, the command now preserves it and fails; choose another path, or add `--force` only after confirming the overwrite.
+
 `cne init` defaults to **shallow, never narrow**: the last 3 years, every symbol.
 Trimming symbols instead would build the survivorship bias this lake exists to
 avoid straight into it, whereas shallow is honest — `coverage_start` records it.

@@ -554,7 +554,10 @@ def persist_step_findings(
 
 
 def run_audit(config: Config, run_id: str, trade_date: date, context: dict | None = None) -> int:
-    findings = _collect_lake_findings(config, trade_date, context)
+    findings = _profile_adjusted_findings(
+        config,
+        _collect_lake_findings(config, trade_date, context),
+    )
     # Keep the dedicated source-diff artifact, but also include its findings in
     # the per-run audit file. Otherwise callers reading one run's findings (and
     # not the second directory) can mistake "audit completed" for "sources
@@ -586,8 +589,35 @@ def run_audit(config: Config, run_id: str, trade_date: date, context: dict | Non
         context["audit_error_findings"] = [
             item for item in findings if str(item.get("severity")) == "error"
         ]
+        context["audit_profile_expected_findings"] = sum(
+            bool(item.get("expected_for_profile")) for item in findings
+        )
 
     return len(findings)
+
+
+def _profile_adjusted_findings(config: Config, findings: list[dict]) -> list[dict]:
+    """Keep sample-lake synthetic rows visible without declaring setup broken."""
+    if getattr(config, "lake_profile", None) != "sample":
+        return findings
+    adjusted: list[dict] = []
+    for finding in findings:
+        expected_mock = finding.get("check") == "mock_source"
+        if finding.get("check") == "unregistered_source":
+            sources = finding.get("sources") or {}
+            expected_mock = bool(sources) and set(sources) == {"mock"}
+        if not expected_mock:
+            adjusted.append(finding)
+            continue
+        item = dict(finding)
+        item["severity"] = "info"
+        item["expected_for_profile"] = True
+        item["message"] = (
+            f"{item.get('message', '')} This is expected for profile=sample and must never "
+            "be used for research."
+        )
+        adjusted.append(item)
+    return adjusted
 
 
 def _all_a_st_evidence_summary(findings: list[dict]) -> dict | None:
@@ -632,7 +662,10 @@ def lake_health(
     # Health can be requested on a weekend/holiday. All data observations
     # (including source snapshots) must use the last actual session; the raw
     # calendar date is retained below for reporting only.
-    findings = _collect_lake_findings(config, anchor, None, full=True)
+    findings = _profile_adjusted_findings(
+        config,
+        _collect_lake_findings(config, anchor, None, full=True),
+    )
     # source_diff is local-only: it compares curated rows with the latest
     # already-captured backup snapshot. Running it here makes an explicit
     # health check authoritative even when no ingestion run happened today.
@@ -654,7 +687,11 @@ def lake_health(
             else:
                 empty.append(row["dataset"])
             continue
-        if not row["watermarked"] or not is_dataset_enabled(row["dataset"], config):
+        if (
+            getattr(config, "lake_profile", None) == "sample"
+            or not row["watermarked"]
+            or not is_dataset_enabled(row["dataset"], config)
+        ):
             continue
         mark = row["watermark"] or row["coverage_end"]
         if is_stale(row["dataset"], mark, anchor):
