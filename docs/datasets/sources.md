@@ -130,6 +130,7 @@
 |------|-------|
 | Step | `derive_adj_factors`（finalize 波次） |
 | 主源 | sina（qfq/hfq 因子序列） |
+| 备源 | baostock（用 raw / 后复权收盘价之比推导因子） |
 | 输入 | daily_bars 交易日 + 外部因子 API |
 | 频率 | compact 之后每日 |
 | 主键 | (symbol, trade_date, adjust_type) |

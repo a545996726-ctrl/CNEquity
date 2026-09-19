@@ -24,7 +24,7 @@ cne init --profile demo
 cne init --profile sample
 ```
 
-该模式不访问网络，生成的合成行全部标记为 `source=mock`，只能用于上手验证，不能用于研究。
+该模式不访问网络，生成的合成行全部标记为 `source=mock`，只能用于上手验证，不能用于研究。日期不参与新鲜度门禁；`audit` 仍展示 mock 证据，但当作该 profile 的预期 info，而不是安装失败。
 
 会写入独立的 `data/cnequity-demo/` 与 `configs/cnequity.demo.toml`。  
 **不要**把 demo 的 `data_root` 拿去跑全量 `cne init`。
@@ -86,15 +86,65 @@ cne init --config configs/cnequity.toml
 cne init --layout-only --config configs/cnequity.toml
 ```
 
-**中断后续跑：**
+init 耗时较长（全市场日线分页回填），建议在稳定网络下运行。阶段定义见 [数据流 — Init](../architecture/data-flow.md#init全量回填)。
+
+<a id="init-scope"></a>
+
+### Init：范围、磁盘与续跑
+
+默认 `cne init`（`--profile quick`）是沪深京全市场、近 3 年的主干，不是只拉 400 只。`--profile full` 仍是全市场，只是把主干加深到各数据集自己的历史起点，其中日线从 2016-01-01 起。
+
+| 命令 | 实际范围 | 参考耗时 | 磁盘量级 |
+|---|---|---:|---|
+| `cne init --profile demo` | 5 只 × 最近约 30 个交易日，独立 demo 湖 | 实测约 25 秒 | 数 MB |
+| `cne init`（`--profile quick`） | 沪深京全市场（5,000+ 只）× 最近 3 年；证券、日历、日线、交易状态等主干 | 通常约 1 小时 | 日频主干通常几百 MB |
+| `cne init --profile full` | 还是全市场；主干按各数据集默认起点拉取，日线从 2016-01-01 起 | 通常约 3 小时，约为 quick 的 3 倍 | 日频更长，仍是几百 MB 到约 1 GB |
+| `cne backfill trading_status` | 补齐全市场历史 ST 证据；约 5,500 只 | 整轮约 10–11 小时；同范围 init 已扫 400 只后通常还需约 9–10 小时 | 增量很小 |
+
+这些是实测量级，不是时限承诺。TDX / Baostock 连不连得上、出口位置、上游限流、重试次数和机器配置都会改变耗时；以命令打印的批次进度和 ETA 为准。
+
+磁盘可以这样对照：全市场日频 2001–2026 合计约 **468 MB**。运行中的 staging 和 revision 会再占一份；日积月累、又开了分钟线的生产湖可以到十几 GB。分钟线、5 分钟线和分笔默认关闭：全市场 1 分钟线约 **8.4 GB/年**，比整座日频湖大约一个数量级。详见[运行手册 · 日内数据](../operations/runbook.md#日内数据minute_bars--minute_bars_5m)。
+
+> **进度里出现 400 只，并不表示 init 只拉了 400 只。** 日线、证券列表等主干仍然扫描全市场。`400` 只限制最慢的 **Baostock 历史 ST 状态**：免费接口限速很明显，所以首次 `init` 每轮先扫 400 **只证券**（不是 400 条数据）就暂停，避免新用户多等十小时。进度写入 checkpoint；显式运行 `cne backfill trading_status` 会自动取消这 400 只上限。同一历史起止日和 universe 会从 checkpoint 继续；改变范围会按新范围重新开一轮。
+
+新湖如果希望主干数据和历史 ST 都达到项目约定的完整范围，按顺序跑：
 
 ```bash
-cne init --resume --config configs/cnequity.toml
-# 或指定 run_id
-cne run retry --run-id RUN_ID --config configs/cnequity.toml
+cne init --profile full --config configs/cnequity.toml
+cne backfill trading_status --config configs/cnequity.toml
+
+# 再抓其余日更组，并从此每个交易日执行
+cne run daily --all-groups --config configs/cnequity.toml
 ```
 
-init 耗时较长（全市场日线分页回填），建议在稳定网络下运行。阶段定义见 [数据流 — Init](../architecture/data-flow.md#init全量回填)。
+前两条最好同一天接着跑。如果要跨天续跑，给 `init --trade-date` 和 `backfill --end` 传同一个截止日，并保持 2016-01-01 起点不变，才能接着同一份 checkpoint。
+
+这里说的「完整」不是「42 个数据集都有无限历史」。项目没有一条命令能把所有数据集的全部历史一次拉完。`init` 负责证券、日历、公司行为、个股/指数日线、交易状态和派生因子这些主干；分钟线、5 分钟线和分笔默认关闭，快照型数据也无法回补源端没有提供的历史。某个可回补的数据集需要更早的历史时，使用 `cne backfill <dataset> --start ... --end ...`；各数据集能拉到哪一年，见[数据集目录](../datasets/catalog.md)。
+
+如果中途按了 Ctrl-C，不要删除 `data/`，也不需要从头开始。原命令再跑一次会自动找到未完成的 run，并从失败批次继续；也可以显式指定：
+
+```bash
+cne init --profile full --config configs/cnequity.toml
+# 或：
+cne init --resume --config configs/cnequity.toml
+cne run retry --run-id RUN_ID --config configs/cnequity.toml
+cne status --datasets --config configs/cnequity.toml
+```
+
+Ctrl-C 之后，命令会先停住正在跑的 worker，再把没跑完的批次记成可以马上重试的 `failed`；已经成功的批次不会重拉。进程被直接杀掉也没关系：下一次命令会根据运行锁认出这个孤儿 run。某个阶段没跑完，后面的阶段和 compact 都不会开始，所以一次小范围的成功回填，不会把只覆盖部分证券的数据说成「初始化完整」。
+
+`status --datasets` 里的 `fresh` 只表示**已经落盘的那些日期**够新。正式数据湖还会用最新日线截面，对照配置的 `[universe].ingest`、当天 active 证券，以及明确的停牌证据，做一次轻量核对：范围内每只 active 证券都得有日线，或者有明确停牌证据。如果缺了整个配置市场（例如 `all_a` 没有 BJ），初始化会在 instruments 阶段提前失败。init 没跑完、任何一只证券缺证据、或者截面核对不上，都会另外报警并返回非零。
+
+「全市场」含北交所：上市状态、停复牌与 ST 取自北交所自己的板块页，日线历史走 TDX，成交额由 TDX 补齐（Sina 从未发布过这一列）。默认 universe `all_a` 覆盖沪、深、京三市的 A 股。每个数据集真正拉到哪一天，会记在 `coverage_start`。
+
+需要更长历史时，可以一次拉满，也可以以后再补深：
+
+```bash
+cne init --profile full
+
+# 或对单个数据集补历史
+cne backfill daily_bars --start 2016-01-01 --end COVERAGE_START
+```
 
 **它跑到哪了？** 运行中会打这几类行，正常情况下不会连续静默超过 60 秒：
 
@@ -242,7 +292,7 @@ scripts/install_scheduler.sh   # macOS launchd，每天 11:15 本机时间
 |------|------|
 | `load()` 读不到新数据 | 确认 run 已 compact；分组 run 必须含 `compact` step |
 | `universe="all_a"` 未剔历史 ST | `trading_status` 仅覆盖日更起点之后；2016→上线日回测需注意 |
-| init 中途失败 | 勿重新 `init`，用 `--resume` 或 `retry` |
+| init 中途失败 | 不要删 `data/`；再跑同一条 `cne init` 会自动续跑，也可以显式 `--resume` / `retry` |
 | TDX 连接失败 | `cne sources probe --only tdx_protocol`；检查 `[tdx_protocol.hosts]` 与网络 |
 | 缺配置报错 | 先跑 `cne config create` |
 | demo 与全量混用 | demo 用独立 `data/cnequity-demo/`，全量另配 `data.root` |

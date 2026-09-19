@@ -192,7 +192,7 @@ bars_15m = (
 | 数据集 | 分区键 | 主键 | 语义 | 水位 | 主源 | 备注 |
 |--------|--------|------|------|------|------|------|
 | instruments | —（单文件 merge） | symbol | by_date | — | tdx_protocol | EM 分别从 A 股与 ETF/LOF clist 补 list_date；baostock 回填退市股（`cne backfill instruments`）；merge 保留退市 |
-| trading_calendar | trade_date | trade_date | by_date | ✓ | exchange_calendar | 种子 CSV 2016–2027 |
+| trading_calendar | trade_date | trade_date | by_date | ✓ | tdx_protocol | 备源交易所 CSV；种子 2016–2027 |
 | trading_status | trade_date（按月） | symbol, trade_date | by_date | ✓ | eastmoney | baostock ST 回填；派生停牌写月分区。`status`（normal/suspended/**delisted**）与 `risk_warning`（ST/*ST）是两列——旧版单列会让停牌冲掉 ST 标记；退市行由 `instruments` 判定并标 `derived_delisted`。旧湖读取自动兼容，物理迁移见 [schema](schema.md#trading_status) |
 
 ---
@@ -208,9 +208,9 @@ bars_15m = (
 
 两个日内数据集共用一组质量检查：主键重复（通用 `pk_unique`）、时段外 bar、`trade_date` 与 `bar_time` 不一致、会话缺口，以及**与日频的成交量+成交额双向对账**。
 | trade_ticks | trade_date | symbol, trade_date, tick_seq | by_date | ✓ | tdx_protocol | 分笔。**可选**，默认关；`[trade_ticks]` 独立配置；**不是逐笔成交**（见下）；源端回溯至 **2024-01-02**；watchlist 200 只约 7MB/日；required=false |
-| commodity_bars | trade_date | symbol, trade_date | by_date | ✓ | eastmoney+sina | 国内主连 + COMEX金 `GC0.CMX`；`cne backfill commodity_bars`；required=false |
+| commodity_bars | trade_date | symbol, trade_date | by_date | ✓ | sina | 备源 eastmoney；国内主连 + COMEX金 `GC0.CMX`；`cne backfill commodity_bars`；required=false |
 | adj_factors | trade_date | symbol, trade_date, adjust_type | derived | ✓ | sina | 仅 hfq；股票读 `f`、ETF/LOF 读 `s`；`cne derive adj_factors` |
-| delisting_events | —（单文件 merge） | symbol | derived | — | sina | 每只退市股的结尾形态；`cne delisted backfill` 产出 |
+| delisting_events | —（单文件 merge） | symbol | derived | — | derived | 每只退市股的结尾形态；补到的 bars 来自 sina；`cne delisted backfill` 产出 |
 
 ---
 
@@ -296,7 +296,7 @@ bars_15m = (
 |--------|--------|------|------|------|------|------|
 | sentiment_scores | trade_date | symbol, trade_date, score_channel | by_date | ✓ | derived | |
 | hot_rank | trade_date | symbol, trade_date | snapshot | ✓ | eastmoney | 人气榜 top100（公开接口上限） |
-| sector_bars | trade_date | sector_code, trade_date | snapshot | ✓ | eastmoney | 回填：ths（同花顺 board-kline） |
+| sector_bars | trade_date | sector_code, trade_date | snapshot | ✓ | ths | 日更与回填都走同花顺 board-kline；无第二源 |
 | sector_fund_flow | trade_date | sector_code, trade_date | snapshot | ✓ | eastmoney | 板块主力净流入 |
 | news_headlines | publish_date | news_id | snapshot | ✓ | eastmoney | 新闻标题 |
 | flash_news_wire | publish_date | wire_id, wire_source | snapshot | ✓ | eastmoney | 7×24 快讯线 |

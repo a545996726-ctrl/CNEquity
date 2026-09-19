@@ -271,9 +271,20 @@ def test_a_partial_batch_failure_reports_the_scope_not_the_batch(caplog, config,
 
 def test_eta_waits_for_a_full_round_of_lanes(caplog, config, monkeypatch):
     """With four lanes the first four batches land together; an estimate drawn
-    from them said 34m on a run that took 10m."""
+    from them said 34m on a run that took 10m.
+
+    The clock is driven by the test rather than read from the platform. Six
+    mocked batches finish inside one tick of the Windows monotonic clock
+    (~15.6ms), so `per_batch` came out as exactly zero and the ETA was
+    correctly suppressed — failing a test that was asking about the lane rule,
+    not about timer resolution.
+    """
+    import itertools
+
     from cnequity.orchestrator import worker_pool
 
+    ticks = itertools.count(start=1000.0, step=0.5)
+    monkeypatch.setattr(worker_pool.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(worker_pool, "fetch_daily_bars", lambda *a, **k: _one_bar())
     monkeypatch.setattr(worker_pool, "normalize_with_source", lambda df, *a, **k: df)
     monkeypatch.setattr(worker_pool.StagingWriter, "write_batch", lambda *a, **k: None)

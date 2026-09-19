@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from cnequity.cli.main import cli
+from cnequity.config.bootstrap import path_for_toml
 from cnequity.domain.schemas import validate_dataframe, with_provenance
 from cnequity.orchestrator.registry import STEP_REGISTRY, StepEntry
 
@@ -261,7 +262,12 @@ def test_sample_force_overwrites_a_different_existing_config(tmp_path):
     assert result.exit_code == 0, result.output
     written = config_out.read_text(encoding="utf-8")
     assert 'profile = "sample"' in written
-    assert str(data_root.resolve()) in written
+    # The POSIX spelling, because that is what the writer guarantees: a bare
+    # Windows `C:\Users\…` is not a valid TOML basic string (`\U` starts a
+    # hex escape), so `path_for_toml` renders every root with forward slashes.
+    # Asserting the native form passed on Linux and made this a Windows-only
+    # failure of a correct writer.
+    assert path_for_toml(data_root) in written
 
 
 def test_demo_config_force_is_atomic_when_replacement_is_interrupted(tmp_path, monkeypatch):
