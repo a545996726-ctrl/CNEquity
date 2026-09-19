@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
+from cnequity.config import Config
 from cnequity.steps import bars
 
 
@@ -26,7 +27,7 @@ def test_backfill_window_defaults_and_overrides(tmp_path, monkeypatch):
         "cnequity.steps.bars.shanghai_now",
         lambda now=None: shanghai_now(datetime(2025, 1, 10, 6, 0, tzinfo=timezone.utc)),
     )
-    cfg = SimpleNamespace(_backfill_start=None, _backfill_end=None)
+    cfg = Config(data_root=tmp_path / "data")
     start, end = bars._backfill_window(cfg, date(2025, 1, 10))
     assert end == date(2025, 1, 9)
     assert start.year <= 2016
@@ -39,8 +40,34 @@ def test_backfill_window_defaults_and_overrides(tmp_path, monkeypatch):
     _start, end = bars._backfill_window(cfg, date(2025, 1, 10))
     assert end == date(2025, 1, 10)
 
-    cfg2 = SimpleNamespace(_backfill_start=date(2024, 1, 1), _backfill_end=date(2024, 6, 1))
-    assert bars._backfill_window(cfg2, date(2025, 1, 10)) == (date(2024, 1, 1), date(2024, 6, 1))
+    cfg2 = Config(data_root=tmp_path / "data-2")
+    cfg2._backfill_start = date(2024, 1, 1)
+    cfg2._backfill_end = date(2024, 6, 1)
+    assert bars._backfill_window(cfg2, date(2025, 1, 10)) == (
+        date(2024, 1, 1),
+        date(2024, 5, 31),
+    )
+
+
+def test_backfill_window_ends_on_the_previous_session_over_a_weekend(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "data")
+    monkeypatch.setattr(bars, "_last_final_session", lambda: date(2025, 1, 11))
+
+    start, end = bars._backfill_window(cfg, date(2025, 1, 12))
+
+    assert start == bars.BACKFILL_START
+    assert end == date(2025, 1, 10)
+
+
+def test_explicit_non_trading_backfill_end_is_normalized(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    cfg._backfill_start = date(2025, 1, 1)
+    cfg._backfill_end = date(2025, 1, 11)
+
+    assert bars._backfill_window(cfg, date(2025, 1, 12)) == (
+        date(2025, 1, 1),
+        date(2025, 1, 10),
+    )
 
 
 def test_history_plan_includes_etf_and_filters_future_or_undated_listings(tmp_path, monkeypatch):
@@ -320,7 +347,7 @@ def test_daily_bars_skip_int64_overflow_volume():
     assert _parse_bar_rows(pdf, "600519.SH", date(2024, 6, 1), date(2024, 6, 30)) == []
 
 
-def test_a_replayed_trade_date_bounds_the_backfill_window(monkeypatch):
+def test_a_replayed_trade_date_bounds_the_backfill_window(tmp_path, monkeypatch):
     """Replaying an old date must not fetch everything up to today.
 
     The default end became the last *settled* session, which fixed `cne init`
@@ -334,14 +361,15 @@ def test_a_replayed_trade_date_bounds_the_backfill_window(monkeypatch):
         "cnequity.steps.bars.shanghai_now",
         lambda now=None: shanghai_now(datetime(2026, 9, 17, 9, 0, tzinfo=timezone.utc)),
     )
-    cfg = SimpleNamespace(_backfill_start=None, _backfill_end=None)
+    cfg = Config(data_root=tmp_path / "data")
 
     # A replay stops where it was told …
     assert bars._backfill_window(cfg, date(2025, 1, 10))[1] == date(2025, 1, 10)
     # … and a date past the settled session is still clamped to it.
     assert bars._backfill_window(cfg, date(2030, 1, 1))[1] == date(2026, 9, 17)
     # An explicit --end keeps overriding both.
-    explicit = SimpleNamespace(_backfill_start=None, _backfill_end=date(2026, 9, 18))
+    explicit = Config(data_root=tmp_path / "explicit-data")
+    explicit._backfill_end = date(2026, 9, 18)
     assert bars._backfill_window(explicit, date(2025, 1, 1))[1] == date(2026, 9, 18)
 
 
@@ -365,3 +393,41 @@ def test_named_symbols_are_never_classified_as_pre_listing_placeholders(monkeypa
 
     named = SimpleNamespace(_backfill_symbols=["000001.SZ"])
     assert bars._placeholder_bar_universe(named, spans) is None
+
+
+def test_every_backfill_end_reader_means_the_same_session(tmp_path, monkeypatch):
+    """One meaning for `_backfill_end`, or a Saturday means "Friday" in one
+    step and "a session with no rows" in the next. The completeness gate reads
+    the window end as a session that must have rows — `_staged_daily_bar_symbols`
+    filters `trade_date == end` — so an unnormalised weekend end made a whole
+    market look unresolved."""
+    from datetime import date
+
+    from cnequity.config import Config
+    from cnequity.steps import bars as bars_mod
+    from cnequity.steps.common import last_session_on_or_before
+
+    cfg = Config(data_root=tmp_path / "data")
+    saturday = date(2026, 9, 19)
+    assert saturday.weekday() == 5
+
+    friday = last_session_on_or_before(cfg, saturday)
+    assert friday == date(2026, 9, 18)
+
+    cfg._backfill_end = saturday
+    _, end = bars_mod._backfill_window(cfg, saturday)
+    assert end == friday, "the history sweep normalises its own end"
+
+
+def test_no_session_in_the_lookback_window_fails_loudly(tmp_path, monkeypatch):
+    from datetime import date
+
+    from cnequity.config import Config
+    from cnequity.steps import common as common_mod
+
+    cfg = Config(data_root=tmp_path / "data")
+    monkeypatch.setattr(common_mod, "is_trading_day", lambda config, day: False)
+
+    with pytest.raises(RuntimeError) as caught:
+        common_mod.last_session_on_or_before(cfg, date(2026, 9, 19))
+    assert "trading calendar" in str(caught.value).lower()

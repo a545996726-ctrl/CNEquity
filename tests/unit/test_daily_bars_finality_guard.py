@@ -120,7 +120,8 @@ def test_an_unspecified_backfill_end_stops_at_the_last_settled_session(config, m
 
     _start, end = _backfill_window(config, TRADING_DAY)
 
-    assert end == TRADING_DAY - timedelta(days=1)
+    # Monday before the close: Sunday is settled but is not a bar session.
+    assert end == TRADING_DAY - timedelta(days=3)
     _reject_unfinished_daily_bar_window(config, end, now=_MID_SESSION)
 
 

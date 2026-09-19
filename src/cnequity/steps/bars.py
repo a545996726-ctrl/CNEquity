@@ -46,6 +46,7 @@ from cnequity.steps.common import (
     incremental_window,
     instrument_metadata,
     is_trading_day,
+    last_session_on_or_before,
     list_trading_dates,
     load_bar_universe,
     load_curated_instruments,
@@ -128,13 +129,15 @@ def _backfill_window(config: Config, trade_date: date) -> tuple[date, date]:
     open, wrong close, partial volume — and the repair is one day wide.
 
     An unspecified end means "as much history as there is", which is the last
-    *settled* session — not today, whose bar is still forming until 15:05. It
+    *settled trading session* — not today, whose bar is still forming until
+    15:05, and not a Saturday/holiday for which no bar can exist. It
     defaulted to today, so `cne init` run during a session failed the whole
     phase on a window nobody asked for: 37 minutes of reference and corporate
     actions, then `phase2c_daily_bars_backfill` refused in 2.8ms and phases 3
-    and 4 never ran. An *explicit* `--end` is passed through untouched, because
-    repairing today's truncated bar is what the paragraph above is about, and
-    before the close that has to fail loudly rather than fetch another day.
+    and 4 never ran. An explicit trading-day `--end` is still honored exactly,
+    so repairing today's truncated bar before the close fails loudly. An
+    explicit non-trading end is normalized to the preceding session instead
+    of manufacturing a permanently missing Saturday/holiday key.
 
     `trade_date` bounds it from the other side. Taking the settled session alone
     ignored the date the caller named: replaying an old one — `cne run daily
@@ -144,7 +147,8 @@ def _backfill_window(config: Config, trade_date: date) -> tuple[date, date]:
     stops before the forming bar, and a replay stops where it was told.
     """
     settled = _last_final_session()
-    end = getattr(config, "_backfill_end", None) or min(trade_date, settled)
+    requested_end = getattr(config, "_backfill_end", None) or min(trade_date, settled)
+    end = last_session_on_or_before(config, requested_end)
     start = getattr(config, "_backfill_start", None) or BACKFILL_START
     return start, end
 
@@ -4113,7 +4117,12 @@ def step_daily_bars_history(config: Config, trade_date: date, run_id: str, conte
     from cnequity.storage import StagingWriter
 
     start = getattr(config, "_backfill_start", None) or HISTORY_BACKFILL_START
-    end = getattr(config, "_backfill_end", None) or date(2015, 12, 31)
+    # Same normalisation as `_backfill_window`: one meaning for `_backfill_end`
+    # across every reader, or a Saturday means "Friday" in one step and
+    # "a session with no rows" in the next.
+    end = last_session_on_or_before(
+        config, getattr(config, "_backfill_end", None) or date(2015, 12, 31)
+    )
     plan = _history_plan(config, start, end)
     resume = set(context.get("_history_done") or [])
     if resume:
@@ -4324,7 +4333,7 @@ def step_daily_bars_delisted(config: Config, trade_date: date, run_id: str, cont
     from cnequity.storage import StagingWriter
 
     start = getattr(config, "_backfill_start", None) or date(2016, 1, 1)
-    end = getattr(config, "_backfill_end", None) or trade_date
+    end = last_session_on_or_before(config, getattr(config, "_backfill_end", None) or trade_date)
     symbols = context.get("_delisted_symbols") or _delisted_universe(config, start, end)
     if not symbols:
         return {"rows_read": 0, "rows_written": 0, "note": "no survivorship gap found"}

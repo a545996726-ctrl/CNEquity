@@ -323,6 +323,40 @@ def incremental_trade_dates(config: Config, dataset: str, trade_date: date) -> l
     return list_trading_dates(config, start, trade_date)
 
 
+#: How far back :func:`last_session_on_or_before` will look. The longest CN
+#: market closure is the Spring Festival week; a fortnight of slack covers it
+#: and any holiday shift, while still failing loudly rather than silently
+#: walking back years if the calendar itself is wrong.
+MAX_CLOSURE_LOOKBACK_DAYS = 15
+
+
+def last_session_on_or_before(config: Config, day: date) -> date:
+    """The newest trading session at or before *day*.
+
+    The single answer to "which session does this date mean", because the
+    alternative was three of them. A daily-bar window that ends on a Saturday
+    cannot lose data — no session is skipped by stopping there — but every
+    completeness gate downstream reads the end date as a session that must
+    have rows: `_staged_daily_bar_symbols(..., end)` filters `trade_date ==
+    end` and finds nothing, so a whole market looks unresolved. One backfill
+    ending on a Saturday failed with "1 expected key(s) remain unknown" for a
+    symbol whose bars were all present through the Friday.
+
+    Normalising here rather than where `_backfill_end` is stored keeps the
+    config value the operator's literal request while giving every reader of
+    it the same meaning.
+    """
+    for offset in range(MAX_CLOSURE_LOOKBACK_DAYS + 1):
+        candidate = day - timedelta(days=offset)
+        if is_trading_day(config, candidate):
+            return candidate
+    raise RuntimeError(
+        f"No trading session found in the {MAX_CLOSURE_LOOKBACK_DAYS} days before "
+        f"{day.isoformat()}. The trading calendar is missing or wrong for that "
+        "window; rebuild it with `cne run daily --steps trading_calendar`."
+    )
+
+
 def is_trading_day(config: Config, trade_date: date) -> bool:
     """Return whether *trade_date* is a trading day per curated calendar or seed."""
     if trade_date.weekday() >= 5 or trade_date.isoformat() in CLOSED_DATES:
