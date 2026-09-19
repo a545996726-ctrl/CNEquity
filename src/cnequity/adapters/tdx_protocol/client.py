@@ -1101,6 +1101,8 @@ def fetch_corporate_actions(
     allow_empty: bool = False,
     run_id: str | None = None,
     request_scope: str | None = None,
+    progress_report=None,
+    progress_offset: int = 0,
 ) -> pl.DataFrame:
     if rate_limit is None and config is not None:
         rate_limit = config.tdx_rate_limit_spec()
@@ -1136,6 +1138,8 @@ def fetch_corporate_actions(
                 config=config,
                 run_id=run_id,
                 request_scope=request_scope,
+                progress_report=progress_report,
+                progress_offset=progress_offset,
             )
             if tdx_df.height:
                 frames.append(tdx_df.with_columns(pl.lit("tdx_protocol").alias("source")))

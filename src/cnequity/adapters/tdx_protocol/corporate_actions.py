@@ -278,6 +278,8 @@ def fetch_corporate_actions_tdx(
     run_id: str | None = None,
     archive: RawPayloadArchive | None = None,
     request_scope: str | None = None,
+    progress_report: Callable[[int], None] | None = None,
+    progress_offset: int = 0,
 ) -> pl.DataFrame:
     if archive is None:
         archive = _configured_archive(
@@ -292,7 +294,13 @@ def fetch_corporate_actions_tdx(
     frames: list[pl.DataFrame] = []
     on_date = None if backfill else trade_date
     total = len(symbols)
-    report = sweep_progress(logger, "corporate_actions TDX xdxr", total)
+    # A whole-market sweep arrives here one chunk at a time, so counting this
+    # call's own symbols restarted at 1/100 every hundred names: a hundred
+    # identical progress bars, no sense of how much market was left, and no
+    # usable ETA. The caller that owns the sweep passes its own reporter —
+    # which must outlive the chunk, or the elapsed time behind the estimate
+    # would reset while the count kept climbing.
+    report = progress_report or sweep_progress(logger, "corporate_actions TDX xdxr", total)
     try:
         # ``client_factory`` returns a client owned by this invocation.  The
         # socket is touched by one thread only, so no global session lock is
@@ -313,7 +321,7 @@ def fetch_corporate_actions_tdx(
                 frames.append(df)
             if on_progress is not None:
                 on_progress(index, total)
-            report(index)
+            report(progress_offset + index)
     finally:
         close_quotes_client(client)
 

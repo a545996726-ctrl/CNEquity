@@ -59,6 +59,14 @@ def test_corporate_actions_stages_successful_chunks_for_retry(tmp_path, monkeypa
     ]
     assert len(child) == 1
     assert json.loads(child[0]["symbols_json"]) == ["600519.SH", "000001.SZ"]
+    # Chunk receipts describe scope; the parent batch is what gates compaction
+    # and what a retry re-runs.
+    assert not child[0]["blocks_compaction"]
+    # How many chunks the sweep set out to do, so one successful receipt can be
+    # told apart from a plan that only ever had one.
+    performance = manifest.get_run_metadata(run_id)["performance"]["corporate_actions"]
+    assert performance["chunks_planned"] == 2, "the plan size must survive a failed chunk"
+    assert performance["chunk_symbols"] == 3
 
 
 def test_engine_retry_only_fetches_unreceipted_chunks(tmp_path, monkeypatch):

@@ -3,6 +3,7 @@ earnings_disclosure_schedule."""
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -36,6 +37,7 @@ from cnequity.domain.schemas import with_provenance
 from cnequity.domain.symbols import filter_ingest_universe
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.orchestrator.registry import register_step
+from cnequity.progress import sweep_progress
 from cnequity.quality.ex_events import (
     EX_EVENT_LOOKBACK_SESSIONS,
     unexplained_factor_steps,
@@ -58,6 +60,20 @@ _CANONICAL_DAILY = "eastmoney"
 _CORPORATE_ACTIONS_CHUNK_TASK = "corporate_actions_chunk"
 _MIN_EARNINGS_SCHEDULE_SYMBOLS_PER_PERIOD = 100
 _CNINFO_CHECKPOINT_TTL_DAYS = 7
+
+
+def _corporate_actions_chunk_id(symbols: list[str]) -> str:
+    """A chunk id derived from the symbols it covers, not from where it sits.
+
+    The id used to embed the parent batch's uuid and the chunk's position, so
+    it changed on every attempt and shifted whenever an earlier chunk
+    succeeded and shortened the remaining list. Neither a plan written before
+    a sweep nor the receipts left by the last one could then be matched to the
+    work in front of it. The symbol set is what identifies a chunk across
+    attempts.
+    """
+    digest = hashlib.sha1("|".join(symbols).encode("utf-8")).hexdigest()[:12]
+    return f"corporate_actions-chunk-{digest}"
 
 
 logger = logging.getLogger(__name__)
@@ -655,10 +671,37 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
         frames: list[pl.DataFrame] = []
         failed_symbols: list[str] = []
         batch_size = max(1, config.batch_size)
+        # One reporter for the whole sweep, owned here because this is the only
+        # scope that knows how many symbols the sweep has. Built per chunk
+        # inside the adapter, it restarted at 1/100 every hundred names and its
+        # ETA measured a window that kept resetting.
+        sweep_report = sweep_progress(
+            logger, "corporate_actions", len(remaining_symbols), unit="symbols"
+        )
+        chunks = [
+            remaining_symbols[index : index + batch_size]
+            for index in range(0, len(remaining_symbols), batch_size)
+        ]
+        backfill_start = getattr(config, "_backfill_start", None)
+        backfill_end = getattr(config, "_backfill_end", None)
+        chunk_window_start = backfill_start.isoformat() if backfill_start else None
+        chunk_window_end = backfill_end.isoformat() if backfill_end else trade_date.isoformat()
+        # How big the sweep was, recorded on the parent batch before the first
+        # request. A chunk nobody reached leaves no receipt, so the ledger alone
+        # could not tell an interrupted sweep from a short one: two successful
+        # chunks read the same whether the plan had two or fifty-two. This is
+        # deliberately telemetry rather than queued batch rows — a chunk is not
+        # an independently retryable unit, and rows in the retry ledger would be
+        # resolved back to this whole step and re-run once each.
+        if manifest is not None and chunks:
+            manifest.record_performance_metrics(
+                run_id,
+                "corporate_actions",
+                {"chunks_planned": len(chunks), "chunk_symbols": len(remaining_symbols)},
+            )
         for chunk_index in range(0, len(remaining_symbols), batch_size):
             chunk = remaining_symbols[chunk_index : chunk_index + batch_size]
-            chunk_number = chunk_index // batch_size
-            chunk_batch_id = f"{batch_id or 'batch-0'}-chunk-{chunk_number:04d}"
+            chunk_batch_id = _corporate_actions_chunk_id(chunk)
             chunk_scope = f"chunk:{chunk_batch_id}"
             try:
                 df_chunk = fetch_corporate_actions(
@@ -676,12 +719,14 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
                     fail_loud=True,
                     allow_empty=True,
                     request_scope=chunk_scope,
+                    progress_report=sweep_report,
+                    progress_offset=chunk_index,
                 )
             except Exception as exc:  # noqa: BLE001 — preserve completed chunks for retry
                 failed_symbols.extend(chunk)
                 logger.warning(
-                    "corporate_actions chunk %d failed for %d symbols: %s",
-                    chunk_number,
+                    "corporate_actions chunk %s failed for %d symbols: %s",
+                    chunk_batch_id,
                     len(chunk),
                     exc,
                 )
@@ -723,12 +768,8 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
                     task_id=_CORPORATE_ACTIONS_CHUNK_TASK,
                     dataset="corporate_actions",
                     symbols=chunk,
-                    window_start=getattr(config, "_backfill_start", None).isoformat()
-                    if getattr(config, "_backfill_start", None)
-                    else None,
-                    window_end=getattr(config, "_backfill_end", None).isoformat()
-                    if getattr(config, "_backfill_end", None)
-                    else trade_date.isoformat(),
+                    window_start=chunk_window_start,
+                    window_end=chunk_window_end,
                     blocks_compaction=False,
                 )
                 manifest.finish_batch(
