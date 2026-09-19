@@ -225,19 +225,18 @@ def test_config_source_request_caps_concurrent_calls_across_call_sites(tmp_path)
     assert 1 <= peak <= 2
 
 
-def test_config_source_request_combines_qps_spacing_with_inflight_cap(tmp_path):
-    """Pacing and the shared lease both apply at the actual call boundary.
+def test_the_inflight_cap_holds_at_the_actual_call_boundary(tmp_path):
+    """Two requests may overlap under a cap of two, and never three.
 
-    The interval is deliberately far larger than scheduler jitter. At 40 ms
-    the tolerance was 24 ms, which is the same order as the descheduling a
-    loaded machine imposes between the limiter releasing a thread and that
-    thread reading the clock: the measured gap collapsed to 11 ms and failed
-    here while the limiter was behaving correctly (`peak <= 2` held). Timing
-    assertions only mean something when the quantity under test dominates the
-    noise, so the interval leads the jitter by an order of magnitude.
+    A counter, not a clock: the previous version of this also timed the gap
+    between the threads waking up, and a thread descheduled between the
+    limiter releasing it and reading the clock records late. That measured a
+    gap shorter than the limiter had enforced and failed here twice while the
+    cap itself held — the spacing is asserted on the limiter's own reservation
+    in the test below instead.
     """
-    interval = 0.2
-    hold = 0.5  # > interval, so two requests genuinely overlap in the cap
+    interval = 0.05
+    hold = 0.2  # > interval, so two requests genuinely overlap in the cap
     cfg = Config(
         data_root=tmp_path / "data",
         workers=4,
@@ -246,23 +245,15 @@ def test_config_source_request_combines_qps_spacing_with_inflight_cap(tmp_path):
     )
     active = 0
     peak = 0
-    starts: list[float] = []
+    entered = 0
     lock = Lock()
 
     def _request(_index: int) -> None:
-        nonlocal active, peak
+        nonlocal active, peak, entered
         with cfg.source_request("eastmoney"):
-            # Stamp before contending for `lock`, not inside it. Taking the
-            # timestamp under the mutex measures "when this thread won the
-            # mutex", so a thread descheduled between the limiter releasing it
-            # and the mutex being acquired records late — which compresses the
-            # *measured* gap below the interval the limiter actually enforced
-            # and failed this assertion under full-suite load (observed 11 ms
-            # for a 40 ms interval, while `peak <= 2` still held).
-            started = time.perf_counter()
             with lock:
-                starts.append(started)
                 active += 1
+                entered += 1
                 peak = max(peak, active)
             try:
                 time.sleep(hold)
@@ -273,11 +264,41 @@ def test_config_source_request_combines_qps_spacing_with_inflight_cap(tmp_path):
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(_request, range(3)))
 
+    assert entered == 3
     assert peak <= 2
-    assert len(starts) == 3
-    ordered = sorted(starts)
-    assert ordered[1] - ordered[0] >= interval * 0.6
-    assert ordered[2] - ordered[1] >= interval * 0.6
+
+
+def test_each_request_reserves_the_next_slot_one_interval_later(tmp_path):
+    """Spacing is what the limiter *granted*, which scheduling cannot erode.
+
+    Each acquisition takes `slot = max(now, next_allowed_at)` under the shared
+    lock and writes `slot + min_interval` back, so the reservation is exact
+    arithmetic recorded on disk. Asserting on it says the same thing as timing
+    the wake-ups without inheriting their noise: a busy runner can deliver a
+    thread late, never early, so the reserved slots cannot come out short.
+    """
+    interval = 0.2
+    cfg = Config(
+        data_root=tmp_path / "data",
+        workers=4,
+        source_intervals={"eastmoney": interval},
+    )
+    state_path = cfg.meta_root / "rate_limits" / "eastmoney.json"
+
+    reserved: list[float] = []
+    for _ in range(3):
+        with cfg.source_request("eastmoney"):
+            pass
+        reserved.append(
+            float(json.loads(state_path.read_text(encoding="utf-8"))["next_allowed_at"])
+        )
+
+    assert len(reserved) == 3
+    # `>=` rather than `==`: a call that arrives after its own reservation has
+    # already passed gets the clock instead, which can only push the next slot
+    # further out.
+    assert reserved[1] - reserved[0] >= interval
+    assert reserved[2] - reserved[1] >= interval
 
 
 def test_source_aliases_share_the_narrowest_configured_vendor_cap(tmp_path):

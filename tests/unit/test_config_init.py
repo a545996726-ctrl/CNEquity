@@ -73,7 +73,8 @@ def test_path_for_toml_makes_windows_tmp_paths_parseable():
     else:
         assert rendered.startswith("/")
     with pytest.raises(tomllib.TOMLDecodeError):
-        tomllib.loads(f'[data]\nroot = "{raw}"\n')
+        # raw-path-on-purpose: this parse failure is the subject of the test
+        tomllib.loads(f'[data]\nroot = "{raw}"\n')  # raw-path-on-purpose
 
 
 def test_render_keeps_linux_workers():

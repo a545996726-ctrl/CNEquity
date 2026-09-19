@@ -419,12 +419,19 @@ def test_a_brief_queue_is_waited_out_in_silence(tmp_path, caplog, monkeypatch):
     with exclusive_lock(path, blocking=False):
         pass
 
-    released = threading.Event()
+    # Stamps on one monotonic clock rather than an event set after release:
+    # the holder used to `released.set()` *after* leaving the with-block, so a
+    # runner that descheduled it in that gap let this acquire return first and
+    # failed a correct implementation. Comparing the two stamps is the same
+    # question with no window to lose — a queued acquire cannot start before
+    # the release it waited for.
+    released_at: list[float] = []
+    acquired_at: list[float] = []
 
     def _hold():
         with exclusive_lock(path, blocking=False):
             time.sleep(0.15)
-        released.set()
+            released_at.append(time.monotonic())
 
     thread = threading.Thread(target=_hold)
     thread.start()
@@ -435,8 +442,9 @@ def test_a_brief_queue_is_waited_out_in_silence(tmp_path, caplog, monkeypatch):
             time.sleep(0.01)
         with caplog.at_level(logging.INFO, logger="cnequity.file_lock"):
             with exclusive_lock(path, blocking=True, timeout=30.0):
-                pass
+                acquired_at.append(time.monotonic())
     finally:
         thread.join(10)
-    assert released.is_set(), "the acquire must have queued, not walked straight in"
+    assert released_at and acquired_at
+    assert acquired_at[0] >= released_at[0], "the acquire must have queued, not walked straight in"
     assert not [r for r in caplog.records if "waiting for" in r.message]
