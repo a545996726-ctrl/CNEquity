@@ -19,10 +19,12 @@ from datetime import date, timedelta
 import polars as pl
 
 from cnequity.adapters.calendar.holidays_cn import CLOSED_DATES
+from cnequity.adapters.eastmoney.corporate_actions import EASTMONEY_BACKFILL_FLOOR
 from cnequity.adapters.exchange.st_lists import is_st_name
 from cnequity.config import Config
 from cnequity.domain.symbols import parse_symbol
 from cnequity.domain.trading_status import risk_warning_expr
+from cnequity.quality.ex_events import EX_EVENT_LOOKBACK_SESSIONS, unexplained_factor_steps
 from cnequity.query.canonical import dedupe_by_primary_key, dedupe_lazy_by_primary_key
 from cnequity.query.parquet_scan import (
     dataset_has_parquet,
@@ -1710,6 +1712,15 @@ def corporate_action_classification_findings(config: Config, start: date, end: d
 BALANCE_IDENTITY_TOLERANCE = 1e-4
 
 
+# Where the identity breaks actually are. Measured 2026-09-19 over 286,689
+# periods: 245 breaks, of which 181 are 2005 or earlier, 28 in 2006-2010, 18 in
+# 2011-2015, 9 in 2016-2020 and 9 from 2021. An old annual report that does not
+# foot is the published record and will never be restated; a recent one is
+# worth a look, and there are few enough of them to actually look. The line
+# sits where the concentration ends rather than at a round number.
+MODERN_STATEMENT_YEAR = 2011
+
+
 def balance_sheet_identity_findings(config: Config) -> list[dict]:
     """Assets = liabilities + equity, per (symbol, report_period).
 
@@ -1763,30 +1774,72 @@ def balance_sheet_identity_findings(config: Config) -> list[dict]:
     if breached.is_empty():
         return []
 
-    sample = breached.sort("_rel", descending=True).head(5)
-    return [
-        {
-            "dataset": "financial_statement_items",
-            "severity": "warning",
-            "check": "balance_sheet_identity",
-            "message": (
-                f"{breached.height} of {checked.height} balance-sheet periods break "
-                "assets = liabilities + equity by more than a basis point"
-            ),
-            "rows": breached.height,
-            "checked": checked.height,
-            "sample": [
-                {
-                    "symbol": row["symbol"],
-                    "report_period": row["report_period"],
-                    "total_assets": row["total_assets"],
-                    "total_liabilities": row["total_liabilities"],
-                    "total_equity": row["total_equity"],
-                }
-                for row in sample.to_dicts()
-            ],
-        }
-    ]
+    def _sample(frame: pl.DataFrame) -> list[dict]:
+        return [
+            {
+                "symbol": row["symbol"],
+                "report_period": row["report_period"],
+                "total_assets": row["total_assets"],
+                "total_liabilities": row["total_liabilities"],
+                "total_equity": row["total_equity"],
+            }
+            for row in frame.sort("_rel", descending=True).head(5).to_dicts()
+        ]
+
+    breached = breached.with_columns(
+        pl.col("report_period").str.slice(0, 4).cast(pl.Int32, strict=False).alias("_year")
+    )
+    modern = breached.filter(pl.col("_year") >= MODERN_STATEMENT_YEAR)
+    historical = breached.filter(
+        pl.col("_year").is_null() | (pl.col("_year") < MODERN_STATEMENT_YEAR)
+    )
+    by_era = {
+        str(year): count
+        for year, count in sorted(
+            breached.group_by("_year").len().iter_rows(),
+            key=lambda item: (item[0] is None, item[0]),
+        )
+    }
+
+    findings: list[dict] = []
+    if not modern.is_empty():
+        findings.append(
+            {
+                "dataset": "financial_statement_items",
+                "severity": "warning",
+                "check": "balance_sheet_identity",
+                "message": (
+                    f"{modern.height} of {checked.height} balance-sheet periods from "
+                    f"{MODERN_STATEMENT_YEAR} on break assets = liabilities + equity by more "
+                    "than a basis point"
+                ),
+                "rows": modern.height,
+                "checked": checked.height,
+                "since_year": MODERN_STATEMENT_YEAR,
+                "sample": _sample(modern),
+            }
+        )
+    if not historical.is_empty():
+        findings.append(
+            {
+                "dataset": "financial_statement_items",
+                "severity": "info",
+                "check": "balance_sheet_identity_historical",
+                "message": (
+                    f"{historical.height} balance-sheet period(s) before "
+                    f"{MODERN_STATEMENT_YEAR} break assets = liabilities + equity; these are "
+                    "filings as published and will not be restated, so they are counted rather "
+                    "than chased"
+                ),
+                "rows": historical.height,
+                "checked": checked.height,
+                "before_year": MODERN_STATEMENT_YEAR,
+                "source_limited": True,
+                "by_report_year": by_era,
+                "sample": _sample(historical),
+            }
+        )
+    return findings
 
 
 def adj_factor_arbitration_findings(config: Config) -> list[dict]:
@@ -1874,17 +1927,45 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
         actions, on=["symbol", "ex_date"], how="anti"
     )
 
-    def _split(frame: pl.DataFrame) -> tuple[int, int, int]:
+    def _split(frame: pl.DataFrame) -> tuple[pl.DataFrame, int, int]:
         in_scope = frame.filter(pl.col("symbol").is_in(peer_symbols))
-        confirmed = in_scope.join(peer_dates, on=["symbol", "ex_date"], how="inner").height
-        return confirmed, in_scope.height - confirmed, frame.height - in_scope.height
+        confirmed = in_scope.join(peer_dates, on=["symbol", "ex_date"], how="inner")
+        return confirmed, in_scope.height - confirmed.height, frame.height - in_scope.height
 
-    silent_yes, silent_no, silent_out = _split(silent)
-    baseless_yes, baseless_no, baseless_out = _split(baseless)
+    silent_confirmed, silent_no, silent_out = _split(silent)
+    baseless_confirmed, baseless_no, baseless_out = _split(baseless)
+    silent_yes = silent_confirmed.height
+    baseless_yes = baseless_confirmed.height
     total = silent.height + baseless.height
     if not total:
         return []
 
+    # Counts alone name no next step. The one bucket with a command behind it
+    # is "the peer has the event and we do not": for an ex-date older than the
+    # EastMoney backfill floor, the report still serves it by exact date, which
+    # is the only route that reaches it. Later dates are ones the normal
+    # sources already walked, so a gap there means no configured source
+    # carries the event, not that a sweep was skipped.
+    reachable = sorted(
+        {
+            value.isoformat()
+            for value in baseless_confirmed.filter(pl.col("ex_date") < EASTMONEY_BACKFILL_FLOOR)
+            .get_column("ex_date")
+            .to_list()
+        }
+    )
+    remediation = ""
+    if reachable:
+        shown = ",".join(reachable[:_SAMPLE])
+        more = f" (+{len(reachable) - _SAMPLE} more)" if len(reachable) > _SAMPLE else ""
+        remediation = (
+            f" {len(reachable)} of the missing actions fall before the EastMoney backfill "
+            f"floor {EASTMONEY_BACKFILL_FLOOR.isoformat()}, which the sweep cannot reach; ask "
+            "the report for them by exact date with `cne backfill corporate_actions "
+            f"--eastmoney-date-repair --ex-dates {shown}`{more}. It answers one date at a time "
+            "and does not carry every older event, so a date it has nothing for stays open. "
+            "The later dates were already walked by the configured sources."
+        )
     against_factors = silent_yes + baseless_no
     against_actions = silent_no + baseless_yes
     unarbitrated = silent_out + baseless_out
@@ -1898,6 +1979,9 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
                 f"{total - unarbitrated}: {against_factors} point at the factor series, "
                 f"{against_actions} at the recorded actions, {unarbitrated} unarbitrated "
                 "because the peer does not carry those securities"
+                # Findings print their message and nothing else, so a
+                # remediation nobody reads is a remediation nobody runs.
+                f"{remediation}"
             ),
             "contradictions": total,
             "against_factor_series": against_factors,
@@ -1907,8 +1991,65 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
             "recorded_action_doubtful": silent_no,
             "missing_recorded_action": baseless_yes,
             "factor_step_without_basis": baseless_no,
+            "missing_recorded_action_reachable_dates": reachable,
+            "remediation": remediation,
         }
     ]
+
+
+def unrecorded_ex_event_findings(
+    config: Config,
+    trade_date: date,
+    *,
+    exclude: set[tuple[str, str]] | None = None,
+) -> list[dict]:
+    """A recent factor step with no corporate action behind it.
+
+    `missing_corporate_action` reads this from the price, and needs an 11%
+    raw/adjusted divergence before it speaks — the right bar for a dividend,
+    the wrong one for a fund unit split, which restates the reference price by
+    exactly its ratio and can be far smaller than that. The factor series
+    states the ratio outright, so ask it instead, and only over the window a
+    run can still act on (`EX_EVENT_LOOKBACK_SESSIONS`); deep history stays
+    with the price-based check, which is what keeps this quiet.
+
+    Pairs already reported by the price-based check are excluded: two lines
+    about one day is not twice the information.
+    """
+    steps = unexplained_factor_steps(config, upto=trade_date)
+    if steps.is_empty():
+        return []
+    skip = exclude or set()
+    rows = [
+        row
+        for row in steps.iter_rows(named=True)
+        if (row["symbol"], _iso(row["ex_date"])) not in skip
+    ]
+    if not rows:
+        return []
+    return _capped_findings(
+        pl.DataFrame(rows),
+        lambda row: {
+            "dataset": "corporate_actions",
+            "symbol": row["symbol"],
+            "severity": "warning",
+            "check": "unrecorded_ex_event",
+            "message": (
+                f"{row['symbol']}: the hfq factor stepped x{row['factor_ratio']:.4f} on "
+                f"{_iso(row['ex_date'])} with no corporate action on record; the daily "
+                "dividend report carries no unit splits, so a 份额折算 arrives only from "
+                "`cne backfill corporate_actions --symbols "
+                f"{row['symbol']}`"
+            ),
+            "trade_date": _iso(row["ex_date"]),
+            "factor_ratio": round(float(row["factor_ratio"]), 6),
+            "lookback_sessions": EX_EVENT_LOOKBACK_SESSIONS,
+        },
+        dataset="corporate_actions",
+        check="unrecorded_ex_event",
+        severity="warning",
+        noun="a factor step with no recorded action",
+    )
 
 
 def _open_sessions(config: Config) -> list[date] | None:
@@ -2229,11 +2370,13 @@ def undeclared_source_findings(config: Config) -> list[dict]:
     two sub-labels in ``trading_status``, and ``sources/SOURCES.yml`` has never
     carried it.
 
-    *Registered but unrouted.* A policy exists and the dataset does not route to
-    the source, so ``policies_for_dataset`` omits terms that do apply. The
-    ``ths_official`` rows in ``daily_bars`` and ``financial_statement_items``
-    arrived through dedicated repair commands rather than a configured route —
-    and theirs is the policy whose redistribution field reads ``unknown``.
+    *Registered but unrouted.* A policy exists and the dataset declares no
+    route to the source at all, so ``policies_for_dataset`` omits terms that do
+    apply — and ``ths_official``, the label this catches most often, is the
+    policy whose redistribution field reads ``unknown``. A source reached only
+    by an explicit repair command is declared as such (``repair_sources``) and
+    carried in ``DatasetPolicy.repair``: the matrix speaks for it without the
+    resilience report mistaking a manual command for a fallback.
 
     Reads what is stored rather than what the config intends, so it catches the
     next out-of-band writer whatever route it takes.
@@ -2270,6 +2413,10 @@ def undeclared_source_findings(config: Config) -> list[dict]:
                 spec.backup_source,
                 spec.backfill_source,
                 *getattr(spec, "supplementary_sources", ()),
+                # An operator-invoked repair is a declared writer too: its
+                # terms are in the matrix (`DatasetPolicy.repair`), it is just
+                # not part of any automatic route.
+                *getattr(spec, "repair_sources", ()),
             )
             if value
         }
