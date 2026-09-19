@@ -20,11 +20,12 @@ from cnequity.cli._shared import (
     _progress_logging,
     attach_log_file,
     config_option,
+    ingest_scope_label,
     parse_date_option,
     resolve_config_path,
 )
 from cnequity.cli.backfill_cmds import _require_known_dataset, _run_backfill
-from cnequity.domain.market_time import is_session_final, shanghai_today
+from cnequity.domain.market_time import BSE_FIRST_SESSION, is_session_final, shanghai_today
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.quality.audit import run_audit
 from cnequity.storage.atomic import write_json_atomic
@@ -56,6 +57,194 @@ def stale_datasets_by_group(cfg, datasets: list[str]) -> dict[str, list[str]]:
     for dataset in datasets:
         out.setdefault(owner.get(dataset, "(unscheduled)"), []).append(dataset)
     return out
+
+
+def _gates_on_dataset(cfg, dataset: str, wanted_groups: set[str] | None) -> bool:
+    """Whether a failure in *dataset* should fail this host's gate.
+
+    ``--groups`` names the schedule groups this machine actually runs. A
+    dataset nothing schedules still gates: "I cannot tell who fetches this" is
+    not the same claim as "another host fetches it".
+    """
+    if wanted_groups is None:
+        return True
+    by_group = stale_datasets_by_group(cfg, [dataset])
+    owners = {group for group, names in by_group.items() if dataset in names}
+    if not owners:
+        return True
+    return any(group in wanted_groups or group == "(unscheduled)" for group in owners)
+
+
+def _scope_exit_code(
+    incomplete_init: bool, *, scope_incomplete: bool, scope_unverified: bool
+) -> int:
+    """Exit code for the coverage gates: 1 proven bad, 2 unprovable, 0 fine.
+
+    Separated because they call for different actions. "5,207 securities have
+    no bar" is a repair; "instruments is missing, so I cannot check" is a
+    setup problem, and a caller that treats both as a red light learns to
+    ignore both. 2 is already this command's spelling for degraded.
+    """
+    if incomplete_init or scope_incomplete:
+        return 1
+    return 2 if scope_unverified else 0
+
+
+def _owed_symbols_on(cfg, dataset: str, day: date) -> set[str]:
+    """Symbols the outstanding-key ledger already owes for *day*."""
+    from cnequity.storage.state import StateStore
+
+    try:
+        rows = StateStore(cfg.meta_root).get_outstanding_keys(dataset)
+    except Exception:  # noqa: BLE001 — a missing/garbled state file owes nothing
+        return set()
+    wanted = day.isoformat()
+    return {
+        str(row["symbol"])
+        for row in rows
+        if isinstance(row, dict) and row.get("symbol") and row.get("trade_date") == wanted
+    }
+
+
+def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
+    """Cheap cross-section proof for a date-fresh daily-bars watermark.
+
+    Freshness is one-dimensional: a one-symbol repair can advance a date just
+    as a market-wide sweep can.  For a real lake, compare the tip partition to
+    the instruments active that day. A bar proves an observed symbol; an
+    explicit non-trading status proves why an active symbol has no bar.
+    """
+    if getattr(cfg, "lake_profile", None) in {"demo", "sample"}:
+        return None
+    rows = catalog.filter(pl.col("dataset") == "daily_bars")
+    if rows.is_empty() or not bool(rows["has_data"][0]):
+        return None
+
+    from cnequity.domain.symbols import filter_ingest_universe
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+    from cnequity.steps.common import load_curated_instruments, load_curated_trading_status
+
+    bars_root = cfg.curated_root / "daily_bars"
+    if not dataset_has_parquet(bars_root, dataset="daily_bars", meta_root=cfg.meta_root):
+        # Test doubles and legacy catalog adapters can report rows without a
+        # physical lake. They have no scope evidence to inspect here.
+        return None
+    raw_day = rows["watermark"][0] if bool(rows["watermarked"][0]) else None
+    raw_day = raw_day or rows["coverage_end"][0]
+    if raw_day is None:
+        return {
+            "state": "unverified",
+            "message": "daily_bars 有数据，但没有可用于截面校验的 watermark/coverage_end",
+        }
+    tip = raw_day.date() if hasattr(raw_day, "date") and not isinstance(raw_day, date) else raw_day
+
+    try:
+        instruments = load_curated_instruments(cfg)
+        if instruments is None or "symbol" not in instruments.columns:
+            return {
+                "state": "unverified",
+                "date": tip,
+                "message": "daily_bars 有数据，但 instruments 缺失，无法证明全市场标的范围",
+            }
+        instrument_count = instruments["symbol"].drop_nulls().n_unique()
+        instrument_receipt = Manifest(cfg.manifest_path).latest_successful_batch("instruments")
+        receipt_count = (
+            int(instrument_receipt["rows_written"] or 0) if instrument_receipt is not None else 0
+        )
+        if receipt_count and instrument_count < receipt_count:
+            return {
+                "state": "unverified",
+                "date": tip,
+                "message": (
+                    f"当前 instruments 只有 {instrument_count} 只，少于最近成功批次写入的 "
+                    f"{receipt_count} 只；证券表可能被截断"
+                ),
+            }
+        expected_rows = instruments
+        if "list_date" in expected_rows.columns:
+            expected_rows = expected_rows.filter(
+                pl.col("list_date").is_null() | (pl.col("list_date") <= tip)
+            )
+        if "delist_date" in expected_rows.columns:
+            expected_rows = expected_rows.filter(
+                pl.col("delist_date").is_null() | (pl.col("delist_date") >= tip)
+            )
+        expected = set(
+            filter_ingest_universe(
+                expected_rows["symbol"].drop_nulls().to_list(),
+                cfg.ingest_universe,
+            )
+        )
+        if not expected:
+            return {
+                "state": "unverified",
+                "date": tip,
+                "message": "instruments 在该日没有可校验的 active 标的",
+            }
+        exchanges = {symbol.rsplit(".", 1)[-1] for symbol in expected if "." in symbol}
+        required_exchanges = {"SH", "SZ"}
+        if cfg.ingest_universe in {"all_a", "all_instruments"} and tip >= BSE_FIRST_SESSION:
+            required_exchanges.add("BJ")
+        missing_exchanges = sorted(required_exchanges - exchanges)
+        if missing_exchanges:
+            return {
+                "state": "unverified",
+                "date": tip,
+                "message": (
+                    f"instruments 缺少配置范围应有的市场：{', '.join(missing_exchanges)}；"
+                    "无法用残缺证券表证明日线截面完整"
+                ),
+            }
+
+        bars = scan_parquet_root(
+            bars_root,
+            partition_col="trade_date",
+            start=tip,
+            end=tip,
+            dataset="daily_bars",
+            meta_root=cfg.meta_root,
+        )
+        observed = set(
+            bars.filter(pl.col("trade_date") == tip)
+            .select("symbol")
+            .unique()
+            .collect(engine="streaming")["symbol"]
+            .to_list()
+        )
+        status = load_curated_trading_status(cfg, start=tip, end=tip, symbols=sorted(expected))
+        excused: set[str] = set()
+        if status is not None and not status.is_empty():
+            excused = set(status.filter(~pl.col("is_trading"))["symbol"].drop_nulls().to_list())
+        covered = expected & (observed | excused)
+        ratio = len(covered) / len(expected)
+        # Keys the ingest side already judged, tolerated and wrote down are
+        # not news. `daily_bars` carries an explicit unresolved-key budget —
+        # refusing a checkpoint over 14 of 5,500 threw away two hours of
+        # `cne init` — and every key it lets through is recorded in the
+        # outstanding ledger and reported separately below. Failing here for
+        # those same keys would be the two halves of one system contradicting
+        # each other, with the operator in between.
+        owed = _owed_symbols_on(cfg, "daily_bars", tip)
+        missing = sorted(expected - covered)
+        unexplained = sorted(set(missing) - owed)
+        return {
+            # A proof, not a sample: a symbol counts as covered only with a bar,
+            # explicit non-trading evidence, or a recorded debt. There is no
+            # percentage tolerance, which in all-A could hide hundreds of names.
+            "state": "complete" if not unexplained else "incomplete",
+            "date": tip,
+            "covered": len(covered),
+            "expected": len(expected),
+            "ratio": ratio,
+            "missing": unexplained,
+            "owed": len(set(missing) & owed),
+        }
+    except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
+        return {
+            "state": "unverified",
+            "date": tip,
+            "message": f"读取截面证据失败：{exc}",
+        }
 
 
 @cli.command()
@@ -597,7 +786,18 @@ def verify(
     default=None,
     help=(
         "配合 --datasets：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，"
-        "但不会让门禁失败。"
+        "但不会让门禁失败。截面检查同样受它约束——daily_bars 归哪个组，它的覆盖率就归谁判。"
+        "未跑完的 init 不属于任何调度组，始终判失败。"
+    ),
+)
+@click.option(
+    "--scope/--no-scope",
+    "scope",
+    default=True,
+    show_default=True,
+    help=(
+        "配合 --datasets：是否做最新交易日的标的截面校验。它要读 daily_bars 的 tip 分区、"
+        "instruments 和 trading_status，比单纯看水位贵；--no-scope 让这条命令回到纯元数据。"
     ),
 )
 def status(
@@ -606,14 +806,22 @@ def status(
     show_datasets: bool,
     all_columns: bool,
     gate_groups: str | None,
+    scope: bool,
 ):
-    """查看最近一次 run 的状态；加 --datasets 则看逐数据集的新鲜度。"""
+    """查看最近一次 run 的状态；加 --datasets 则看逐数据集的新鲜度。
+
+    \b
+    --datasets 的退出码：0 正常；1 确实不合格（数据集 STALE、截面缺标的、init 没跑完）；
+    2 证明不了（instruments 缺失、证据读不出来）。后者是装配问题，不是数据缺口。
+    """
     cfg = _cfg(config_path)
 
     if all_columns and not show_datasets:
         raise click.UsageError("--all-columns 只能配合 --datasets 使用")
     if gate_groups and not show_datasets:
         raise click.UsageError("--groups 只能配合 --datasets 使用")
+    if not scope and not show_datasets:
+        raise click.UsageError("--no-scope 只能配合 --datasets 使用")
 
     if show_datasets:
         import polars as pl_mod
@@ -684,6 +892,55 @@ def status(
                 "\nsample 湖：这些是 source=mock 的合成数据，日期不参与新鲜度门禁；"
                 "它只验证安装、Parquet 落盘和查询链路。"
             )
+        wanted_groups = _gate_groups(gate_groups)
+        tip_scope = _daily_bars_tip_scope(cfg, df) if scope else None
+        scope_incomplete = tip_scope is not None and tip_scope["state"] == "incomplete"
+        scope_unverified = tip_scope is not None and tip_scope["state"] == "unverified"
+        # `--groups` promises to gate only on what this host is scheduled to
+        # fetch. A cross-section hole in `daily_bars` is a claim about whoever
+        # owns `daily_bars`, so it answers to the same promise; letting it
+        # through unconditionally would quietly retract the flag.
+        if not _gates_on_dataset(cfg, "daily_bars", wanted_groups):
+            scope_incomplete = False
+            scope_unverified = False
+        scope_heading = f"取数截面（{ingest_scope_label(cfg.ingest_universe)}）"
+        if tip_scope is not None:
+            if tip_scope["state"] == "complete":
+                owed_note = (
+                    f"，另有 {tip_scope['owed']} 只已记账待补" if tip_scope.get("owed") else ""
+                )
+                click.echo(
+                    f"\n{scope_heading}：OK —— daily_bars "
+                    f"{tip_scope['date']} 覆盖证据 {tip_scope['covered']}/"
+                    f"{tip_scope['expected']}（{tip_scope['ratio']:.1%}）{owed_note}"
+                )
+            elif tip_scope["state"] == "incomplete":
+                sample = ", ".join(tip_scope["missing"][:5])
+                click.echo(
+                    f"\n{scope_heading}：INCOMPLETE —— daily_bars "
+                    f"{tip_scope['date']} 有 {len(tip_scope['missing'])} 只 active 标的"
+                    f"既无日线、也无停牌证据、也没有记账"
+                    f"（覆盖 {tip_scope['covered']}/{tip_scope['expected']}，"
+                    f"{tip_scope['ratio']:.1%}；示例：{sample}）。"
+                    "日期 fresh 不代表标的覆盖完整。",
+                    err=True,
+                )
+            else:
+                click.echo(
+                    f"\n{scope_heading}：UNVERIFIED —— {tip_scope['message']}。"
+                    "这是「证明不了」，不是「已证明不全」；"
+                    "日期 fresh 仍不代表标的覆盖完整。",
+                    err=True,
+                )
+        incomplete_init = Manifest(cfg.manifest_path).latest_incomplete_init_run()
+        if incomplete_init is not None:
+            click.echo(
+                "\ninit 尚未完成："
+                f"run {incomplete_init['run_id']} 当前为 {incomplete_init['status']}。"
+                "上表的 fresh 只表示已有数据的日期新鲜，不代表全市场覆盖完整；"
+                "运行 `cne init` 会从这个 run 继续。",
+                err=True,
+            )
         # A tolerated gap is invisible in freshness: the watermark moved over
         # the hole, so the dataset reads FRESH while still owing keys. The
         # ledger is the only place that knows, and nobody reads a json file
@@ -715,7 +972,7 @@ def status(
             # single day — 21 to 25 stale on 2026-09-12/13/14 — and the daily
             # "数据异常" notification became something to dismiss. Three real
             # `UNHEALTHY` days sat inside that noise unread.
-            wanted = _gate_groups(gate_groups)
+            wanted = wanted_groups
             if wanted is not None:
                 # Exempt only what a *known* group other than mine owns. A
                 # dataset nothing schedules — `(unscheduled)`, or a config with
@@ -735,9 +992,17 @@ def status(
                         f"门禁只看 {', '.join(sorted(wanted))}："
                         f"其中 {len(gating)} 个 stale，另有 {skipped} 个属于这台机器不跑的组。"
                     )
-                if not gating:
-                    return
-            raise SystemExit(1)
+                if gating:
+                    raise SystemExit(1)
+            else:
+                raise SystemExit(1)
+        code = _scope_exit_code(
+            incomplete_init is not None,
+            scope_incomplete=scope_incomplete,
+            scope_unverified=scope_unverified,
+        )
+        if code:
+            raise SystemExit(code)
         return
 
     manifest = Manifest(cfg.manifest_path)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
@@ -382,6 +383,270 @@ def test_status_datasets_all_fresh(cfg_path, monkeypatch):
     result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
     assert result.exit_code == 0, result.output
     assert "最后交易日：2024-06-28" in result.output
+
+
+def test_status_datasets_fails_when_an_init_is_incomplete(cfg_path, monkeypatch):
+    cfg = Config(data_root=Path(cfg_path).parent / "data")
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run(
+        "init",
+        {"phases": ["phase1_reference"], "trade_date": "2024-06-28"},
+    )
+    manifest.start_batch(run_id, "instruments-ok", "instruments", "instruments")
+    manifest.finish_batch(run_id, "instruments-ok", "success")
+    manifest.finish_run(run_id, "failed", error_message="interrupted")
+
+    monkeypatch.setattr(
+        "cnequity.cli.quality_cmds._last_trading_day",
+        lambda config, today: date(2024, 6, 28),
+    )
+    monkeypatch.setattr(
+        "cnequity.query.reader.list_datasets",
+        lambda config=None: pl.DataFrame(
+            {
+                "dataset": ["daily_bars"],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [date(2024, 6, 28)],
+                "coverage_end": [date(2024, 6, 28)],
+            }
+        ),
+    )
+    monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
+
+    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+
+    assert result.exit_code == 1, result.output
+    assert "init 尚未完成" in result.output
+    assert run_id in result.output
+    assert "cne init" in result.output
+
+
+def test_status_datasets_rejects_a_fresh_but_narrow_daily_bar_tip(cfg_path, monkeypatch):
+    cfg = Config(data_root=Path(cfg_path).parent / "data")
+    instruments_root = cfg.curated_root / "instruments"
+    bars_root = cfg.curated_root / "daily_bars" / "trade_date=2024-06-28"
+    instruments_root.mkdir(parents=True, exist_ok=True)
+    bars_root.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ", "600000.SH", "920001.BJ"],
+            "list_date": [
+                date(2001, 8, 27),
+                date(1991, 4, 3),
+                date(1999, 11, 10),
+                date(2021, 11, 15),
+            ],
+            "delist_date": [None, None, None, None],
+        }
+    ).write_parquet(instruments_root / "part-0.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "trade_date": [date(2024, 6, 28)],
+        }
+    ).write_parquet(bars_root / "part-0.parquet")
+
+    monkeypatch.setattr(
+        "cnequity.cli.quality_cmds._last_trading_day",
+        lambda config, today: date(2024, 6, 28),
+    )
+    monkeypatch.setattr(
+        "cnequity.query.reader.list_datasets",
+        lambda config=None: pl.DataFrame(
+            {
+                "dataset": ["daily_bars"],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [date(2024, 6, 28)],
+                "coverage_end": [date(2024, 6, 28)],
+            }
+        ),
+    )
+    monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
+
+    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+
+    assert result.exit_code == 1, result.output
+    assert "取数截面（沪深京全市场 A 股）：INCOMPLETE" in result.output
+    assert "1/4" in result.output
+    assert "日期 fresh 不代表标的覆盖完整" in result.output
+
+
+@pytest.mark.parametrize(
+    ("suspended_evidence", "expected_state"),
+    [(False, "incomplete"), (True, "complete")],
+)
+def test_daily_bar_tip_requires_every_symbol_or_explicit_suspension(
+    tmp_path, suspended_evidence, expected_state
+):
+    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+
+    cfg = Config(data_root=tmp_path / "data")
+    tip = date(2024, 6, 28)
+    symbols = [
+        "600000.SH",
+        "600001.SH",
+        "600002.SH",
+        "600003.SH",
+        "000001.SZ",
+        "000002.SZ",
+        "000003.SZ",
+        "000004.SZ",
+        "920001.BJ",
+        "920002.BJ",
+    ]
+    instruments_root = cfg.curated_root / "instruments"
+    bars_root = cfg.curated_root / "daily_bars" / f"trade_date={tip.isoformat()}"
+    instruments_root.mkdir(parents=True)
+    bars_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "list_date": [date(2000, 1, 1)] * len(symbols),
+            "delist_date": [None] * len(symbols),
+        }
+    ).write_parquet(instruments_root / "part-0.parquet")
+    pl.DataFrame({"symbol": symbols[:-1], "trade_date": [tip] * (len(symbols) - 1)}).write_parquet(
+        bars_root / "part-0.parquet"
+    )
+    if suspended_evidence:
+        status_root = cfg.curated_root / "trading_status" / f"trade_date={tip.isoformat()}"
+        status_root.mkdir(parents=True)
+        pl.DataFrame(
+            {"symbol": [symbols[-1]], "trade_date": [tip], "is_trading": [False]}
+        ).write_parquet(status_root / "part-0.parquet")
+
+    catalog = pl.DataFrame(
+        {
+            "dataset": ["daily_bars"],
+            "has_data": [True],
+            "watermarked": [True],
+            "watermark": [tip],
+            "coverage_end": [tip],
+        }
+    )
+
+    scope = _daily_bars_tip_scope(cfg, catalog)
+
+    assert scope is not None
+    assert scope["state"] == expected_state
+    assert scope["covered"] == (10 if suspended_evidence else 9)
+    assert scope["expected"] == 10
+
+
+def test_daily_bar_tip_cannot_prove_all_a_from_an_instrument_list_without_bj(tmp_path):
+    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+
+    cfg = Config(data_root=tmp_path / "data")
+    tip = date(2024, 6, 28)
+    instruments_root = cfg.curated_root / "instruments"
+    bars_root = cfg.curated_root / "daily_bars" / f"trade_date={tip.isoformat()}"
+    instruments_root.mkdir(parents=True)
+    bars_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ"],
+            "list_date": [date(2001, 8, 27), date(1991, 4, 3)],
+            "delist_date": [None, None],
+        }
+    ).write_parquet(instruments_root / "part-0.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ"],
+            "trade_date": [tip, tip],
+        }
+    ).write_parquet(bars_root / "part-0.parquet")
+    catalog = pl.DataFrame(
+        {
+            "dataset": ["daily_bars"],
+            "has_data": [True],
+            "watermarked": [True],
+            "watermark": [tip],
+            "coverage_end": [tip],
+        }
+    )
+
+    scope = _daily_bars_tip_scope(cfg, catalog)
+
+    assert scope is not None
+    assert scope["state"] == "unverified"
+    assert "BJ" in scope["message"]
+    assert "残缺证券表" in scope["message"]
+
+
+def test_daily_bar_tip_rejects_an_instrument_table_smaller_than_its_success_receipt(tmp_path):
+    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+
+    cfg = Config(data_root=tmp_path / "data")
+    tip = date(2024, 6, 28)
+    symbols = ["600519.SH", "000001.SZ", "920001.BJ"]
+    instruments_root = cfg.curated_root / "instruments"
+    bars_root = cfg.curated_root / "daily_bars" / f"trade_date={tip.isoformat()}"
+    instruments_root.mkdir(parents=True)
+    bars_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "list_date": [date(2000, 1, 1)] * 3,
+            "delist_date": [None] * 3,
+        }
+    ).write_parquet(instruments_root / "part-0.parquet")
+    pl.DataFrame({"symbol": symbols, "trade_date": [tip] * 3}).write_parquet(
+        bars_root / "part-0.parquet"
+    )
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily:test")
+    manifest.start_batch(run_id, "instruments", "instruments", "instruments")
+    manifest.finish_batch(run_id, "instruments", "success", rows_read=5000, rows_written=5000)
+    catalog = pl.DataFrame(
+        {
+            "dataset": ["daily_bars"],
+            "has_data": [True],
+            "watermarked": [True],
+            "watermark": [tip],
+            "coverage_end": [tip],
+        }
+    )
+
+    scope = _daily_bars_tip_scope(cfg, catalog)
+
+    assert scope is not None
+    assert scope["state"] == "unverified"
+    assert "只有 3 只" in scope["message"]
+    assert "成功批次写入的 5000 只" in scope["message"]
+    assert "可能被截断" in scope["message"]
+
+
+def test_status_datasets_treats_sample_dates_as_non_gating(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "sample.toml"
+    cfg_path.write_text(
+        f'[data]\nroot = "{path_for_toml(tmp_path / "sample-data")}"\nprofile = "sample"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "cnequity.cli.quality_cmds._last_trading_day",
+        lambda config, today: date(2026, 9, 18),
+    )
+    monkeypatch.setattr(
+        "cnequity.query.reader.list_datasets",
+        lambda config=None: pl.DataFrame(
+            {
+                "dataset": ["daily_bars"],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [date(2024, 6, 28)],
+                "coverage_end": [date(2024, 6, 28)],
+            }
+        ),
+    )
+
+    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", str(cfg_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "sample" in result.output
+    assert "STALE" not in result.output
+    assert "合成数据" in result.output
 
 
 def test_status_datasets_ignores_disabled_optional_capture(cfg_path, monkeypatch):
@@ -1493,3 +1758,204 @@ def test_run_daily_all_groups_skips_groups_whose_datasets_are_off(tmp_path, monk
     assert result.exit_code == 0, result.output
     assert seen == ["daily:core"]
     assert "skipped" in result.output
+
+
+def _tip_scope_lake(tmp_path, *, missing: int = 1):
+    """A lake whose tip partition is missing *missing* of ten active symbols."""
+    cfg = Config(data_root=tmp_path / "data")
+    tip = date(2024, 6, 28)
+    symbols = [f"60000{i}.SH" for i in range(4)] + [f"00000{i}.SZ" for i in range(4)]
+    symbols += ["920001.BJ", "920002.BJ"]
+    instruments_root = cfg.curated_root / "instruments"
+    bars_root = cfg.curated_root / "daily_bars" / f"trade_date={tip.isoformat()}"
+    instruments_root.mkdir(parents=True)
+    bars_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "list_date": [date(2000, 1, 1)] * len(symbols),
+            "delist_date": [None] * len(symbols),
+        }
+    ).write_parquet(instruments_root / "part-0.parquet")
+    observed = symbols[: len(symbols) - missing]
+    pl.DataFrame({"symbol": observed, "trade_date": [tip] * len(observed)}).write_parquet(
+        bars_root / "part-0.parquet"
+    )
+    catalog = pl.DataFrame(
+        {
+            "dataset": ["daily_bars"],
+            "has_data": [True],
+            "watermarked": [True],
+            "watermark": [tip],
+            "coverage_end": [tip],
+        }
+    )
+    return cfg, tip, symbols, catalog
+
+
+def test_a_key_the_ingest_side_already_tolerated_is_not_a_second_failure(tmp_path):
+    """`daily_bars` carries an explicit unresolved-key budget — refusing a
+    checkpoint over 14 of 5,500 threw away two hours of `cne init` — and every
+    key it lets through is written to the outstanding ledger and reported
+    separately. Failing the status gate for those same keys would be the two
+    halves of one system contradicting each other, with the operator between.
+    """
+    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.storage.state import StateStore
+
+    cfg, tip, symbols, catalog = _tip_scope_lake(tmp_path)
+    cfg.meta_root.mkdir(parents=True, exist_ok=True)
+
+    before = _daily_bars_tip_scope(cfg, catalog)
+    assert before["state"] == "incomplete"
+    assert before["missing"] == [symbols[-1]]
+
+    StateStore(cfg.meta_root).record_outstanding_keys(
+        "daily_bars",
+        [(symbols[-1], tip)],
+        run_id="run-1",
+        reason="unresolved_tip",
+    )
+
+    after = _daily_bars_tip_scope(cfg, catalog)
+    assert after["state"] == "complete"
+    assert after["missing"] == []
+    assert after["owed"] == 1
+
+
+def test_an_owed_key_for_a_different_day_does_not_excuse_this_one(tmp_path):
+    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.storage.state import StateStore
+
+    cfg, tip, symbols, catalog = _tip_scope_lake(tmp_path)
+    cfg.meta_root.mkdir(parents=True, exist_ok=True)
+    StateStore(cfg.meta_root).record_outstanding_keys(
+        "daily_bars",
+        [(symbols[-1], date(2024, 6, 27))],
+        run_id="run-1",
+        reason="unresolved_tip",
+    )
+
+    assert _daily_bars_tip_scope(cfg, catalog)["state"] == "incomplete"
+
+
+def test_scope_gate_respects_the_groups_flag_that_owns_daily_bars(cfg_path, monkeypatch):
+    """`--groups` promises to gate only on what this host is scheduled to
+    fetch. A cross-section hole in daily_bars is a claim about whoever owns
+    daily_bars, so it answers to the same promise."""
+    from cnequity.cli import quality_cmds as qc
+
+    monkeypatch.setattr(
+        qc,
+        "_daily_bars_tip_scope",
+        lambda cfg, catalog: {
+            "state": "incomplete",
+            "date": date(2024, 6, 28),
+            "covered": 1,
+            "expected": 4,
+            "ratio": 0.25,
+            "missing": ["000001.SZ"],
+            "owed": 0,
+        },
+    )
+    monkeypatch.setattr(qc, "stale_datasets_by_group", lambda cfg, names: {"core": list(names)})
+    monkeypatch.setattr(qc, "_last_trading_day", lambda config, today: date(2024, 6, 28))
+    monkeypatch.setattr(
+        "cnequity.query.reader.list_datasets",
+        lambda config=None: pl.DataFrame(
+            {
+                "dataset": ["daily_bars"],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [date(2024, 6, 28)],
+                "coverage_end": [date(2024, 6, 28)],
+            }
+        ),
+    )
+    monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
+
+    runner = CliRunner()
+    gated = runner.invoke(cli, ["status", "--datasets", "--groups", "core", "--config", cfg_path])
+    assert gated.exit_code == 1, gated.output
+
+    exempt = runner.invoke(
+        cli, ["status", "--datasets", "--groups", "capital", "--config", cfg_path]
+    )
+    assert exempt.exit_code == 0, exempt.output
+
+
+def test_unprovable_coverage_exits_two_not_one(cfg_path, monkeypatch):
+    """ "5,207 securities have no bar" is a repair; "instruments is missing, so
+    I cannot check" is a setup problem. A caller that reads both as the same
+    red light learns to ignore both."""
+    from cnequity.cli import quality_cmds as qc
+
+    monkeypatch.setattr(
+        qc,
+        "_daily_bars_tip_scope",
+        lambda cfg, catalog: {
+            "state": "unverified",
+            "date": date(2024, 6, 28),
+            "message": "instruments 缺失",
+        },
+    )
+    monkeypatch.setattr(qc, "_last_trading_day", lambda config, today: date(2024, 6, 28))
+    monkeypatch.setattr(
+        "cnequity.query.reader.list_datasets",
+        lambda config=None: pl.DataFrame(
+            {
+                "dataset": ["daily_bars"],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [date(2024, 6, 28)],
+                "coverage_end": [date(2024, 6, 28)],
+            }
+        ),
+    )
+    monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
+
+    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    assert result.exit_code == 2, result.output
+    assert "UNVERIFIED" in result.output
+    assert "证明不了" in result.output
+
+
+def test_no_scope_skips_the_cross_section_read_entirely(cfg_path, monkeypatch):
+    """The check reads the tip partition, instruments and trading_status. That
+    is not free, and `cne status` used to be a metadata-only command."""
+    from cnequity.cli import quality_cmds as qc
+
+    calls: list[int] = []
+
+    def _scope(cfg, catalog):
+        calls.append(1)
+        return {
+            "state": "incomplete",
+            "date": date(2024, 6, 28),
+            "covered": 0,
+            "expected": 4,
+            "ratio": 0.0,
+            "missing": ["600519.SH"],
+            "owed": 0,
+        }
+
+    monkeypatch.setattr(qc, "_daily_bars_tip_scope", _scope)
+    monkeypatch.setattr(qc, "_last_trading_day", lambda config, today: date(2024, 6, 28))
+    monkeypatch.setattr(
+        "cnequity.query.reader.list_datasets",
+        lambda config=None: pl.DataFrame(
+            {
+                "dataset": ["daily_bars"],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [date(2024, 6, 28)],
+                "coverage_end": [date(2024, 6, 28)],
+            }
+        ),
+    )
+    monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
+
+    result = CliRunner().invoke(cli, ["status", "--datasets", "--no-scope", "--config", cfg_path])
+    assert result.exit_code == 0, result.output
+    assert not calls
+    assert "取数截面" not in result.output
