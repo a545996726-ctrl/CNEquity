@@ -21,19 +21,21 @@ from cnequity.orchestrator.init_phases import (
     current_phase_statuses,
     init_run_complete,
     missing_steps,
+    missing_steps_within_phase_order,
     needs_finalize,
+    pending_phases,
     phase_backfill,
-    phases_never_started,
     step_backfill,
     step_succeeded,
 )
 from cnequity.orchestrator.init_phases import expected_steps as init_expected_steps
-from cnequity.orchestrator.manifest import Manifest
+from cnequity.orchestrator.manifest import QUEUED_BATCH_STATUS, Manifest
 from cnequity.orchestrator.registry import get_step
 from cnequity.orchestrator.run_lock import (
     DAILY_INGESTION_LOCK,
     EVENTS_INGESTION_LOCK,
     INIT_JOB_LOCK,
+    reentrant_run_lock,
     run_lock,
 )
 from cnequity.progress import step_scope
@@ -225,7 +227,7 @@ class JobEngine:
             # `cne run retry --failed-groups` reported nothing to retry; `cne
             # status` showed a ghost. The kernel releases this the moment the
             # process dies, which is exactly the signal that was missing.
-            stack.enter_context(run_lock(self.config.meta_root, run_id, blocking=False))
+            stack.enter_context(self._run_lock(run_id))
 
             context: dict[str, Any] = {"run_id": run_id, "trade_date": trade_date}
             results: list[dict[str, Any]] = []
@@ -285,10 +287,24 @@ class JobEngine:
                     "rows_read": total_read,
                     "rows_written": total_written,
                 }
+            except (KeyboardInterrupt, SystemExit):
+                # Independent of `finalize_run`. That flag says who closes the
+                # run on success — `cne backfill` keeps it open until compact
+                # has run — and it was never a statement about interrupts. Read
+                # as one, it left every `cne backfill` Ctrl-C with the run and
+                # its batches still `running`, unretryable until the hour-long
+                # stale window expired. Closing the ledger is the exiting
+                # process's job whoever finishes the run.
+                self.manifest.interrupt_run(
+                    run_id,
+                    error_message="interrupted by operator",
+                )
+                raise
             finally:
                 if finalize_run and not finalized:
-                    self._finish_if_still_running(
-                        run_id, error_message="interrupted: worker exited without finish_run"
+                    self.manifest.interrupt_run(
+                        run_id,
+                        error_message="interrupted: worker exited without finish_run",
                     )
 
     def run_step(
@@ -321,11 +337,6 @@ class JobEngine:
                 out.get("skipped_locked", 0),
             )
         return out
-
-    def _finish_if_still_running(self, run_id: str, *, error_message: str) -> None:
-        run = self.manifest.get_run(run_id)
-        if run is not None and run["status"] == "running":
-            self.manifest.finish_run(run_id, "failed", error_message=error_message)
 
     def _step_criticality(self, name: str, entry: Any, run_id: str) -> str:
         """Return the durable criticality for a step's dataset receipts.
@@ -477,6 +488,12 @@ class JobEngine:
             yield
             return
         with run_lock(self.config.meta_root, lock_name, blocking=False):
+            yield
+
+    @contextlib.contextmanager
+    def _run_lock(self, run_id: str):
+        """Hold one run lock across nested init phase/retry calls."""
+        with reentrant_run_lock(self.config.meta_root, run_id):
             yield
 
     def _run_wave(
@@ -651,6 +668,26 @@ class JobEngine:
                 "elapsed": elapsed,
                 **out,
             }
+        except (KeyboardInterrupt, SystemExit) as exc:
+            elapsed = time.perf_counter() - t0
+            if not uses_worker_batches:
+                self.manifest.finish_batch(
+                    run_id,
+                    batch_id,
+                    "failed",
+                    error_message="interrupted by operator",
+                    retry_count=1 if retry_of else None,
+                )
+            self._record_step_result(
+                name=name,
+                entry=entry,
+                run_id=run_id,
+                status="failed",
+                error=exc,
+            )
+            self.manifest.record_stage_metrics(run_id, name, elapsed)
+            logger.warning("Step %s interrupted after %.1fs", name, elapsed)
+            raise
         except Exception as exc:
             elapsed = time.perf_counter() - t0
             if not uses_worker_batches:
@@ -738,6 +775,17 @@ class JobEngine:
         return list(self.config.init_phases or DEFAULT_INIT_PHASES)
 
     def _missing_init_steps(self, run_id: str) -> list[str]:
+        phases = self._init_phases_list(run_id)
+        batches = self.manifest.get_batches_for_run(run_id)
+        return missing_steps_within_phase_order(phases, batches)
+
+    def _all_missing_init_steps(self, run_id: str) -> list[str]:
+        """Every never-started step, ignoring phase order.
+
+        The gate that refuses to call a run successful must see the whole
+        remainder; only the gate that decides what to *start* next respects
+        phase order.
+        """
         phases = self._init_phases_list(run_id)
         batches = self.manifest.get_batches_for_run(run_id)
         return missing_steps(phases, batches)
@@ -832,7 +880,14 @@ class JobEngine:
         """
         if status == "pending":
             return status, []
-        missing = self._missing_run_steps(run_id)
+        # The whole remainder, not the phase-ordered slice a retry may start.
+        # "I am not allowed to run this yet" and "this never ran" are different
+        # claims, and only the second one decides whether the run succeeded.
+        missing = (
+            self._all_missing_init_steps(run_id)
+            if self._is_init_run(run_id)
+            else self._missing_run_steps(run_id)
+        )
         return ("failed" if missing else status), missing
 
     def _run_finalize_steps(
@@ -875,7 +930,7 @@ class JobEngine:
             return "failed"
         if counts.get("warning"):
             return "warning"
-        if counts.get("running") or counts.get("stale"):
+        if counts.get("running") or counts.get("stale") or counts.get(QUEUED_BATCH_STATUS):
             return "pending"
         return "failed"
 
@@ -978,72 +1033,87 @@ class JobEngine:
         # retry used to skip reconcile (early-return before start_run), so
         # crashed valuation/backfill runs sat until the next daily job.
         self._reconcile_orphans()
-        with run_lock(self.config.meta_root, run_id):
-            retry_passes = 0
-            total_retried = 0
-            all_results: list[dict[str, Any]] = []
-            all_missing_steps: list[str] = []
-            total_stale_marked = 0
-            total_timeout = {"running_to_stale": 0, "stale_to_failed": 0}
-            automatic_batch_ids: set[str] | None = None
-            while True:
-                result = self._retry_run_locked(
+        with self._run_lock(run_id):
+            try:
+                return self._retry_run_passes(run_id, trade_date, auto_finalize=auto_finalize)
+            except (KeyboardInterrupt, SystemExit):
+                # `cne run retry` reaches this through an early return in
+                # `run_job`, before the try/finally that closes an interrupted
+                # run. Without this, Ctrl-C during a retry left exactly the
+                # state the retry existed to clear.
+                self.manifest.interrupt_run(
                     run_id,
-                    trade_date,
-                    auto_finalize=auto_finalize,
-                    retry_batch_ids=automatic_batch_ids,
+                    error_message="interrupted by operator",
                 )
-                total_retried += int(result.get("retried", 0))
-                all_results.extend(result.get("results", []))
-                all_missing_steps.extend(result.get("missing_steps", []))
-                total_stale_marked += int(result.get("stale_marked_failed", 0))
-                for key in total_timeout:
-                    total_timeout[key] += int(result.get("batch_timeout", {}).get(key, 0))
-                if result.get("retried", 0):
-                    retry_passes += 1
-                if result["status"] not in {"failed", "warning"}:
-                    break
+                raise
 
-                remaining = self._retryable_batches_with_worker_budget(run_id)
-                automatic_batch_ids = {
-                    batch["batch_id"]
-                    for batch in remaining
-                    if self._resolve_batch_step(batch)[1].requires_workers
-                    and _is_transient_retry_error(batch["error_message"])
-                }
-                if not automatic_batch_ids:
-                    break
-                time.sleep(self.config.retry_backoff_seconds)
+    def _retry_run_passes(
+        self, run_id: str, trade_date: date, *, auto_finalize: bool
+    ) -> dict[str, Any]:
+        """Drive retry passes until nothing transient is left. Lock held."""
+        retry_passes = 0
+        total_retried = 0
+        all_results: list[dict[str, Any]] = []
+        all_missing_steps: list[str] = []
+        total_stale_marked = 0
+        total_timeout = {"running_to_stale": 0, "stale_to_failed": 0}
+        automatic_batch_ids: set[str] | None = None
+        while True:
+            result = self._retry_run_locked(
+                run_id,
+                trade_date,
+                auto_finalize=auto_finalize,
+                retry_batch_ids=automatic_batch_ids,
+            )
+            total_retried += int(result.get("retried", 0))
+            all_results.extend(result.get("results", []))
+            all_missing_steps.extend(result.get("missing_steps", []))
+            total_stale_marked += int(result.get("stale_marked_failed", 0))
+            for key in total_timeout:
+                total_timeout[key] += int(result.get("batch_timeout", {}).get(key, 0))
+            if result.get("retried", 0):
+                retry_passes += 1
+            if result["status"] not in {"failed", "warning"}:
+                break
 
-            result["retried"] = total_retried
-            result["retry_passes"] = retry_passes
-            result["results"] = all_results
-            result["missing_steps"] = list(dict.fromkeys(all_missing_steps))
-            result["stale_marked_failed"] = total_stale_marked
-            result["batch_timeout"] = total_timeout
-            result["retry_exhausted"] = self._exhausted_worker_retry_count(run_id)
-            if result.get("status") != "pending":
-                public_status = self._overall_status(run_id, str(result.get("status")))
-                # Dataset receipts describe the steps that ran. They cannot see
-                # the ones that never started, so the run's own plan has the
-                # last word over an aggregate that looks clean.
-                public_status, unresolved = self._gate_on_missing_steps(run_id, public_status)
-                # `_retry_run_locked` historically closes a terminal run with
-                # batch status ``warning``. Reconcile that legacy spelling
-                # after all retry/finalize receipts have been written.
-                if public_status != result.get("status"):
-                    self.manifest.finish_run(
-                        run_id,
-                        public_status,
-                        error_message=(
-                            f"planned steps never ran: {', '.join(unresolved)}"
-                            if unresolved
-                            else None
-                        ),
-                    )
-                result["status"] = public_status
-                result["missing_steps_unresolved"] = unresolved
-            return result
+            remaining = self._retryable_batches_with_worker_budget(run_id)
+            automatic_batch_ids = {
+                batch["batch_id"]
+                for batch in remaining
+                if self._resolve_batch_step(batch)[1].requires_workers
+                and _is_transient_retry_error(batch["error_message"])
+            }
+            if not automatic_batch_ids:
+                break
+            time.sleep(self.config.retry_backoff_seconds)
+
+        result["retried"] = total_retried
+        result["retry_passes"] = retry_passes
+        result["results"] = all_results
+        result["missing_steps"] = list(dict.fromkeys(all_missing_steps))
+        result["stale_marked_failed"] = total_stale_marked
+        result["batch_timeout"] = total_timeout
+        result["retry_exhausted"] = self._exhausted_worker_retry_count(run_id)
+        if result.get("status") != "pending":
+            public_status = self._overall_status(run_id, str(result.get("status")))
+            # Dataset receipts describe the steps that ran. They cannot see
+            # the ones that never started, so the run's own plan has the
+            # last word over an aggregate that looks clean.
+            public_status, unresolved = self._gate_on_missing_steps(run_id, public_status)
+            # `_retry_run_locked` historically closes a terminal run with
+            # batch status ``warning``. Reconcile that legacy spelling
+            # after all retry/finalize receipts have been written.
+            if public_status != result.get("status"):
+                self.manifest.finish_run(
+                    run_id,
+                    public_status,
+                    error_message=(
+                        f"planned steps never ran: {', '.join(unresolved)}" if unresolved else None
+                    ),
+                )
+            result["status"] = public_status
+            result["missing_steps_unresolved"] = unresolved
+        return result
 
     def _retry_run_locked(
         self,
@@ -1090,7 +1160,11 @@ class JobEngine:
             failed = [batch for batch in failed if batch["batch_id"] in retry_batch_ids]
         # A targeted pass retries the batch ids it was given and nothing else;
         # the broad pass is the one that owns the rest of the plan.
-        missing = self._missing_run_steps(run_id) if retry_batch_ids is None else []
+        missing = (
+            self._missing_run_steps(run_id)
+            if retry_batch_ids is None and not (self._is_init_run(run_id) and not auto_finalize)
+            else []
+        )
 
         if not failed and not missing:
             incomplete = self.manifest.incomplete_batch_count(run_id)
@@ -1374,30 +1448,91 @@ class JobEngine:
         if run["job_name"] != "init":
             raise RuntimeError(f"Run {run_id} is not an init job (job_name={run['job_name']})")
 
+        with self._run_lock(run_id):
+            try:
+                return self._resume_init_locked(
+                    trade_date,
+                    run_id=run_id,
+                    keep_going=keep_going,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                self.manifest.interrupt_run(
+                    run_id,
+                    error_message="interrupted by operator",
+                )
+                raise
+
+    def _resume_init_locked(
+        self,
+        trade_date: date,
+        *,
+        run_id: str,
+        keep_going: bool,
+    ) -> dict[str, Any]:
+        """Resume an init while its run-id lock is already held."""
+
         phases = self._init_phases_list(run_id)
         meta = self.manifest.get_run_metadata(run_id)
         # Pick the original run's history window back up unless this invocation
         # named one, so the resumed phases fetch the same depth as the ones that
         # already ran rather than a lake with two different floors.
         recorded = meta.get("history_start")
-        if recorded and not getattr(self.config, "_backfill_start", None):
+        requested = getattr(self.config, "_backfill_start", None)
+        if recorded and not requested:
             self.config._backfill_start = date.fromisoformat(str(recorded))
+            requested = self.config._backfill_start
+
+        def _mark_resumed(current: dict[str, Any]) -> None:
+            current["resumed_at"] = shanghai_today().isoformat()
+            # A caller-provided history floor is an intentional scope change.
+            # Persist it so another interruption resumes the same scope rather
+            # than reverting to the run's original floor.
+            if requested:
+                current["history_start"] = requested.isoformat()
+
         meta = self.manifest.mutate_run_metadata(
             run_id,
-            lambda current: current.update({"resumed_at": shanghai_today().isoformat()}),
+            _mark_resumed,
         )
 
         logger.info("Resuming init run %s", run_id)
         retry_result = self._retry_run(run_id, trade_date, auto_finalize=False)
 
         batches = self.manifest.get_batches_for_run(run_id)
-        to_run = phases_never_started(phases, batches)
+        to_run = pending_phases(phases, batches)
         phase_results: list[dict[str, Any]] = list(meta.get("phase_results") or [])
         total_read = retry_result.get("rows_read", 0)
         total_written = retry_result.get("rows_written", 0)
 
         for phase in to_run:
-            steps = INIT_PHASE_STEPS.get(phase, [])
+            batches = self.manifest.get_batches_for_run(run_id)
+            steps = [
+                step
+                for step in INIT_PHASE_STEPS.get(phase, [])
+                if not step_succeeded(batches, step)
+            ]
+            # `_retry_run` has just retried every failed/stale batch. If any
+            # such attempt is still unresolved, this phase remains the gate;
+            # only never-started siblings are safe to launch here.
+            unresolved_started = {
+                step
+                for step in steps
+                if any(
+                    batch["dataset"] == step and batch["status"] not in RESOLVED_BATCH_STATUSES
+                    for batch in batches
+                )
+            }
+            if unresolved_started:
+                logger.error(
+                    "Init phase %s is still incomplete after retry (%s); not starting later phases",
+                    phase,
+                    ", ".join(sorted(unresolved_started)),
+                )
+                if not keep_going:
+                    break
+                steps = [step for step in steps if step not in unresolved_started]
+            if not steps:
+                continue
             backfill = phase_backfill(phase)
             logger.info("Init resume phase %s: %s", phase, steps)
             result = self.run_job(
@@ -1412,6 +1547,12 @@ class JobEngine:
             total_read += result.get("rows_read", 0)
             total_written += result.get("rows_written", 0)
             if result["status"] == "failed" and not keep_going:
+                break
+            batches = self.manifest.get_batches_for_run(run_id)
+            if (
+                not all(step_succeeded(batches, step) for step in INIT_PHASE_STEPS.get(phase, []))
+                and not keep_going
+            ):
                 break
 
         batches = self.manifest.get_batches_for_run(run_id)
@@ -1487,9 +1628,17 @@ class JobEngine:
         if history_start:
             metadata["history_start"] = history_start.isoformat()
         run_id = self.manifest.start_run("init", metadata)
-        return self._execute_init_phases(
-            run_id,
-            trade_date,
-            phases,
-            keep_going=keep_going,
-        )
+        with self._run_lock(run_id):
+            try:
+                return self._execute_init_phases(
+                    run_id,
+                    trade_date,
+                    phases,
+                    keep_going=keep_going,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                self.manifest.interrupt_run(
+                    run_id,
+                    error_message="interrupted by operator",
+                )
+                raise

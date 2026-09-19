@@ -97,6 +97,114 @@ def test_init_manifest_final_status_reflects_failed_phase(cfg, monkeypatch):
     assert engine.manifest.get_run(result["run_id"])["status"] == "failed"
 
 
+def test_init_parent_run_stays_locked_between_phases(cfg, monkeypatch):
+    """A long first phase must not make the parent look orphaned to phase two."""
+    init_data_layout(cfg)
+    cfg.batch_stale_seconds = 0
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    observed_statuses: list[str] = []
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            observed_statuses.append(engine.manifest.get_run(run_id)["status"])
+            return {"rows_read": 1, "rows_written": 1}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+
+    engine = JobEngine(cfg)
+    result = engine.run_init_phases(date(2024, 6, 28))
+
+    assert result["status"] == "success"
+    assert observed_statuses
+    assert set(observed_statuses) == {"running"}
+
+
+def test_interrupt_closes_active_init_batch_and_can_resume_immediately(cfg, monkeypatch):
+    init_data_layout(cfg)
+    cfg.init_phases = ["phase2a_corporate_actions"]
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    attempts = 0
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise KeyboardInterrupt
+            return {"rows_read": 1, "rows_written": 1}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+    engine = JobEngine(cfg)
+
+    with pytest.raises(KeyboardInterrupt):
+        engine.run_init_phases(date(2024, 6, 28))
+
+    interrupted = engine.manifest.latest_incomplete_init_run()
+    assert interrupted is not None
+    assert interrupted["status"] == "failed"
+    batches = engine.manifest.get_batches_for_run(interrupted["run_id"])
+    assert [batch["status"] for batch in batches] == ["failed"]
+    assert "interrupted" in batches[0]["error_message"]
+
+    resumed = engine.run_init_phases(
+        date(2024, 6, 28), resume=True, resume_run_id=interrupted["run_id"]
+    )
+    assert resumed["status"] == "success"
+    assert attempts == 2
+
+
+def test_resume_does_not_advance_past_a_still_failing_phase(cfg, monkeypatch):
+    init_data_layout(cfg)
+    cfg.init_phases = [
+        "phase2a_corporate_actions",
+        "phase3_index_and_status",
+        "phase4_finalize",
+    ]
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run(
+        "init",
+        {"phases": cfg.init_phases, "trade_date": "2024-06-28"},
+    )
+    manifest.start_batch(run_id, "failed-actions", "corporate_actions", "corporate_actions")
+    manifest.finish_batch(
+        run_id,
+        "failed-actions",
+        "failed",
+        error_message="interrupted",
+    )
+    manifest.finish_run(run_id, "failed", error_message="interrupted")
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    calls: list[str] = []
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, current_run_id, context):
+            calls.append(name)
+            if name == "corporate_actions":
+                raise RuntimeError("still unavailable")
+            return {"rows_read": 1, "rows_written": 1}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+    result = JobEngine(cfg).run_init_phases(date(2024, 6, 28), resume=True, resume_run_id=run_id)
+
+    assert result["status"] == "failed"
+    assert calls == ["corporate_actions"]
+
+
 def test_retry_runs_missing_init_steps(cfg):
     init_data_layout(cfg)
     manifest = Manifest(cfg.manifest_path)
@@ -222,7 +330,10 @@ def test_a_killed_init_is_resumed_not_refused(tmp_path, monkeypatch):
     seen: dict = {}
 
     def _capture(self, trade_date=None, *, resume=False, resume_run_id=None, keep_going=False):
-        seen.update(resume=resume, resume_run_id=resume_run_id)
+        seen.update(
+            resume=resume,
+            resume_run_id=resume_run_id,
+        )
         return {"run_id": resume_run_id, "status": "success", "phases": []}
 
     monkeypatch.setattr(setup_cmds.JobEngine, "run_init_phases", _capture)
@@ -287,3 +398,65 @@ def test_a_live_init_is_still_refused(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "已经有一个 init 在跑" in result.output
+
+
+def test_retry_does_not_advance_an_init_past_an_unresolved_phase(cfg, monkeypatch):
+    """`cne init` has refused to cross an unresolved phase boundary since it
+    learned to resume. `cne run retry --run-id <init run>` reached the same
+    run through a different door and used only the dependency graph, which is
+    a weaker claim: nothing declares that index_bars needs corporate_actions,
+    so retry advanced past a phase resume would have stopped at."""
+    init_data_layout(cfg)
+    cfg.init_phases = ["phase2a_corporate_actions", "phase3_index_and_status"]
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    ran: list[str] = []
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            ran.append(name)
+            return {"rows_read": 1, "rows_written": 1}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+
+    engine = JobEngine(cfg)
+    manifest = engine.manifest
+    run_id = manifest.start_run(
+        "init",
+        {"trade_date": "2024-06-28", "phases": cfg.init_phases},
+    )
+    # Phase 2a started and is still owed; phase 3 never started at all.
+    manifest.queue_batches(
+        run_id,
+        "corporate_actions",
+        "corporate_actions",
+        [("ca-0", ["600519.SH"], "2024-06-28", "2024-06-28")],
+    )
+
+    missing = engine._missing_init_steps(run_id)
+    assert "index_bars" not in missing, "a later phase must wait for an unresolved earlier one"
+
+    # The run is still not successful, and the gate says why using the whole
+    # remainder rather than the phase-ordered slice.
+    _, unresolved = engine._gate_on_missing_steps(run_id, "success")
+    assert "index_bars" in unresolved
+
+
+def test_a_fully_successful_phase_does_not_block_the_next_one(cfg, monkeypatch):
+    init_data_layout(cfg)
+    cfg.init_phases = ["phase2a_corporate_actions", "phase3_index_and_status"]
+
+    engine = JobEngine(cfg)
+    manifest = engine.manifest
+    run_id = manifest.start_run(
+        "init",
+        {"trade_date": "2024-06-28", "phases": cfg.init_phases},
+    )
+    manifest.start_batch(run_id, "ca-0", "corporate_actions", "corporate_actions")
+    manifest.finish_batch(run_id, "ca-0", "success", rows_read=1, rows_written=1)
+
+    assert "index_bars" in engine._missing_init_steps(run_id)

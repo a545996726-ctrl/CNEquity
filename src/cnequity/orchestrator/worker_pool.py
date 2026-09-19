@@ -585,6 +585,19 @@ def fetch_daily_bars_parallel(
             BACKFILL_START.isoformat(),
         )
 
+    # Write the plan down before the first worker starts. Until this existed,
+    # a batch that was cancelled or never reached left no row at all, and every
+    # gate downstream reads the ledger: `compact` saw "nothing unfinished" and
+    # published two batches of fifty-two, `step_succeeded` called the step done
+    # and `cne status` called the dataset fresh. A queued row is what turns
+    # those answers from attendance into coverage.
+    manifest.queue_batches(
+        run_id,
+        dataset,
+        dataset,
+        [(batch[0], batch[1], batch[2].isoformat(), batch[3].isoformat()) for batch in batches],
+    )
+
     if daily_workers <= 1 or len(batches) == 1:
         had_error = False
         for batch_id, batch_symbols, batch_start, batch_end in batches:
@@ -654,27 +667,39 @@ def fetch_daily_bars_parallel(
         had_error = False
         try:
             with ThreadPoolExecutor(max_workers=min(daily_workers, len(pending))) as pool:
-                futures = {
-                    pool.submit(_run_batch, batch[0], batch[1], batch[2], batch[3]): batch[0]
-                    for batch in pending.values()
-                }
-                for fut in as_completed(futures):
-                    batch_id = futures[fut]
-                    batch = pending.pop(batch_id, None)
-                    try:
-                        result = fut.result()
-                        total_read += result["rows_read"]
-                        total_written += result["rows_written"]
-                        _merge_metrics(result)
-                        _progress(batch[1] if batch else [])
-                    except Exception as exc:
-                        had_error = True
-                        failed_scope = (
-                            _failed_symbols_for_error(exc, batch[1]) if batch is not None else []
+                futures: dict = {}
+                try:
+                    for batch in pending.values():
+                        futures[pool.submit(_run_batch, batch[0], batch[1], batch[2], batch[3])] = (
+                            batch[0]
                         )
-                        failed_symbols.extend(failed_scope)
-                        _progress(batch[1] if batch else [], failed_scope)
-                        logger.warning("%s batch %s failed: %s", dataset, batch_id, exc)
+                    for fut in as_completed(futures):
+                        batch_id = futures[fut]
+                        batch = pending.pop(batch_id, None)
+                        try:
+                            result = fut.result()
+                            total_read += result["rows_read"]
+                            total_written += result["rows_written"]
+                            _merge_metrics(result)
+                            _progress(batch[1] if batch else [])
+                        except Exception as exc:
+                            had_error = True
+                            failed_scope = (
+                                _failed_symbols_for_error(exc, batch[1])
+                                if batch is not None
+                                else []
+                            )
+                            failed_symbols.extend(failed_scope)
+                            _progress(batch[1] if batch else [], failed_scope)
+                            logger.warning("%s batch %s failed: %s", dataset, batch_id, exc)
+                except (KeyboardInterrupt, SystemExit):
+                    for future in futures:
+                        future.cancel()
+                    # Do not return control while in-flight workers can still
+                    # write staging. Cancel queued work, then wait only for the
+                    # lanes that had already entered their source call.
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    raise
         except Exception as exc:
             # A thread-pool construction failure is unusual (the normal batch
             # exceptions are handled above), but serially draining the pending
@@ -716,39 +741,45 @@ def fetch_daily_bars_parallel(
     try:
         futures: dict = {}
         with ProcessPoolExecutor(max_workers=min(daily_workers, len(pending))) as pool:
-            for batch in pending.values():
-                futures[pool.submit(_worker_fetch_batch, _task_for(batch))] = batch[0]
-            for fut in as_completed(futures):
-                batch_id = futures[fut]
-                try:
-                    # ``as_completed`` only yields futures that are already
-                    # done, so passing a timeout to ``result`` can never
-                    # enforce a wall-clock limit. Liveness is tracked by the
-                    # manifest heartbeat and reconciled by the engine/retry
-                    # path; keeping a fake timeout here made the failure mode
-                    # look protected when a worker was actually hung.
-                    result = fut.result()
-                    total_read += result["rows_read"]
-                    total_written += result["rows_written"]
-                    _merge_metrics(result)
-                    batch = pending.pop(batch_id, None)
-                    _progress(batch[1] if batch else [])
-                except BrokenProcessPool:
-                    # This one poisoned the pool. Leave it (and everything still
-                    # pending) for the serial retry below rather than recording it
-                    # as a genuine batch failure — BrokenProcessPool is an
-                    # Exception subclass, so it must be caught before the generic
-                    # handler or the fallback never runs.
-                    raise
-                except Exception as exc:
-                    had_error = True
-                    batch = pending.pop(batch_id, None)
-                    failed_scope = (
-                        _failed_symbols_for_error(exc, batch[1]) if batch is not None else []
-                    )
-                    failed_symbols.extend(failed_scope)
-                    _progress(batch[1] if batch else [], failed_scope)
-                    logger.warning("%s batch %s failed: %s", dataset, batch_id, exc)
+            try:
+                for batch in pending.values():
+                    futures[pool.submit(_worker_fetch_batch, _task_for(batch))] = batch[0]
+                for fut in as_completed(futures):
+                    batch_id = futures[fut]
+                    try:
+                        # ``as_completed`` only yields futures that are already
+                        # done, so passing a timeout to ``result`` can never
+                        # enforce a wall-clock limit. Liveness is tracked by the
+                        # manifest heartbeat and reconciled by the engine/retry
+                        # path; keeping a fake timeout here made the failure mode
+                        # look protected when a worker was actually hung.
+                        result = fut.result()
+                        total_read += result["rows_read"]
+                        total_written += result["rows_written"]
+                        _merge_metrics(result)
+                        batch = pending.pop(batch_id, None)
+                        _progress(batch[1] if batch else [])
+                    except BrokenProcessPool:
+                        # This one poisoned the pool. Leave it (and everything still
+                        # pending) for the serial retry below rather than recording it
+                        # as a genuine batch failure — BrokenProcessPool is an
+                        # Exception subclass, so it must be caught before the generic
+                        # handler or the fallback never runs.
+                        raise
+                    except Exception as exc:
+                        had_error = True
+                        batch = pending.pop(batch_id, None)
+                        failed_scope = (
+                            _failed_symbols_for_error(exc, batch[1]) if batch is not None else []
+                        )
+                        failed_symbols.extend(failed_scope)
+                        _progress(batch[1] if batch else [], failed_scope)
+                        logger.warning("%s batch %s failed: %s", dataset, batch_id, exc)
+            except (KeyboardInterrupt, SystemExit):
+                for future in futures:
+                    future.cancel()
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
     except BrokenProcessPool:
         # The pool died mid-run. Whatever is still pending never got a parent
         # verdict — retry in-process. A child may already have finish_batch(success)

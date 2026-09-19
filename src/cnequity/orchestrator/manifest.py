@@ -34,6 +34,36 @@ DATASET_RESULT_STATUSES = frozenset(
 )
 DATASET_RESULT_CRITICALITIES = frozenset({"core", "research", "advisory"})
 
+# A batch that a step has planned but no worker has picked up yet.
+#
+# Without it, the ledger could only describe work that had already started, so
+# a sweep interrupted after two of fifty-two batches left fifty rows that never
+# existed — and every gate reads "no unfinished batches" from that absence.
+# `compact` published the two, `step_succeeded` called the step done, and the
+# partial dataset was declared fresh. Registering the plan before the first
+# worker runs is what makes those gates count coverage rather than attendance.
+#
+# It is deliberately *not* ``running``: a queued batch has no worker, so a
+# heartbeat timeout would be measuring a wait rather than a hang.
+QUEUED_BATCH_STATUS = "queued"
+
+# Every status a batch can hold while it still owes work. Reconcile and the
+# operator-interrupt path close all of them; none may pass a compaction gate.
+ACTIVE_BATCH_STATUSES = ("running", "stale", QUEUED_BATCH_STATUS)
+
+# Statuses a retry may pick a batch up from. ``queued`` belongs here because
+# such a row carries its full symbol list and window: it is work this run
+# planned and can still perform, not a failure needing diagnosis.
+RETRYABLE_BATCH_STATUSES = ("failed", "warning", QUEUED_BATCH_STATUS)
+
+
+def _sql_tuple(values: tuple[str, ...]) -> str:
+    """Render a module-constant status tuple for a SQL ``IN`` clause.
+
+    Only ever called with the frozen tuples above — never with caller input.
+    """
+    return "(" + ", ".join(f"'{value}'" for value in values) + ")"
+
 
 @dataclass
 class RunRecord:
@@ -247,6 +277,12 @@ class Manifest:
                 return datetime.fromisoformat(raw)
         return None
 
+    @staticmethod
+    def _latest_timestamp(row: sqlite3.Row, fields: tuple[str, ...]) -> datetime | None:
+        """The newest of *fields* on one row, ignoring the ones not set."""
+        stamps = [datetime.fromisoformat(row[field]) for field in fields if row[field]]
+        return max(stamps) if stamps else None
+
     def start_run(
         self,
         job_name: str,
@@ -301,6 +337,55 @@ class Manifest:
                 """,
                 (status, _utcnow(), rows_read, rows_written, error_message, run_id),
             )
+
+    def queue_batches(
+        self,
+        run_id: str,
+        task_id: str,
+        dataset: str,
+        batches: list[tuple[str, list[str], str | None, str | None]],
+    ) -> int:
+        """Register planned batches before any worker starts one.
+
+        The row is the plan, written while the parent still knows it. A batch
+        that is interrupted, cancelled or never reached therefore leaves
+        evidence behind, which is what lets the compaction gate and the init
+        phase gate judge a step on the work it owed rather than on the work
+        that happened to start.
+
+        Existing rows are left untouched: a resumed run must not demote a
+        batch that already succeeded, nor lose the error a failed one carries.
+        """
+        if not batches:
+            return 0
+        now = _utcnow()
+        rows = [
+            (
+                run_id,
+                batch_id,
+                task_id,
+                dataset,
+                QUEUED_BATCH_STATUS,
+                json.dumps(symbols or []),
+                window_start,
+                window_end,
+                now,
+            )
+            for batch_id, symbols, window_start, window_end in batches
+        ]
+        with self._connect() as conn:
+            cur = conn.executemany(
+                """
+                INSERT INTO ingestion_batches (
+                    run_id, batch_id, task_id, dataset, status, symbols_json,
+                    window_start, window_end, started_at, retry_count,
+                    request_retry_count, blocks_compaction
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1)
+                ON CONFLICT(run_id, batch_id) DO NOTHING
+                """,
+                rows,
+            )
+            return int(cur.rowcount)
 
     def start_batch(
         self,
@@ -436,6 +521,38 @@ class Manifest:
                     batch_id,
                 ),
             )
+
+    def interrupt_run(self, run_id: str, *, error_message: str) -> int:
+        """Close an interrupted run and make every active batch retryable now.
+
+        This is deliberately independent of heartbeat age.  A caught operator
+        interrupt is direct evidence that the owner stopped; leaving those
+        rows ``running`` would make the next invocation wait for the normal
+        stale timeout even though no worker can finish them.
+
+        Queued batches are closed for the same reason: the process that would
+        have run them is the one exiting.
+        """
+        now = _utcnow()
+        with self._connect() as conn:
+            batches = conn.execute(
+                f"""
+                UPDATE ingestion_batches
+                SET status = 'failed', finished_at = ?, error_message = ?,
+                    blocks_compaction = 1
+                WHERE run_id = ? AND status IN {_sql_tuple(ACTIVE_BATCH_STATUSES)}
+                """,
+                (now, error_message, run_id),
+            )
+            conn.execute(
+                """
+                UPDATE ingestion_runs
+                SET status = 'failed', finished_at = ?, error_message = ?
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (now, error_message, run_id),
+            )
+            return int(batches.rowcount)
 
     def record_batch_telemetry(
         self,
@@ -604,7 +721,7 @@ class Manifest:
             cur = conn.execute(
                 f"""
                 SELECT * FROM ingestion_batches
-                WHERE run_id = ? AND status IN ('failed', 'warning')
+                WHERE run_id = ? AND status IN {_sql_tuple(RETRYABLE_BATCH_STATUSES)}
                 {retry_clause}
                 ORDER BY started_at, batch_id
                 """,
@@ -750,17 +867,30 @@ class Manifest:
         }
 
     def _run_activity_at(self, conn: sqlite3.Connection, run_id: str, started_at: str) -> datetime:
-        """Latest evidence the run is still alive: batch heartbeat or run start."""
+        """Latest evidence the run's owner was alive: any batch timestamp.
+
+        Every batch counts, not just the unfinished ones. A phase that ends
+        cleanly leaves nothing ``running``, so a query restricted to those
+        reported the run's own start time as its last sign of life — and a
+        phase that took longer than the grace window then looked like a corpse
+        the moment it succeeded. `cne init` reconciled itself between phases
+        for exactly that reason: 201 seconds of `instruments`, then a 60-second
+        deadline measured from a timestamp 201 seconds old.
+
+        Finishing a batch is as much proof of a live owner as starting one.
+        """
         activity = datetime.fromisoformat(started_at)
         cur = conn.execute(
             """
-            SELECT heartbeat_at, started_at FROM ingestion_batches
-            WHERE run_id = ? AND status IN ('running', 'stale')
+            SELECT heartbeat_at, started_at, finished_at FROM ingestion_batches
+            WHERE run_id = ?
             """,
             (run_id,),
         )
         for row in cur:
-            batch_activity = self._batch_activity_at(row)
+            batch_activity = self._latest_timestamp(
+                row, ("heartbeat_at", "started_at", "finished_at")
+            )
             if batch_activity is not None and batch_activity > activity:
                 activity = batch_activity
         return activity
@@ -843,18 +973,19 @@ class Manifest:
                     continue
                 runs_closed += 1
                 batch_cur = conn.execute(
-                    """
+                    f"""
                     SELECT batch_id FROM ingestion_batches
-                    WHERE run_id = ? AND status IN ('running', 'stale')
+                    WHERE run_id = ? AND status IN {_sql_tuple(ACTIVE_BATCH_STATUSES)}
                     """,
                     (run_id,),
                 )
                 for batch_row in batch_cur:
                     bcur = conn.execute(
-                        """
+                        f"""
                         UPDATE ingestion_batches
                         SET status = 'failed', finished_at = ?, error_message = ?
-                        WHERE run_id = ? AND batch_id = ? AND status IN ('running', 'stale')
+                        WHERE run_id = ? AND batch_id = ?
+                          AND status IN {_sql_tuple(ACTIVE_BATCH_STATUSES)}
                         """,
                         (now, error_message, run_id, batch_row["batch_id"]),
                     )
@@ -950,6 +1081,19 @@ class Manifest:
         query += " ORDER BY finished_at, run_id, batch_id"
         with self._connect() as conn:
             return conn.execute(query, params).fetchall()
+
+    def latest_successful_batch(self, dataset: str) -> sqlite3.Row | None:
+        """Return the newest durable row-count receipt for one dataset."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM ingestion_batches
+                WHERE dataset = ? AND status = 'success'
+                ORDER BY finished_at DESC, started_at DESC, run_id DESC, batch_id DESC
+                LIMIT 1
+                """,
+                (dataset,),
+            ).fetchone()
 
     def get_batch(self, run_id: str, batch_id: str) -> sqlite3.Row | None:
         with self._connect() as conn:

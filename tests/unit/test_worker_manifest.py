@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import sys
+from concurrent.futures import Future
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -60,6 +61,116 @@ def test_worker_pool_records_symbol_batches(worker_config, monkeypatch):
         "2024-06-27_2024-06-28-batch-0",
         "2024-06-27_2024-06-28-batch-1",
     }
+
+
+def test_thread_pool_interrupt_cancels_queued_batches(worker_config, monkeypatch):
+    init_data_layout(worker_config)
+    worker_config.workers = 2
+    worker_config.tdx_daily_workers = 2
+    worker_config.tdx_daily_backend = "thread"
+    manifest = Manifest(worker_config.manifest_path)
+    run_id = manifest.start_run("test")
+
+    pools: list[object] = []
+
+    class _InterruptPool:
+        def __init__(self, *args, **kwargs):
+            self.futures: list[Future] = []
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+            pools.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, fn, *args):
+            future = Future()
+            if not self.futures:
+                future.set_exception(KeyboardInterrupt())
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+            if cancel_futures:
+                for future in self.futures:
+                    future.cancel()
+
+    monkeypatch.setattr(
+        "cnequity.orchestrator.worker_pool.ThreadPoolExecutor",
+        _InterruptPool,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        fetch_daily_bars_parallel(
+            worker_config,
+            ["600519.SH", "000001.SZ", "600000.SH"],
+            date(2024, 6, 27),
+            date(2024, 6, 27),
+            run_id,
+            "daily_bars",
+        )
+
+    pool = pools[0]
+    assert (True, True) in pool.shutdown_calls
+    assert all(future.cancelled() for future in pool.futures[1:])
+
+
+def test_thread_pool_interrupt_during_submission_cancels_submitted_batches(
+    worker_config, monkeypatch
+):
+    init_data_layout(worker_config)
+    worker_config.workers = 2
+    worker_config.tdx_daily_workers = 2
+    worker_config.tdx_daily_backend = "thread"
+    run_id = Manifest(worker_config.manifest_path).start_run("test")
+    pools: list[object] = []
+
+    class _SubmissionInterruptPool:
+        def __init__(self, *args, **kwargs):
+            self.futures: list[Future] = []
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+            pools.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, fn, *args):
+            if self.futures:
+                raise KeyboardInterrupt
+            future = Future()
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+            if cancel_futures:
+                for future in self.futures:
+                    future.cancel()
+
+    monkeypatch.setattr(
+        "cnequity.orchestrator.worker_pool.ThreadPoolExecutor",
+        _SubmissionInterruptPool,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        fetch_daily_bars_parallel(
+            worker_config,
+            ["600519.SH", "000001.SZ", "600000.SH"],
+            date(2024, 6, 27),
+            date(2024, 6, 27),
+            run_id,
+            "daily_bars",
+        )
+
+    pool = pools[0]
+    assert (True, True) in pool.shutdown_calls
+    assert pool.futures[0].cancelled()
 
 
 def test_programmatic_config_stays_in_process_with_effective_tdx_settings(tmp_path, monkeypatch):
@@ -782,3 +893,72 @@ def test_retry_requeues_stale_running_batch(worker_config, monkeypatch):
         worker_config.curated_root / "daily_bars" / "trade_date=2024-06-28" / "part-merged.parquet"
     )
     assert curated.exists()
+
+
+def test_the_plan_is_written_down_before_any_worker_starts(worker_config, monkeypatch):
+    """Cancelled work must leave evidence.
+
+    Until the pool registered its plan, a batch that was cancelled or never
+    reached had no row at all — and every gate downstream reads the ledger.
+    `compact` saw "nothing unfinished" and published two batches of fifty-two;
+    `step_succeeded` called the step done; `cne status` called the dataset
+    fresh. The queued row is what turns those answers from attendance into
+    coverage.
+    """
+    init_data_layout(worker_config)
+    worker_config.workers = 2
+    worker_config.tdx_daily_workers = 2
+    worker_config.tdx_daily_backend = "thread"
+    manifest = Manifest(worker_config.manifest_path)
+    run_id = manifest.start_run("test")
+
+    class _InterruptPool:
+        def __init__(self, *args, **kwargs):
+            self.futures: list[Future] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, fn, *args):
+            future = Future()
+            if not self.futures:
+                future.set_exception(KeyboardInterrupt())
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            if cancel_futures:
+                for future in self.futures:
+                    future.cancel()
+
+    monkeypatch.setattr(
+        "cnequity.orchestrator.worker_pool.ThreadPoolExecutor",
+        _InterruptPool,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        fetch_daily_bars_parallel(
+            worker_config,
+            ["600519.SH", "000001.SZ", "600000.SH"],
+            date(2024, 6, 27),
+            date(2024, 6, 27),
+            run_id,
+            "daily_bars",
+        )
+
+    batches = manifest.get_batches_for_run(run_id)
+    assert len(batches) == 3, "every planned batch left a row, not just the started ones"
+    # Nothing ran, so the whole plan is still owed — and it blocks compaction.
+    assert manifest.incomplete_batch_counts_by_dataset(run_id) == {"daily_bars": 3}
+
+    from cnequity.orchestrator.compact_gate import compact_allowed
+
+    allowed, incomplete = compact_allowed(manifest, run_id, "daily_bars")
+    assert not allowed and incomplete == 3
+
+    from cnequity.orchestrator.init_phases import step_succeeded
+
+    assert not step_succeeded(batches, "daily_bars")

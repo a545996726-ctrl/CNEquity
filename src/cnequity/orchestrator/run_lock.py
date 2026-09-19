@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -45,6 +46,47 @@ def lock_path(meta_root: Path, run_id: str) -> Path:
 def is_run_locked(meta_root: Path, run_id: str) -> bool:
     """True when another process currently holds ``run_lock`` for *run_id*."""
     return is_locked(lock_path(meta_root, run_id))
+
+
+#: Run locks this process holds, path -> owning thread. Process-wide on
+#: purpose: the underlying file lock is, so a registry scoped to one
+#: ``JobEngine`` instance would let a second instance ask for a lock this
+#: process already holds and be told "another process holds it" — the one
+#: explanation that is certainly wrong.
+_HELD_RUN_LOCKS: dict[str, int] = {}
+_HELD_RUN_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def reentrant_run_lock(meta_root: Path, run_id: str) -> Iterator[None]:
+    """Hold *run_id*'s lock, or pass through if this thread already holds it.
+
+    `cne init` holds one run lock across every phase so the orphan reconciler
+    at the top of each phase can see that the run is alive. The phases nest
+    ordinary ``run_lock`` acquisitions inside that, and re-acquiring a held
+    lock would fail rather than queue.
+    """
+    path = str(lock_path(meta_root, run_id))
+    owner = threading.get_ident()
+    with _HELD_RUN_LOCKS_GUARD:
+        held_by = _HELD_RUN_LOCKS.get(path)
+    if held_by == owner:
+        yield
+        return
+    if held_by is not None:
+        raise RunLockError(
+            f"Run {run_id} is locked by another thread in this process "
+            f"(thread {held_by}). This is a bug in the caller, not contention: "
+            "run locks are not shared between threads."
+        )
+    with run_lock(meta_root, run_id, blocking=False):
+        with _HELD_RUN_LOCKS_GUARD:
+            _HELD_RUN_LOCKS[path] = owner
+        try:
+            yield
+        finally:
+            with _HELD_RUN_LOCKS_GUARD:
+                _HELD_RUN_LOCKS.pop(path, None)
 
 
 @contextlib.contextmanager

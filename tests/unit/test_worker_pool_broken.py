@@ -9,6 +9,7 @@ serial retry of whatever never got a verdict.
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 from datetime import date
 
@@ -110,6 +111,114 @@ def test_broken_pool_falls_back_to_serial(worker_config, monkeypatch):
     # Every symbol was recovered through the serial retry, not lost with the pool.
     assert set(serial) == {"600519.SH", "000001.SZ", "600000.SH"}
     assert result["rows_written"] == 3
+
+
+def test_process_pool_interrupt_cancels_queued_batches(worker_config, monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
+    init_data_layout(worker_config)
+    run_id = Manifest(worker_config.manifest_path).start_run("test")
+    pools: list[object] = []
+
+    class _InterruptPool:
+        def __init__(self, *args, **kwargs):
+            self.futures: list[Future] = []
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+            pools.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, fn, task):
+            future = Future()
+            if not self.futures:
+                future.set_exception(KeyboardInterrupt())
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+            if cancel_futures:
+                for future in self.futures:
+                    future.cancel()
+
+    monkeypatch.setattr(
+        "cnequity.orchestrator.worker_pool.ProcessPoolExecutor",
+        _InterruptPool,
+    )
+    monkeypatch.setattr(
+        "cnequity.orchestrator.worker_pool.as_completed",
+        lambda futures: list(futures),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        fetch_daily_bars_parallel(
+            worker_config,
+            ["600519.SH", "000001.SZ", "600000.SH"],
+            date(2024, 6, 27),
+            date(2024, 6, 27),
+            run_id,
+            "daily_bars",
+        )
+
+    pool = pools[0]
+    assert (True, True) in pool.shutdown_calls
+    assert all(future.cancelled() for future in pool.futures[1:])
+
+
+def test_process_pool_interrupt_during_submission_cancels_submitted_batches(
+    worker_config, monkeypatch
+):
+    monkeypatch.setattr("sys.platform", "linux")
+    init_data_layout(worker_config)
+    run_id = Manifest(worker_config.manifest_path).start_run("test")
+    pools: list[object] = []
+
+    class _SubmissionInterruptPool:
+        def __init__(self, *args, **kwargs):
+            self.futures: list[Future] = []
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+            pools.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, fn, task):
+            if self.futures:
+                raise KeyboardInterrupt
+            future = Future()
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+            if cancel_futures:
+                for future in self.futures:
+                    future.cancel()
+
+    monkeypatch.setattr(
+        "cnequity.orchestrator.worker_pool.ProcessPoolExecutor",
+        _SubmissionInterruptPool,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        fetch_daily_bars_parallel(
+            worker_config,
+            ["600519.SH", "000001.SZ", "600000.SH"],
+            date(2024, 6, 27),
+            date(2024, 6, 27),
+            run_id,
+            "daily_bars",
+        )
+
+    pool = pools[0]
+    assert (True, True) in pool.shutdown_calls
+    assert pool.futures[0].cancelled()
 
 
 def test_broken_pool_skips_batches_already_success(worker_config, monkeypatch):

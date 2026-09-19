@@ -81,6 +81,47 @@ def test_retry_uses_the_original_runs_trade_date_not_today(tmp_path, monkeypatch
     assert seen_dates == [date.fromisoformat(stored_date)]
 
 
+def test_interrupted_daily_run_retries_immediately_and_does_not_block_another_job(
+    tmp_path, monkeypatch
+):
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    init_data_layout(cfg)
+    engine = JobEngine(cfg)
+    attempts = 0
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise KeyboardInterrupt
+            return {"rows_read": 1, "rows_written": 1}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+    monkeypatch.setattr(engine, "_run_finalize_steps", lambda *args, **kwargs: [])
+
+    with pytest.raises(KeyboardInterrupt):
+        engine.run_job("daily:test", date(2024, 6, 28), steps=["instruments"])
+
+    interrupted = engine.manifest.latest_run("daily:test")
+    assert interrupted["status"] == "failed"
+    batch = engine.manifest.get_batches_for_run(interrupted["run_id"])[0]
+    assert batch["status"] == "failed"
+
+    retry = engine.run_job("retry", run_id=interrupted["run_id"], retry_failed_only=True)
+    assert retry["status"] == "success"
+    assert attempts == 2
+
+    other = engine.run_job("daily:other", date(2024, 6, 28), steps=["instruments"])
+    assert other["status"] == "success"
+    assert attempts == 3
+
+
 def test_retry_automatically_repeats_with_persisted_budget(tmp_path, monkeypatch):
     cfg = Config(
         data_root=tmp_path / "data",
@@ -707,3 +748,227 @@ def test_a_stalled_lock_holder_is_named_rather_than_waited_on_forever(tmp_path):
     message = str(caught.value)
     assert "alive and stuck" in message
     assert str(lock_path(cfg.meta_root, "compact")) in message
+
+
+def _one_batch_run(cfg, *, job: str = "backfill") -> tuple[Manifest, str]:
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run(job, {"trade_date": "2024-06-28"})
+    manifest.start_batch(
+        run_id,
+        "batch-live",
+        "daily_bars",
+        "daily_bars",
+        symbols=["600519.SH"],
+        window_start="2024-06-28",
+        window_end="2024-06-28",
+    )
+    return manifest, run_id
+
+
+def test_interrupting_a_retry_closes_the_run_it_was_repairing(tmp_path, monkeypatch):
+    """`cne run retry` returns from `run_job` before the try/finally that
+    closes an interrupted run, so Ctrl-C there used to leave exactly the state
+    the retry existed to clear: a run still `running` and batches its own
+    process had planned but will never execute."""
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    init_data_layout(cfg)
+    manifest, run_id = _one_batch_run(cfg, job="daily")
+    manifest.finish_batch(run_id, "batch-live", "failed", error_message="boom")
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id_, context):
+            manifest.queue_batches(
+                run_id_,
+                "daily_bars",
+                "daily_bars",
+                [("batch-planned", ["000001.SZ"], "2024-06-28", "2024-06-28")],
+            )
+            raise KeyboardInterrupt
+
+        return StepEntry(fn=_fn, group="test", requires_workers=True)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+
+    engine = JobEngine(cfg)
+    with pytest.raises(KeyboardInterrupt):
+        engine.run_job("retry", date(2024, 6, 28), run_id=run_id, retry_failed_only=True)
+
+    assert manifest.get_run(run_id)["status"] == "failed"
+    assert manifest.get_batch(run_id, "batch-planned")["status"] == "failed"
+
+
+def test_interrupting_a_backfill_closes_its_run_even_though_it_defers_finish(tmp_path, monkeypatch):
+    """`cne backfill` passes finalize_run=False so compact can close the run
+    after it. That says who finishes a *successful* run and was never a claim
+    about interrupts — read as one, every backfill Ctrl-C left the ledger open.
+    """
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    init_data_layout(cfg)
+
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    def _get_step(name: str):
+        def _fn(config, trade_date, run_id, context):
+            raise KeyboardInterrupt
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+
+    engine = JobEngine(cfg)
+    with pytest.raises(KeyboardInterrupt):
+        engine.run_job(
+            "backfill",
+            date(2024, 6, 28),
+            steps=["daily_bars"],
+            backfill=True,
+            finalize_run=False,
+        )
+
+    manifest = Manifest(cfg.manifest_path)
+    latest = manifest.latest_run("backfill")
+    assert latest is not None and latest["status"] == "failed"
+    batches = manifest.get_batches_for_run(latest["run_id"])
+    assert batches and all(b["status"] == "failed" for b in batches)
+
+
+def test_a_queued_batch_is_retryable_without_waiting_for_the_stale_window(tmp_path):
+    """A batch the plan recorded but no worker reached is work this run can
+    still do. Making it wait out `batch_stale_seconds` was the reason an
+    interrupted sweep could not be resumed for an hour."""
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("backfill", {"trade_date": "2024-06-28"})
+    manifest.queue_batches(
+        run_id,
+        "daily_bars",
+        "daily_bars",
+        [("batch-0", ["600519.SH"], "2024-06-28", "2024-06-28")],
+    )
+
+    assert manifest.incomplete_batch_count(run_id) == 1
+    assert [b["batch_id"] for b in manifest.get_retryable_batches(run_id)] == ["batch-0"]
+    assert manifest.incomplete_batch_counts_by_dataset(run_id) == {"daily_bars": 1}
+
+
+def test_queueing_never_demotes_a_batch_that_already_succeeded(tmp_path):
+    cfg = Config(data_root=tmp_path / "data", tdx_allow_mock=True)
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("backfill", {"trade_date": "2024-06-28"})
+    manifest.start_batch(run_id, "batch-0", "daily_bars", "daily_bars", symbols=["600519.SH"])
+    manifest.finish_batch(run_id, "batch-0", "success", rows_read=7, rows_written=7)
+
+    manifest.queue_batches(
+        run_id,
+        "daily_bars",
+        "daily_bars",
+        [
+            ("batch-0", ["600519.SH"], "2024-06-28", "2024-06-28"),
+            ("batch-1", ["000001.SZ"], "2024-06-28", "2024-06-28"),
+        ],
+    )
+
+    assert manifest.get_batch(run_id, "batch-0")["status"] == "success"
+    assert manifest.get_batch(run_id, "batch-0")["rows_written"] == 7
+    assert manifest.get_batch(run_id, "batch-1")["status"] == "queued"
+
+
+def test_a_finished_batch_proves_the_owner_was_alive(tmp_path):
+    """The `cne init` self-reconcile, reproduced.
+
+    Orphan detection read only unfinished batches, so a phase that ended
+    cleanly left the run's own start time as its last sign of life. A phase
+    longer than the unlocked grace window therefore looked like a corpse the
+    moment it succeeded: 201 seconds of `instruments`, then a 60-second
+    deadline measured from a timestamp 201 seconds old.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    cfg = Config(data_root=tmp_path / "data")
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("init", {"trade_date": "2024-06-28"})
+
+    long_ago = (datetime.now(timezone.utc) - timedelta(seconds=201)).isoformat()
+    with sqlite3.connect(cfg.manifest_path) as conn:
+        conn.execute(
+            "UPDATE ingestion_runs SET started_at = ? WHERE run_id = ?", (long_ago, run_id)
+        )
+
+    # Phase one: started long ago, finished just now, nothing left running.
+    manifest.start_batch(run_id, "batch-0", "instruments", "instruments")
+    manifest.finish_batch(run_id, "batch-0", "success", rows_read=1, rows_written=1)
+
+    out = manifest.reconcile_orphaned_runs(
+        stale_after_seconds=3600,
+        locks_root=cfg.meta_root,
+        unlocked_grace_seconds=60.0,
+    )
+
+    assert out["runs_closed"] == 0, "a batch that finished a moment ago proves the owner is alive"
+    assert manifest.get_run(run_id)["status"] == "running"
+
+
+def test_a_second_engine_in_this_process_is_not_told_another_process_holds_it(tmp_path):
+    """The re-entrancy registry is process-wide because the file lock is.
+
+    Scoped to one JobEngine instance, a second instance asking for a lock this
+    process already holds got "locked by another process" — the one
+    explanation that is certainly wrong, and the one that sends an operator
+    hunting for a peer that does not exist.
+    """
+    from cnequity.orchestrator.run_lock import reentrant_run_lock
+
+    cfg = Config(data_root=tmp_path / "data")
+    init_data_layout(cfg)
+
+    with reentrant_run_lock(cfg.meta_root, "run-1"):
+        with reentrant_run_lock(cfg.meta_root, "run-1"):
+            pass  # same thread re-enters
+
+        with pytest.raises(RunLockError) as caught:
+            with run_lock(cfg.meta_root, "run-1", blocking=False):
+                pass
+        assert "another process" in str(caught.value)
+
+    # Released on exit, so an unrelated caller can take it normally.
+    with run_lock(cfg.meta_root, "run-1", blocking=False):
+        pass
+
+
+def test_a_run_lock_held_by_another_thread_says_so(tmp_path):
+    import threading
+
+    from cnequity.orchestrator.run_lock import reentrant_run_lock
+
+    cfg = Config(data_root=tmp_path / "data")
+    init_data_layout(cfg)
+    entered = threading.Event()
+    release = threading.Event()
+    failure: list[str] = []
+
+    def _hold():
+        with reentrant_run_lock(cfg.meta_root, "run-2"):
+            entered.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    try:
+        assert entered.wait(10)
+        with pytest.raises(RunLockError) as caught:
+            with reentrant_run_lock(cfg.meta_root, "run-2"):
+                pass
+        failure.append(str(caught.value))
+    finally:
+        release.set()
+        holder.join(10)
+
+    assert "another thread in this process" in failure[0]

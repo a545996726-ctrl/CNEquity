@@ -121,6 +121,40 @@ def missing_steps(phases: list[str], batches: list[Any]) -> list[str]:
     return [s for s in expected_steps(phases) if s not in present]
 
 
+def missing_steps_within_phase_order(phases: list[str], batches: list[Any]) -> list[str]:
+    """Never-started steps, stopping after the first phase that still owes work.
+
+    Init phases are ordered because each reads what the one before it
+    published: `daily_bars` needs the instrument list, `trading_status` needs
+    the calendar. Starting a later phase while an earlier one is unresolved
+    builds on input already known to be incomplete.
+
+    `cne init` has refused to do that since it learned to resume, but
+    `cne run retry --run-id <init run>` reached the same run through a
+    different door and used only the dependency graph, which is a weaker
+    claim: nothing *declares* that `index_bars` depends on
+    `corporate_actions`, so retry happily advanced past a phase that resume
+    would have stopped at. One ordering rule, both doors.
+
+    Never-started steps of the blocking phase are returned: running them moves
+    that phase toward done. It is the phases after it that must wait.
+    """
+    present = datasets_in_run(batches)
+    out: list[str] = []
+    seen: set[str] = set()
+    for phase in phases:
+        steps = INIT_PHASE_STEPS.get(phase, [])
+        if not steps:
+            continue
+        for step in steps:
+            if step not in present and step not in seen:
+                seen.add(step)
+                out.append(step)
+        if not all(step_succeeded(batches, step) for step in steps):
+            break
+    return out
+
+
 def pending_phases(phases: list[str], batches: list[Any]) -> list[str]:
     """Phases that are not fully successful yet."""
     out: list[str] = []
