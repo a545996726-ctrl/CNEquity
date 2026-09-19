@@ -86,7 +86,7 @@ SQLite WAL 模式。
 
 `batch_id`, `run_id`, `dataset`, `status`, `symbol_start`, `symbol_end`, `rows`, `error`, `heartbeat_at`
 
-Batch 状态：`pending` → `running` → `success` | `failed` | `stale`
+Batch 状态机：`queued`（计划已登记，尚无 worker）→ `running` → `success` | `failed` | `warning` | `stale`；被后续批次取代的记为 `superseded`。`queued` 与 `running` 的区别是有没有 worker：前者不参与心跳超时（那会把排队时间当成卡死），但同样算未完成、同样挡住 compact —— 这正是「已计划但从未启动」的批次能被闸门看见的原因。
 
 - `advance_stale_batches()` / `advance_batch_timeouts()`：超时 running → stale → failed（retry 前调用）
 - `reconcile_orphaned_runs(...)`：关闭已经没有主人的 `running` run。判活优先看**锁**
