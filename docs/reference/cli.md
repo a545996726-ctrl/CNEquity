@@ -510,7 +510,7 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 | `--datasets` | 逐数据集新鲜度表（dataset / layer / freshness / 覆盖区间 / watermark）；有 STALE 退出 1。freshness 取值：`fresh` / `STALE` / `empty`（还没抓过）/ `no source`（源已下线且无替代，如 `economic_calendar`）/ `retired`（源已下线但湖已抓到最后一天，如 `northbound_flows`）/ `n/a`（配置里关闭，或不按日判新鲜度） |
 | `--all-columns` | 配合 `--datasets`：打印 `list_datasets` 的全部列（契约指纹、revision、PIT 存储列等），而非仅新鲜度 |
 | `--groups` | 配合 `--datasets`：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，但不触发退出 1。只跑 `core` 的主机有二十多个数据集无人抓取，不加此项门禁天天失败（2026-09-12/13/14 为 21–25 个），告警就此失效。无人调度的数据集（`(unscheduled)`）仍然判失败——“不知道谁抓”不等于“别的主机在抓” |
-| `--scope` / `--no-scope` | 配合 `--datasets`：是否做最新交易日的标的截面校验（默认开）。它比较 tip 分区与当日 active 证券：有日线、有明确停牌证据、或已记入待补账本的都算覆盖，其余判 INCOMPLETE。要读 `daily_bars` tip 分区、`instruments` 和 `trading_status`，`--no-scope` 让这条命令回到纯元数据 |
+| `--scope` / `--no-scope` | 配合 `--datasets`：是否做最新交易日的标的截面校验（默认开）。对每个按「当日 active 证券」建键的数据集（`daily_bars`、`trading_status`）比较 tip 分区与证券表：有数据、有明确停牌证据、或已记入待补账本的都算覆盖，其余判 INCOMPLETE。要读这些数据集的 tip 分区加 `instruments`，`--no-scope` 让这条命令回到纯元数据 |
 | `--run <id\|latest>` | 指定 run（默认 `latest`）；摘要含每个数据集 stage 的 `dataset_results` 与聚合 `dataset_status`。别名 `--run-id` 已删除 |
 
 `--datasets` 还会报告尚未跑完的 init：日期 fresh 只说明已有数据新鲜，不代表全市场覆盖完整。

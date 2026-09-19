@@ -59,6 +59,16 @@ def stale_datasets_by_group(cfg, datasets: list[str]) -> dict[str, list[str]]:
     return out
 
 
+#: Datasets whose expected tip key set is "every instrument active that
+#: session", and which can therefore be proved against `instruments` alone.
+#:
+#: Deliberately short. `index_bars` is keyed by an index universe and
+#: `financial_statement_items` by report period, so holding either to the
+#: instrument list would invent a gap rather than find one — a cross-section
+#: proof is only worth having while the expectation it checks is real.
+INSTRUMENT_SCOPED_DATASETS = ("daily_bars", "trading_status")
+
+
 def _gates_on_dataset(cfg, dataset: str, wanted_groups: set[str] | None) -> bool:
     """Whether a failure in *dataset* should fail this host's gate.
 
@@ -106,7 +116,7 @@ def _owed_symbols_on(cfg, dataset: str, day: date) -> set[str]:
     }
 
 
-def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
+def _tip_scope(cfg, catalog: pl.DataFrame, dataset: str = "daily_bars") -> dict | None:
     """Cheap cross-section proof for a date-fresh daily-bars watermark.
 
     Freshness is one-dimensional: a one-symbol repair can advance a date just
@@ -116,7 +126,7 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
     """
     if getattr(cfg, "lake_profile", None) in {"demo", "sample"}:
         return None
-    rows = catalog.filter(pl.col("dataset") == "daily_bars")
+    rows = catalog.filter(pl.col("dataset") == dataset)
     if rows.is_empty() or not bool(rows["has_data"][0]):
         return None
 
@@ -124,8 +134,8 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
     from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
     from cnequity.steps.common import load_curated_instruments, load_curated_trading_status
 
-    bars_root = cfg.curated_root / "daily_bars"
-    if not dataset_has_parquet(bars_root, dataset="daily_bars", meta_root=cfg.meta_root):
+    bars_root = cfg.curated_root / dataset
+    if not dataset_has_parquet(bars_root, dataset=dataset, meta_root=cfg.meta_root):
         # Test doubles and legacy catalog adapters can report rows without a
         # physical lake. They have no scope evidence to inspect here.
         return None
@@ -133,8 +143,9 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
     raw_day = raw_day or rows["coverage_end"][0]
     if raw_day is None:
         return {
+            "dataset": dataset,
             "state": "unverified",
-            "message": "daily_bars 有数据，但没有可用于截面校验的 watermark/coverage_end",
+            "message": f"{dataset} 有数据，但没有可用于截面校验的 watermark/coverage_end",
         }
     tip = raw_day.date() if hasattr(raw_day, "date") and not isinstance(raw_day, date) else raw_day
 
@@ -142,9 +153,10 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
         instruments = load_curated_instruments(cfg)
         if instruments is None or "symbol" not in instruments.columns:
             return {
+                "dataset": dataset,
                 "state": "unverified",
                 "date": tip,
-                "message": "daily_bars 有数据，但 instruments 缺失，无法证明全市场标的范围",
+                "message": f"{dataset} 有数据，但 instruments 缺失，无法证明全市场标的范围",
             }
         instrument_count = instruments["symbol"].drop_nulls().n_unique()
         instrument_receipt = Manifest(cfg.manifest_path).latest_successful_batch("instruments")
@@ -153,6 +165,7 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
         )
         if receipt_count and instrument_count < receipt_count:
             return {
+                "dataset": dataset,
                 "state": "unverified",
                 "date": tip,
                 "message": (
@@ -177,6 +190,7 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
         )
         if not expected:
             return {
+                "dataset": dataset,
                 "state": "unverified",
                 "date": tip,
                 "message": "instruments 在该日没有可校验的 active 标的",
@@ -188,6 +202,7 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
         missing_exchanges = sorted(required_exchanges - exchanges)
         if missing_exchanges:
             return {
+                "dataset": dataset,
                 "state": "unverified",
                 "date": tip,
                 "message": (
@@ -201,7 +216,7 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
             partition_col="trade_date",
             start=tip,
             end=tip,
-            dataset="daily_bars",
+            dataset=dataset,
             meta_root=cfg.meta_root,
         )
         observed = set(
@@ -224,10 +239,11 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
         # outstanding ledger and reported separately below. Failing here for
         # those same keys would be the two halves of one system contradicting
         # each other, with the operator in between.
-        owed = _owed_symbols_on(cfg, "daily_bars", tip)
+        owed = _owed_symbols_on(cfg, dataset, tip)
         missing = sorted(expected - covered)
         unexplained = sorted(set(missing) - owed)
         return {
+            "dataset": dataset,
             # A proof, not a sample: a symbol counts as covered only with a bar,
             # explicit non-trading evidence, or a recorded debt. There is no
             # percentage tolerance, which in all-A could hide hundreds of names.
@@ -241,6 +257,7 @@ def _daily_bars_tip_scope(cfg, catalog: pl.DataFrame) -> dict | None:
         }
     except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
         return {
+            "dataset": dataset,
             "state": "unverified",
             "date": tip,
             "message": f"读取截面证据失败：{exc}",
@@ -893,41 +910,40 @@ def status(
                 "它只验证安装、Parquet 落盘和查询链路。"
             )
         wanted_groups = _gate_groups(gate_groups)
-        tip_scope = _daily_bars_tip_scope(cfg, df) if scope else None
-        scope_incomplete = tip_scope is not None and tip_scope["state"] == "incomplete"
-        scope_unverified = tip_scope is not None and tip_scope["state"] == "unverified"
-        # `--groups` promises to gate only on what this host is scheduled to
-        # fetch. A cross-section hole in `daily_bars` is a claim about whoever
-        # owns `daily_bars`, so it answers to the same promise; letting it
-        # through unconditionally would quietly retract the flag.
-        if not _gates_on_dataset(cfg, "daily_bars", wanted_groups):
-            scope_incomplete = False
-            scope_unverified = False
+        scopes = [
+            report
+            for dataset in (INSTRUMENT_SCOPED_DATASETS if scope else ())
+            if (report := _tip_scope(cfg, df, dataset)) is not None
+        ]
+        gating_scopes = [
+            report for report in scopes if _gates_on_dataset(cfg, report["dataset"], wanted_groups)
+        ]
+        scope_incomplete = any(r["state"] == "incomplete" for r in gating_scopes)
+        scope_unverified = any(r["state"] == "unverified" for r in gating_scopes)
         scope_heading = f"取数截面（{ingest_scope_label(cfg.ingest_universe)}）"
-        if tip_scope is not None:
-            if tip_scope["state"] == "complete":
-                owed_note = (
-                    f"，另有 {tip_scope['owed']} 只已记账待补" if tip_scope.get("owed") else ""
-                )
+        for report in scopes:
+            dataset = report["dataset"]
+            if report["state"] == "complete":
+                owed_note = f"，另有 {report['owed']} 只已记账待补" if report.get("owed") else ""
                 click.echo(
-                    f"\n{scope_heading}：OK —— daily_bars "
-                    f"{tip_scope['date']} 覆盖证据 {tip_scope['covered']}/"
-                    f"{tip_scope['expected']}（{tip_scope['ratio']:.1%}）{owed_note}"
+                    f"\n{scope_heading}：OK —— {dataset} "
+                    f"{report['date']} 覆盖证据 {report['covered']}/"
+                    f"{report['expected']}（{report['ratio']:.1%}）{owed_note}"
                 )
-            elif tip_scope["state"] == "incomplete":
-                sample = ", ".join(tip_scope["missing"][:5])
+            elif report["state"] == "incomplete":
+                sample = ", ".join(report["missing"][:5])
                 click.echo(
-                    f"\n{scope_heading}：INCOMPLETE —— daily_bars "
-                    f"{tip_scope['date']} 有 {len(tip_scope['missing'])} 只 active 标的"
-                    f"既无日线、也无停牌证据、也没有记账"
-                    f"（覆盖 {tip_scope['covered']}/{tip_scope['expected']}，"
-                    f"{tip_scope['ratio']:.1%}；示例：{sample}）。"
+                    f"\n{scope_heading}：INCOMPLETE —— {dataset} "
+                    f"{report['date']} 有 {len(report['missing'])} 只 active 标的"
+                    f"既无数据、也无停牌证据、也没有记账"
+                    f"（覆盖 {report['covered']}/{report['expected']}，"
+                    f"{report['ratio']:.1%}；示例：{sample}）。"
                     "日期 fresh 不代表标的覆盖完整。",
                     err=True,
                 )
             else:
                 click.echo(
-                    f"\n{scope_heading}：UNVERIFIED —— {tip_scope['message']}。"
+                    f"\n{scope_heading}：UNVERIFIED —— {report['message']}。"
                     "这是「证明不了」，不是「已证明不全」；"
                     "日期 fresh 仍不代表标的覆盖完整。",
                     err=True,

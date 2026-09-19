@@ -480,7 +480,7 @@ def test_status_datasets_rejects_a_fresh_but_narrow_daily_bar_tip(cfg_path, monk
 def test_daily_bar_tip_requires_every_symbol_or_explicit_suspension(
     tmp_path, suspended_evidence, expected_state
 ):
-    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.cli.quality_cmds import _tip_scope
 
     cfg = Config(data_root=tmp_path / "data")
     tip = date(2024, 6, 28)
@@ -527,7 +527,7 @@ def test_daily_bar_tip_requires_every_symbol_or_explicit_suspension(
         }
     )
 
-    scope = _daily_bars_tip_scope(cfg, catalog)
+    scope = _tip_scope(cfg, catalog)
 
     assert scope is not None
     assert scope["state"] == expected_state
@@ -536,7 +536,7 @@ def test_daily_bar_tip_requires_every_symbol_or_explicit_suspension(
 
 
 def test_daily_bar_tip_cannot_prove_all_a_from_an_instrument_list_without_bj(tmp_path):
-    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.cli.quality_cmds import _tip_scope
 
     cfg = Config(data_root=tmp_path / "data")
     tip = date(2024, 6, 28)
@@ -567,7 +567,7 @@ def test_daily_bar_tip_cannot_prove_all_a_from_an_instrument_list_without_bj(tmp
         }
     )
 
-    scope = _daily_bars_tip_scope(cfg, catalog)
+    scope = _tip_scope(cfg, catalog)
 
     assert scope is not None
     assert scope["state"] == "unverified"
@@ -576,7 +576,7 @@ def test_daily_bar_tip_cannot_prove_all_a_from_an_instrument_list_without_bj(tmp
 
 
 def test_daily_bar_tip_rejects_an_instrument_table_smaller_than_its_success_receipt(tmp_path):
-    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.cli.quality_cmds import _tip_scope
 
     cfg = Config(data_root=tmp_path / "data")
     tip = date(2024, 6, 28)
@@ -609,7 +609,7 @@ def test_daily_bar_tip_rejects_an_instrument_table_smaller_than_its_success_rece
         }
     )
 
-    scope = _daily_bars_tip_scope(cfg, catalog)
+    scope = _tip_scope(cfg, catalog)
 
     assert scope is not None
     assert scope["state"] == "unverified"
@@ -1800,13 +1800,13 @@ def test_a_key_the_ingest_side_already_tolerated_is_not_a_second_failure(tmp_pat
     separately. Failing the status gate for those same keys would be the two
     halves of one system contradicting each other, with the operator between.
     """
-    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.cli.quality_cmds import _tip_scope
     from cnequity.storage.state import StateStore
 
     cfg, tip, symbols, catalog = _tip_scope_lake(tmp_path)
     cfg.meta_root.mkdir(parents=True, exist_ok=True)
 
-    before = _daily_bars_tip_scope(cfg, catalog)
+    before = _tip_scope(cfg, catalog)
     assert before["state"] == "incomplete"
     assert before["missing"] == [symbols[-1]]
 
@@ -1817,14 +1817,14 @@ def test_a_key_the_ingest_side_already_tolerated_is_not_a_second_failure(tmp_pat
         reason="unresolved_tip",
     )
 
-    after = _daily_bars_tip_scope(cfg, catalog)
+    after = _tip_scope(cfg, catalog)
     assert after["state"] == "complete"
     assert after["missing"] == []
     assert after["owed"] == 1
 
 
 def test_an_owed_key_for_a_different_day_does_not_excuse_this_one(tmp_path):
-    from cnequity.cli.quality_cmds import _daily_bars_tip_scope
+    from cnequity.cli.quality_cmds import _tip_scope
     from cnequity.storage.state import StateStore
 
     cfg, tip, symbols, catalog = _tip_scope_lake(tmp_path)
@@ -1836,7 +1836,7 @@ def test_an_owed_key_for_a_different_day_does_not_excuse_this_one(tmp_path):
         reason="unresolved_tip",
     )
 
-    assert _daily_bars_tip_scope(cfg, catalog)["state"] == "incomplete"
+    assert _tip_scope(cfg, catalog)["state"] == "incomplete"
 
 
 def test_scope_gate_respects_the_groups_flag_that_owns_daily_bars(cfg_path, monkeypatch):
@@ -1847,16 +1847,21 @@ def test_scope_gate_respects_the_groups_flag_that_owns_daily_bars(cfg_path, monk
 
     monkeypatch.setattr(
         qc,
-        "_daily_bars_tip_scope",
-        lambda cfg, catalog: {
-            "state": "incomplete",
-            "date": date(2024, 6, 28),
-            "covered": 1,
-            "expected": 4,
-            "ratio": 0.25,
-            "missing": ["000001.SZ"],
-            "owed": 0,
-        },
+        "_tip_scope",
+        lambda cfg, catalog, dataset="daily_bars": (
+            {
+                "dataset": dataset,
+                "state": "incomplete",
+                "date": date(2024, 6, 28),
+                "covered": 1,
+                "expected": 4,
+                "ratio": 0.25,
+                "missing": ["000001.SZ"],
+                "owed": 0,
+            }
+            if dataset == "daily_bars"
+            else None
+        ),
     )
     monkeypatch.setattr(qc, "stale_datasets_by_group", lambda cfg, names: {"core": list(names)})
     monkeypatch.setattr(qc, "_last_trading_day", lambda config, today: date(2024, 6, 28))
@@ -1892,12 +1897,17 @@ def test_unprovable_coverage_exits_two_not_one(cfg_path, monkeypatch):
 
     monkeypatch.setattr(
         qc,
-        "_daily_bars_tip_scope",
-        lambda cfg, catalog: {
-            "state": "unverified",
-            "date": date(2024, 6, 28),
-            "message": "instruments 缺失",
-        },
+        "_tip_scope",
+        lambda cfg, catalog, dataset="daily_bars": (
+            {
+                "dataset": dataset,
+                "state": "unverified",
+                "date": date(2024, 6, 28),
+                "message": "instruments 缺失",
+            }
+            if dataset == "daily_bars"
+            else None
+        ),
     )
     monkeypatch.setattr(qc, "_last_trading_day", lambda config, today: date(2024, 6, 28))
     monkeypatch.setattr(
@@ -1927,9 +1937,10 @@ def test_no_scope_skips_the_cross_section_read_entirely(cfg_path, monkeypatch):
 
     calls: list[int] = []
 
-    def _scope(cfg, catalog):
-        calls.append(1)
+    def _scope(cfg, catalog, dataset="daily_bars"):
+        calls.append(dataset)
         return {
+            "dataset": dataset,
             "state": "incomplete",
             "date": date(2024, 6, 28),
             "covered": 0,
@@ -1939,7 +1950,7 @@ def test_no_scope_skips_the_cross_section_read_entirely(cfg_path, monkeypatch):
             "owed": 0,
         }
 
-    monkeypatch.setattr(qc, "_daily_bars_tip_scope", _scope)
+    monkeypatch.setattr(qc, "_tip_scope", _scope)
     monkeypatch.setattr(qc, "_last_trading_day", lambda config, today: date(2024, 6, 28))
     monkeypatch.setattr(
         "cnequity.query.reader.list_datasets",
@@ -1959,3 +1970,85 @@ def test_no_scope_skips_the_cross_section_read_entirely(cfg_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert not calls
     assert "取数截面" not in result.output
+
+
+def test_trading_status_is_proved_against_the_same_instrument_list(tmp_path):
+    """The cross-section proof is not a `daily_bars` special case: any dataset
+    whose expected tip keys are "every instrument active that session" answers
+    the same question, and freshness is equally one-dimensional for all of
+    them."""
+    from cnequity.cli.quality_cmds import INSTRUMENT_SCOPED_DATASETS, _tip_scope
+
+    assert "trading_status" in INSTRUMENT_SCOPED_DATASETS
+    # index_bars is keyed by an index universe, not by instruments; holding it
+    # to this list would invent a gap rather than find one.
+    assert "index_bars" not in INSTRUMENT_SCOPED_DATASETS
+
+    cfg = Config(data_root=tmp_path / "data")
+    tip = date(2024, 6, 28)
+    symbols = ["600519.SH", "000001.SZ", "920001.BJ"]
+    instruments_root = cfg.curated_root / "instruments"
+    status_root = cfg.curated_root / "trading_status" / f"trade_date={tip.isoformat()}"
+    instruments_root.mkdir(parents=True)
+    status_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "list_date": [date(2000, 1, 1)] * 3,
+            "delist_date": [None] * 3,
+        }
+    ).write_parquet(instruments_root / "part-0.parquet")
+    # One security has no status row at all on the tip session.
+    pl.DataFrame(
+        {
+            "symbol": symbols[:2],
+            "trade_date": [tip, tip],
+            "is_trading": [True, True],
+        }
+    ).write_parquet(status_root / "part-0.parquet")
+
+    catalog = pl.DataFrame(
+        {
+            "dataset": ["trading_status"],
+            "has_data": [True],
+            "watermarked": [True],
+            "watermark": [tip],
+            "coverage_end": [tip],
+        }
+    )
+
+    report = _tip_scope(cfg, catalog, "trading_status")
+
+    assert report is not None
+    assert report["dataset"] == "trading_status"
+    assert report["state"] == "incomplete"
+    assert report["missing"] == ["920001.BJ"]
+
+
+def test_every_scope_report_names_its_dataset(tmp_path):
+    """The caller prints and gates per dataset, so a report that cannot say
+    which dataset it describes is unusable — and the early `unverified` exits
+    are exactly the ones that used to omit it."""
+    from cnequity.cli.quality_cmds import _tip_scope
+
+    cfg = Config(data_root=tmp_path / "data")
+    bars_root = cfg.curated_root / "daily_bars" / "trade_date=2024-06-28"
+    bars_root.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["600519.SH"], "trade_date": [date(2024, 6, 28)]}).write_parquet(
+        bars_root / "part-0.parquet"
+    )
+    catalog = pl.DataFrame(
+        {
+            "dataset": ["daily_bars"],
+            "has_data": [True],
+            "watermarked": [True],
+            "watermark": [date(2024, 6, 28)],
+            "coverage_end": [date(2024, 6, 28)],
+        }
+    )
+
+    # No instruments table: the proof cannot be made, and must say so about a
+    # named dataset.
+    report = _tip_scope(cfg, catalog, "daily_bars")
+    assert report["state"] == "unverified"
+    assert report["dataset"] == "daily_bars"
