@@ -296,6 +296,11 @@ def _collect_lake_findings(
         root = config.curated_root / ds
         if demo_lake and not root.exists():
             continue
+        # An opt-in capture that was never switched on has nothing to audit;
+        # "no curated data" is its configured state, not a finding. One that
+        # was switched off later still has history on disk, and that is audited.
+        if not root.exists() and not is_dataset_enabled(ds, config):
+            continue
         dataset_findings = audit_curated_dataset(
             ds, pcol, root, trade_date, full=full, stale=ds in stale_datasets
         )
@@ -511,6 +516,9 @@ def _optional_intraday_findings(config: Config, trade_date: date) -> list[dict]:
         findings.extend(minute_bars_findings(config, trade_date))
     if is_dataset_enabled("trade_ticks", config):
         findings.extend(trade_ticks_findings(config, trade_date))
+    from cnequity.quality.derivative_checks import derivative_findings
+
+    findings.extend(derivative_findings(config))
     return findings
 
 

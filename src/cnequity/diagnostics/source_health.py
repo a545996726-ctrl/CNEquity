@@ -307,6 +307,56 @@ def _probe_sina_futures(config: Config) -> str:
     return f"{DOMESTIC_CONTRACTS[0][1]} 最近 {frame.height} 根日线"
 
 
+def _probe_futures_exchange(exchange: str, reader=None) -> Callable[[Config], str]:
+    """One exchange's own daily file, which the futures/option datasets read.
+
+    Walks back over a few weekdays because a closed session answers "no file"
+    (a redirect, a 404 page or an all-zero total, depending on the exchange);
+    five weekdays covers any single holiday.
+    """
+
+    def probe(config: Config) -> str:
+        from datetime import timedelta
+
+        from cnequity.adapters.futures_exchange.common import (
+            FuturesDayUnavailable,
+            FuturesSourceBlocked,
+        )
+        from cnequity.steps.derivatives import READERS
+
+        day = _recent_weekday()
+        for _ in range(5):
+            try:
+                parsed = (reader or READERS[exchange]).fetch_day(day, config=config)
+            except FuturesSourceBlocked as exc:
+                raise ProbeBlocked(str(exc)) from exc
+            except FuturesDayUnavailable:
+                day -= timedelta(days=1)
+                while day.weekday() >= 5:
+                    day -= timedelta(days=1)
+                continue
+            return (
+                f"{day.isoformat()} 期货 {parsed.futures.height} 个、"
+                f"期权 {parsed.options.height} 个合约"
+            )
+        raise ProbeEmpty("最近五个工作日都没有取到日行情文件")
+
+    return probe
+
+
+def _probe_dce_official(config: Config) -> str:
+    """DCE's own endpoint, which the default route avoids because it is blocked.
+
+    Kept as a probe so the answer is measured on each machine rather than
+    assumed: `[futures] dce_route = "official"` is only worth choosing where
+    this is green.
+    """
+    from cnequity.steps.derivatives import DCE_OFFICIAL
+
+    probe = _probe_futures_exchange("DCE", reader=DCE_OFFICIAL)
+    return probe(config)
+
+
 def _probe_cninfo(config: Config) -> str:
     import httpx
 
@@ -519,11 +569,61 @@ PROBES: tuple[SourceProbe, ...] = (
         key="sina_futures",
         label="新浪期货（主连 / 外盘日线）",
         host="stock2.finance.sina.com.cn",
-        powers=("commodity_bars",),
+        powers=("commodity_bars", "futures_bars", "futures_contracts"),
         run=_probe_sina_futures,
         note="与 sina 日线不是同一台主机，但共用同一个按账号计的 456 配额。",
         blast_radius="sina",
         config_key="sina",
+    ),
+    SourceProbe(
+        key="shfe",
+        label="上期所官网（逐合约日行情，含上期能源）",
+        host="www.shfe.com.cn",
+        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        run=_probe_futures_exchange("SHF"),
+        note="一次请求同时覆盖上期所与上期能源的品种；休市日返回 404 页面。",
+        blast_radius="shfe",
+        config_key="futures_exchange",
+    ),
+    SourceProbe(
+        key="dce",
+        label="大商所官网（逐合约日行情，dce_route = official）",
+        host="www.dce.com.cn",
+        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        run=_probe_dce_official,
+        note="2026-09 起从本项目测过的出口都返回 412 JS 挑战（blocked），所以默认走新浪；这里变绿才值得切到 official。",
+        blast_radius="dce",
+        config_key="futures_exchange",
+    ),
+    SourceProbe(
+        key="czce",
+        label="郑商所官网（逐合约日行情）",
+        host="www.czce.com.cn",
+        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        run=_probe_futures_exchange("CZC"),
+        note="2015-10 前走逗号分隔旧存档；休市日返回「当日无数据」页。",
+        blast_radius="czce",
+        config_key="futures_exchange",
+    ),
+    SourceProbe(
+        key="gfex",
+        label="广期所官网（逐合约日行情）",
+        host="www.gfex.com.cn",
+        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        run=_probe_futures_exchange("GFE"),
+        note="POST 接口；休市日返回只有全零「总计」的 200。",
+        blast_radius="gfex",
+        config_key="futures_exchange",
+    ),
+    SourceProbe(
+        key="cffex",
+        label="中金所官网（逐合约日行情）",
+        host="www.cffex.com.cn",
+        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        run=_probe_futures_exchange("CFE"),
+        note="交易所自己发布的文件；休市日返回 302 而不是空文件，探针会往前找最近的交易日。",
+        blast_radius="cffex",
+        config_key="futures_exchange",
     ),
     SourceProbe(
         key="cninfo",

@@ -85,6 +85,8 @@ SOURCE_FAILURE_DOMAINS: dict[str, str] = {
     "nbs": "nbs",
     "ths": "ths",
     "ths_pages": "ths_pages",
+    # One label for the futures exchanges' own files (ADR-0013).
+    "futures_exchange": "futures_exchange",
     "derived": "local_derivation",
 }
 

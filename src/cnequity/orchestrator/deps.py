@@ -3,7 +3,14 @@ from __future__ import annotations
 from cnequity.orchestrator.registry import FINALIZE_STEP_GROUPS, STEP_REGISTRY, get_step
 
 # Hard ordering for finalize steps — do not rely on registration or alphabet sort alone.
-FINALIZE_STEP_ORDER = ("compact", "derive_adj_factors", "derive_industry_index", "audit")
+FINALIZE_STEP_ORDER = (
+    "compact",
+    "derive_adj_factors",
+    "derive_industry_index",
+    "derive_futures_continuous",
+    "derive_option_greeks",
+    "audit",
+)
 
 
 class CyclicDependencyError(ValueError):

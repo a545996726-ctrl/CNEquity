@@ -163,6 +163,8 @@ def test_example_config_validates(monkeypatch):
         # Ticks get their own group rather than a fourth step in `intraday`,
         # so enabling minute bars cannot drag transaction records along.
         "ticks",
+        # Futures and options; every step is a no-op until [futures].enabled.
+        "derivatives",
     }
     assert cfg.minute_bars_enabled is False
 

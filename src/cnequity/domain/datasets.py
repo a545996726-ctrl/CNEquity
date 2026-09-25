@@ -90,6 +90,55 @@ _UNIT_CONTRACT_DEFAULTS: dict[str, UnitContract] = {
         "amount": "source_native",
         "open_interest": "contract",
     },
+    # Derivatives (ADR-0013): prices in each product's quote unit, counts on
+    # one side of the trade whatever the exchange published, turnover in 元.
+    "futures_contracts": {"multiplier": "quote_unit_to_CNY", "tick_size": "source_native"},
+    "option_contracts": {
+        "strike": "source_native",
+        "multiplier": "quote_unit_to_CNY",
+        "tick_size": "source_native",
+    },
+    "option_greeks": {
+        "underlying_price": "source_native",
+        "time_to_expiry": "year",
+        "rate": "fraction",
+        "iv": "fraction",
+        "delta": "unitless",
+        "gamma": "per_quote_unit",
+        "vega": "price_per_unit_vol",
+        "theta": "price_per_year",
+        "rho": "price_per_unit_rate",
+    },
+    "futures_minute_bars": {
+        "price": "source_native",
+        "volume": "contract_single_sided",
+        "open_interest": "contract_single_sided",
+    },
+    "futures_continuous": {
+        "price": "source_native",
+        "volume": "contract_single_sided",
+        "open_interest": "contract_single_sided",
+        "adj_ratio": "unitless",
+        "adj_diff": "source_native",
+        "roll_yield": "fraction_per_year",
+    },
+    "futures_bars": {
+        "price": "source_native",
+        "volume": "contract_single_sided",
+        "amount": "CNY",
+        "open_interest": "contract_single_sided",
+    },
+    "option_bars": {
+        "price": "source_native",
+        "strike": "source_native",
+        "volume": "contract_single_sided",
+        "amount": "CNY",
+        "open_interest": "contract_single_sided",
+        "exercise_volume": "contract_single_sided",
+        "delta": "unitless",
+        "implied_vol": "fraction",
+        "series_implied_vol": "fraction",
+    },
     "corporate_actions": {
         "cash_dividend": "CNY/share",
         "bonus_ratio": "share/share",
@@ -836,6 +885,78 @@ _SPECS = [
         required=False,
         max_staleness_days=2,
     ),
+    # Futures and options (ADR-0013). Off unless `[futures] enabled`; see
+    # `is_dataset_enabled`. The contract tables are rebuilt from what the
+    # exchanges' daily files showed plus their reference files, so they carry
+    # no watermark of their own.
+    DatasetSpec(
+        "futures_contracts",
+        primary_source="futures_exchange",
+        # DCE's contracts, while its own endpoints stay behind a challenge.
+        supplementary_sources=("sina",),
+        tier="L0",
+        partition_col=None,
+        date_col="list_date",
+        watermark=False,
+        required=False,
+    ),
+    DatasetSpec(
+        "option_contracts",
+        primary_source="futures_exchange",
+        tier="L0",
+        partition_col=None,
+        date_col="list_date",
+        watermark=False,
+        required=False,
+    ),
+    # Per-contract daily bars from the exchanges' own session files. Several
+    # exchanges feed one dataset, so a session can arrive partly: the ones that
+    # published are written and the reconciliation tail comes back for the
+    # rest. `sparse` rather than `session_dense` because a dense watermark
+    # would stop at the first historical hole and re-read years every run;
+    # completeness is proved per exchange by `cne status` and the audit.
+    DatasetSpec(
+        "futures_bars",
+        primary_source="futures_exchange",
+        # DCE, from mid-2018: no turnover, no-trade sessions absent (ADR-0013).
+        supplementary_sources=("sina",),
+        tier="L1",
+        partition_col="trade_date",
+        partition_granularity="month",
+        required=False,
+        history_floor_date=date(2002, 1, 7),
+        backfill_chunk_days=365,
+        reconciliation_lookback_days=3,
+        reconciliation_lookback_mode="trading_day",
+    ),
+    # One-minute bars for a watchlist of contracts. Sina serves only its
+    # latest 1023 bars per contract (about two sessions for a night-trading
+    # product), so this grows forward from the day it is enabled and must run
+    # every session. `row_grain` only: `intraday_frequency` would pull in the
+    # A-share TDX minute machinery, whose session windows and
+    # trade_date == bar_time.date() do not hold for night sessions.
+    DatasetSpec(
+        "futures_minute_bars",
+        primary_source="sina",
+        tier="L1",
+        partition_col="trade_date",
+        partition_granularity="day",
+        required=False,
+        history_horizon_days=2,
+        row_grain="1m",
+    ),
+    DatasetSpec(
+        "option_bars",
+        primary_source="futures_exchange",
+        tier="L1",
+        partition_col="trade_date",
+        partition_granularity="day",
+        required=False,
+        history_floor_date=date(2017, 4, 19),
+        backfill_chunk_days=90,
+        reconciliation_lookback_days=3,
+        reconciliation_lookback_mode="trading_day",
+    ),
     # L2 corporate events
     DatasetSpec(
         "corporate_actions",
@@ -1261,6 +1382,30 @@ _SPECS = [
         # session is a derivation hole rather than sparse event-feed behavior.
         coverage_mode="session_dense",
     ),
+    # Main and second-month continuous futures, rolled on T-1 open interest
+    # (derive/futures_continuous.py). Rebuilt in full each run from
+    # futures_bars, so it has no incremental watermark of its own.
+    DatasetSpec(
+        "futures_continuous",
+        primary_source="derived",
+        tier="L1",
+        layer="derived",
+        partition_col="trade_date",
+        partition_granularity="month",
+        required=False,
+    ),
+    # The lake's own implied volatility and Greeks per option settlement
+    # (derive/option_greeks.py): Black-76 or BAW, one method for every
+    # exchange, beside the exchanges' own delta/IV in option_bars.
+    DatasetSpec(
+        "option_greeks",
+        primary_source="derived",
+        tier="L1",
+        layer="derived",
+        partition_col="trade_date",
+        partition_granularity="day",
+        required=False,
+    ),
     # How each recovered delisting's price series ends — see
     # DELISTING_EVENTS_SCHEMA. Merge-style: one row per symbol, a few hundred
     # rows total. date_col (not partition_col) so load(start=/end=) still filters.
@@ -1450,6 +1595,20 @@ def empty_freshness_label(dataset: str) -> str:
     return "empty"
 
 
+#: The derivatives family, all switched by `[futures] enabled` together.
+FUTURES_DATASETS = frozenset(
+    {
+        "futures_contracts",
+        "option_contracts",
+        "futures_bars",
+        "option_bars",
+        "futures_continuous",
+        "option_greeks",
+        "futures_minute_bars",
+    }
+)
+
+
 def is_dataset_enabled(dataset: str, config) -> bool:
     """Whether an optional capture is enabled in *config*.
 
@@ -1459,6 +1618,14 @@ def is_dataset_enabled(dataset: str, config) -> bool:
     be reported as stale. Keep this mapping next to the registry so status,
     verify, and the dashboard share the same opt-in semantics.
     """
+    if dataset in FUTURES_DATASETS:
+        if not getattr(config, "futures_enabled", False):
+            return False
+        if dataset == "futures_minute_bars":
+            return bool(getattr(config, "futures_minute_enabled", False))
+        if dataset.startswith("option_"):
+            return bool(getattr(config, "futures_options", True))
+        return True
     if dataset == "trade_ticks":
         return bool(getattr(config, "trade_ticks_enabled", False))
     if dataset == "minute_bars":

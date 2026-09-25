@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from cnequity.config import Config
-from cnequity.domain.datasets import PARTITION_COLS
+from cnequity.domain.datasets import PARTITION_COLS, is_dataset_enabled
 from cnequity.domain.schemas import MOCK_SOURCE
 from cnequity.quality.audit import run_audit
 from cnequity.quality.dataset_checks import (
@@ -50,7 +50,10 @@ def test_audit_checks_all_partition_col_datasets(tmp_path):
         (cfg.meta_root / "quality" / "findings" / f"{run_id}.json").read_text(encoding="utf-8")
     )
     exists_checks = {f["dataset"] for f in payload["findings"] if f.get("check") == "exists"}
-    assert exists_checks == set(PARTITION_COLS.keys())
+    # Opt-in captures never switched on (futures, ticks, minute bars) have
+    # nothing to be missing; every other registered dataset is judged.
+    assert exists_checks == {ds for ds in PARTITION_COLS if is_dataset_enabled(ds, cfg)}
+    assert "futures_bars" not in exists_checks and "trade_ticks" not in exists_checks
     # Optional datasets (source not yet wired) must not fail lake health alone.
     optional_exists = [
         f
@@ -64,6 +67,20 @@ def test_audit_checks_all_partition_col_datasets(tmp_path):
         if f.get("check") == "exists" and f.get("dataset") == "daily_bars"
     ]
     assert required_exists and required_exists[0]["severity"] == "error"
+
+
+def test_an_enabled_opt_in_capture_with_no_data_is_reported(tmp_path):
+    import json
+
+    cfg = Config(data_root=tmp_path / "data")
+    cfg.futures_enabled = True
+    run_audit(cfg, "run-futures-on", date(2024, 6, 28), {})
+    payload = json.loads(
+        (cfg.meta_root / "quality" / "findings" / "run-futures-on.json").read_text(encoding="utf-8")
+    )
+    exists_checks = {f["dataset"] for f in payload["findings"] if f.get("check") == "exists"}
+    assert "futures_bars" in exists_checks
+    assert "futures_minute_bars" not in exists_checks  # still off by default
 
 
 def test_audit_on_a_demo_lake_judges_only_the_datasets_it_holds(tmp_path):

@@ -3,6 +3,7 @@ from cnequity.steps import (  # noqa: F401
     bars,
     capital,
     commodity,
+    derivatives,
     events,
     finalize,
     fundamentals,

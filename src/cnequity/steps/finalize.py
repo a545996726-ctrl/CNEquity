@@ -690,6 +690,74 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
 
 
 @register_step(
+    "derive_futures_continuous",
+    group="finalize",
+    parallelizable=False,
+    depends_on=["compact"],
+)
+def step_derive_futures_continuous(
+    config: Config, trade_date: date, run_id: str, context: dict
+) -> dict:
+    """Main and second-month continuous futures from curated futures_bars."""
+    from cnequity.derive.futures_continuous import derive_futures_continuous
+    from cnequity.domain.datasets import is_dataset_enabled
+    from cnequity.storage.revisions import RevisionStore
+
+    if not is_dataset_enabled("futures_continuous", config):
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "note": "futures_continuous disabled ([futures].enabled = false)",
+        }
+    revisions = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
+    revisions.ensure_current("futures_continuous")
+    revisions.materialize_current("futures_continuous")
+    before = _layer_file_identity(config.derived_root / "futures_continuous")
+    summary = derive_futures_continuous(config)
+    published = _publish_derived_revision(config, "futures_continuous", run_id, trade_date, before)
+    rows = int(summary.get("rows") or 0)
+    out: dict = {"rows_read": rows, "rows_written": rows}
+    if published is not None:
+        out["dataset_revision"] = published
+    if summary.get("note"):
+        out["note"] = summary["note"]
+    return out
+
+
+@register_step(
+    "derive_option_greeks",
+    group="finalize",
+    parallelizable=False,
+    depends_on=["compact"],
+)
+def step_derive_option_greeks(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
+    """The lake's own IV and Greeks for new option settlements."""
+    from cnequity.derive.option_greeks import derive_option_greeks
+    from cnequity.domain.datasets import is_dataset_enabled
+    from cnequity.storage.revisions import RevisionStore
+
+    if not is_dataset_enabled("option_greeks", config):
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "note": "option_greeks disabled ([futures].enabled / options = false)",
+        }
+    revisions = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
+    revisions.ensure_current("option_greeks")
+    revisions.materialize_current("option_greeks")
+    before = _layer_file_identity(config.derived_root / "option_greeks")
+    summary = derive_option_greeks(config)
+    published = _publish_derived_revision(config, "option_greeks", run_id, trade_date, before)
+    rows = int(summary.get("rows") or 0)
+    out: dict = {"rows_read": rows, "rows_written": rows}
+    if published is not None:
+        out["dataset_revision"] = published
+    if summary.get("note"):
+        out["note"] = summary["note"]
+    return out
+
+
+@register_step(
     "derive_industry_index",
     group="finalize",
     parallelizable=False,

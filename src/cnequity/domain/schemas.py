@@ -134,6 +134,185 @@ COMMODITY_BARS_SCHEMA = {
     "fetched_at": FETCHED_AT_DTYPE,
 }
 
+# Futures and options (ADR-0013). Contracts live in their own tables rather
+# than in `instruments`: CZCE's one-digit year codes repeat every decade, and
+# every equity path assumes a SH/SZ/BJ symbol. Symbols are the canonical form
+# in `domain/derivatives.py` (CU2511.SHF, TA2601.CZC, IO2512C4000.CFE);
+# `exchange_code` keeps the exchange's own spelling.
+#
+# Bars are single-sided (the four commodity exchanges counted both sides until
+# 2019-12-31; the adapters halve those), turnover is 元, and implied volatility
+# is a fraction. A contract with no trades on a session has a settlement but no
+# prices, so its OHLC is null.
+FUTURES_CONTRACTS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "exchange": pl.Utf8,
+    "exchange_code": pl.Utf8,
+    "product": pl.Utf8,
+    "product_name": pl.Utf8,
+    "delivery_month": pl.Date,
+    "list_date": pl.Date,
+    "last_trade_date": pl.Date,
+    "multiplier": pl.Float64,
+    "tick_size": pl.Float64,
+    "quote_unit": pl.Utf8,
+    # exchange / observed / observed_truncated: where list_date and
+    # last_trade_date came from (see derive/derivative_contracts.py).
+    "dates_basis": pl.Utf8,
+    "first_seen_date": pl.Date,
+    "last_seen_date": pl.Date,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+OPTION_CONTRACTS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "exchange": pl.Utf8,
+    "exchange_code": pl.Utf8,
+    "product": pl.Utf8,
+    "product_name": pl.Utf8,
+    # A futures contract symbol, or for CFFEX index options the index itself.
+    "underlying_symbol": pl.Utf8,
+    "underlying_kind": pl.Utf8,
+    "option_type": pl.Utf8,
+    "strike": pl.Float64,
+    "exercise_style": pl.Utf8,
+    "expiry_month": pl.Date,
+    "list_date": pl.Date,
+    "expiry_date": pl.Date,
+    "multiplier": pl.Float64,
+    "tick_size": pl.Float64,
+    "dates_basis": pl.Utf8,
+    "first_seen_date": pl.Date,
+    "last_seen_date": pl.Date,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+FUTURES_BARS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "exchange": pl.Utf8,
+    "exchange_code": pl.Utf8,
+    "product": pl.Utf8,
+    "trade_date": pl.Date,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "settle": pl.Float64,
+    "pre_settle": pl.Float64,
+    "volume": pl.Int64,
+    "amount": pl.Float64,
+    "open_interest": pl.Int64,
+    "oi_change": pl.Int64,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+OPTION_BARS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "exchange": pl.Utf8,
+    "exchange_code": pl.Utf8,
+    "product": pl.Utf8,
+    "underlying_symbol": pl.Utf8,
+    "option_type": pl.Utf8,
+    "strike": pl.Float64,
+    "trade_date": pl.Date,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "settle": pl.Float64,
+    "pre_settle": pl.Float64,
+    "volume": pl.Int64,
+    "amount": pl.Float64,
+    "open_interest": pl.Int64,
+    "oi_change": pl.Int64,
+    "exercise_volume": pl.Int64,
+    # As the exchange published them; `option_greeks` holds the lake's own.
+    "delta": pl.Float64,
+    "implied_vol": pl.Float64,
+    # SHFE and INE publish one volatility per expiry series, not per strike.
+    "series_implied_vol": pl.Float64,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+# Main and second-month continuous series, derived from futures_bars (see
+# derive/futures_continuous.py). One row per product, series and session.
+FUTURES_CONTINUOUS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "series": pl.Utf8,
+    "trade_date": pl.Date,
+    "contract_symbol": pl.Utf8,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "settle": pl.Float64,
+    "volume": pl.Int64,
+    "open_interest": pl.Int64,
+    "rolled": pl.Boolean,
+    "adj_ratio": pl.Float64,
+    "adj_diff": pl.Float64,
+    "roll_yield": pl.Float64,
+    "rule": pl.Utf8,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+# The lake's own IV and Greeks per option settlement (derive/option_greeks.py).
+# Greeks are per unit move: vega per 1.00 of volatility, theta per year, rho
+# per 1.00 of rate. `status` says why a row has no IV (expiry_day,
+# below_intrinsic, no_underlying, no_expiry, no_price, above_bound).
+OPTION_GREEKS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "trade_date": pl.Date,
+    "underlying_symbol": pl.Utf8,
+    "underlying_price": pl.Float64,
+    "forward_source": pl.Utf8,
+    "time_to_expiry": pl.Float64,
+    "rate": pl.Float64,
+    "rate_source": pl.Utf8,
+    "model": pl.Utf8,
+    "iv": pl.Float64,
+    "delta": pl.Float64,
+    "gamma": pl.Float64,
+    "vega": pl.Float64,
+    "theta": pl.Float64,
+    "rho": pl.Float64,
+    "status": pl.Utf8,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+# One-minute futures bars for a chosen set of contracts (adapters/sina/
+# futures_minute.py). bar_time is the closing minute, Beijing wall clock; a
+# night-session bar belongs to the next trading day, so here — unlike the
+# equity minute bars — trade_date is not bar_time.date().
+FUTURES_MINUTE_BARS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "exchange": pl.Utf8,
+    "trade_date": pl.Date,
+    "bar_time": pl.Datetime(time_unit="us"),
+    "frequency": pl.Utf8,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Int64,
+    "open_interest": pl.Int64,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
 INSTRUMENTS_SCHEMA = {
     "symbol": pl.Utf8,
     "name": pl.Utf8,
@@ -647,6 +826,13 @@ DATASET_SCHEMAS = {
     "minute_bars_5m": MINUTE_BARS_SCHEMA,
     "trade_ticks": TRADE_TICKS_SCHEMA,
     "commodity_bars": COMMODITY_BARS_SCHEMA,
+    "futures_contracts": FUTURES_CONTRACTS_SCHEMA,
+    "option_contracts": OPTION_CONTRACTS_SCHEMA,
+    "futures_bars": FUTURES_BARS_SCHEMA,
+    "option_bars": OPTION_BARS_SCHEMA,
+    "futures_continuous": FUTURES_CONTINUOUS_SCHEMA,
+    "option_greeks": OPTION_GREEKS_SCHEMA,
+    "futures_minute_bars": FUTURES_MINUTE_BARS_SCHEMA,
     "corporate_actions": CORPORATE_ACTIONS_SCHEMA,
     "adj_factors": ADJ_FACTORS_SCHEMA,
     "financial_statement_items": FINANCIAL_STATEMENT_ITEMS_SCHEMA,
@@ -694,6 +880,13 @@ PRIMARY_KEYS = {
     # sharing one. tick_seq is the only thing that separates them.
     "trade_ticks": ["symbol", "trade_date", "tick_seq"],
     "commodity_bars": ["symbol", "trade_date"],
+    "futures_contracts": ["symbol"],
+    "option_contracts": ["symbol"],
+    "futures_bars": ["symbol", "trade_date"],
+    "option_bars": ["symbol", "trade_date"],
+    "futures_continuous": ["symbol", "series", "trade_date"],
+    "option_greeks": ["symbol", "trade_date"],
+    "futures_minute_bars": ["symbol", "bar_time"],
     "corporate_actions": ["symbol", "ex_date", "action_type"],
     "adj_factors": ["symbol", "trade_date", "adjust_type"],
     # announce_date is part of the key, not an attribute of it: a restatement
@@ -781,6 +974,27 @@ _CORE_SEMANTIC_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "trading_calendar": ("is_trading",),
     "trading_status": ("is_trading", "status"),
     "trade_ticks": ("trade_time", "direction"),
+    "futures_contracts": ("exchange", "exchange_code", "product", "dates_basis"),
+    "option_contracts": (
+        "exchange",
+        "exchange_code",
+        "product",
+        "underlying_symbol",
+        "option_type",
+        "strike",
+        "dates_basis",
+    ),
+    "futures_bars": ("exchange", "exchange_code", "product", "volume", "open_interest"),
+    "option_bars": (
+        "exchange",
+        "exchange_code",
+        "product",
+        "underlying_symbol",
+        "option_type",
+        "strike",
+        "volume",
+        "open_interest",
+    ),
 }
 
 
@@ -850,6 +1064,80 @@ def _validate_bar_semantics(df: pl.DataFrame, dataset: str) -> None:
     if bad:
         raise SchemaValidationError(
             f"dataset '{dataset}': {bad} row(s) violate numeric market-data invariants"
+        )
+
+
+DERIVATIVE_BAR_DATASETS = frozenset({"futures_bars", "option_bars", "futures_minute_bars"})
+
+
+def derivative_bar_violations(dataset: str) -> pl.Expr | None:
+    """Rows of a futures/option bar frame that cannot be true, as one predicate.
+
+    Written from what the exchanges actually publish, sampled once a quarter
+    across every exchange's history (2026-09-25), not from how a bar "should"
+    look. Volume can be positive with only a close printed — delivery-month
+    sessions, exchange-for-physical and exercise-related trades leave no
+    open/high/low — and an expiring option can carry no settlement at all, or
+    settle at exactly zero when it expires out of the money. What stays
+    impossible: a non-positive trade price or futures settlement, a negative
+    option settlement, a negative count, and a full candle whose high or low
+    does not bound its open and close.
+    """
+    if dataset not in DERIVATIVE_BAR_DATASETS:
+        return None
+    ohlc = ("open", "high", "low", "close")
+    every = pl.all_horizontal([pl.col(c).is_not_null() for c in ohlc])
+    if dataset == "futures_minute_bars":
+        return pl.any_horizontal(
+            [
+                *[pl.col(c).is_not_null() & (pl.col(c) <= 0) for c in ohlc],
+                pl.col("volume") < 0,
+                pl.col("open_interest") < 0,
+                every & (pl.col("high") < pl.max_horizontal("open", "close")),
+                every & (pl.col("low") > pl.min_horizontal("open", "close")),
+            ]
+        )
+    settle_floor = pl.col("settle") < 0 if dataset == "option_bars" else pl.col("settle") <= 0
+    checks = [
+        pl.col("settle").is_not_null() & settle_floor,
+        pl.col("pre_settle").is_not_null() & (pl.col("pre_settle") <= 0),
+        *[pl.col(c).is_not_null() & (pl.col(c) <= 0) for c in ohlc],
+        pl.col("volume") < 0,
+        pl.col("open_interest") < 0,
+        pl.col("amount").is_not_null() & (pl.col("amount") < 0),
+        every & (pl.col("high") < pl.max_horizontal("open", "close")),
+        every & (pl.col("low") > pl.min_horizontal("open", "close")),
+    ]
+    if dataset == "option_bars":
+        checks.extend(
+            [
+                pl.col("strike") <= 0,
+                ~pl.col("option_type").is_in(["C", "P"]),
+                # SHFE prints deep in-the-money puts at -1.000001.
+                pl.col("delta").is_not_null() & (pl.col("delta").abs() > 1.0001),
+                pl.col("exercise_volume").is_not_null() & (pl.col("exercise_volume") < 0),
+                pl.col("implied_vol").is_not_null() & (pl.col("implied_vol") < 0),
+                pl.col("series_implied_vol").is_not_null() & (pl.col("series_implied_vol") < 0),
+            ]
+        )
+    return pl.any_horizontal(checks)
+
+
+def _validate_derivative_bar_semantics(df: pl.DataFrame, dataset: str) -> None:
+    """Refuse a futures/option frame holding a row :func:`derivative_bar_violations` names.
+
+    Kept apart from the equity bar checks, which require a positive price on
+    every row: an option strike that did not trade still has a settlement, and
+    that settlement is the row. The step quarantines offending rows before
+    they get here, so this only fires on a writer that skipped that.
+    """
+    predicate = derivative_bar_violations(dataset)
+    if predicate is None or df.is_empty():
+        return
+    bad = df.filter(predicate).height
+    if bad:
+        raise SchemaValidationError(
+            f"dataset '{dataset}': {bad} row(s) violate futures/option bar invariants"
         )
 
 
@@ -1033,6 +1321,7 @@ def validate_dataframe(
 
     _validate_finite_values(normalized, dataset)
     _validate_bar_semantics(normalized, dataset)
+    _validate_derivative_bar_semantics(normalized, dataset)
     return normalized
 
 

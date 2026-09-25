@@ -156,19 +156,19 @@ def _published_derive(cfg, dataset: str):
     "--full",
     is_flag=True,
     default=False,
-    help="重写 adj_factors 的全部分区（默认只从水位往后追加）。",
+    help="重写 adj_factors / industry_index / option_greeks 的全部分区（默认只补增量）。",
 )
 @click.option(
     "--start",
     "start_str",
     default=None,
-    help="industry_index / trading_status：只派生这个日期（YYYY-MM-DD）及之后的。",
+    help="industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之后的。",
 )
 @click.option(
     "--end",
     "end_str",
     default=None,
-    help="industry_index / trading_status：只派生这个日期（YYYY-MM-DD）及之前的。",
+    help="industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之前的。",
 )
 @click.option(
     "--apply",
@@ -191,6 +191,9 @@ def derive(
     （`derive_adj_factors`、`derive_industry_index`、`trading_status_derive`），
     所以在这里跑它们属于修复或补更早的窗口，不是正常一天的一部分。
     `sector_routing`、`sector_code_map` 和 `valuation_orphans` 没有任何调度会跑，只能手动执行。
+    `futures_continuous` 和 `option_greeks` 在 `derivatives` 组里日更。
+    `futures_continuous` 每次全量重算；`option_greeks` 只重算期权/期货分区比它新的交易日，
+    所以回填 futures_bars / option_bars 之后直接再跑一次即可；换了模型或利率历史才需要 `--full`。
     """
     # Derive targets are lower case in the registry, and command names are
     # already case-insensitive; a target typed in caps should resolve the same.
@@ -219,6 +222,20 @@ def derive(
 
         with _published_derive(cfg, name) as outcome:
             summary = derive_industry_index(cfg, start=start, end=end, full=full)
+            outcome["rows_written"] = summary.get("rows", 0)
+        click.echo(json.dumps(summary, indent=2, default=str))
+    elif name == "futures_continuous":
+        from cnequity.derive.futures_continuous import derive_futures_continuous
+
+        with _published_derive(cfg, name) as outcome:
+            summary = derive_futures_continuous(cfg)
+            outcome["rows_written"] = summary.get("rows", 0)
+        click.echo(json.dumps(summary, indent=2, default=str))
+    elif name == "option_greeks":
+        from cnequity.derive.option_greeks import derive_option_greeks
+
+        with _published_derive(cfg, name) as outcome:
+            summary = derive_option_greeks(cfg, start=start, end=end, full=full)
             outcome["rows_written"] = summary.get("rows", 0)
         click.echo(json.dumps(summary, indent=2, default=str))
     elif name == "trading_status":

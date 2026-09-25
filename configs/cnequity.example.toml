@@ -169,6 +169,13 @@ min_interval_seconds = 1.0
 enabled = true
 min_interval_seconds = 1.0
 
+# The futures exchanges' own daily files (futures_bars, option_bars and the two
+# contract tables). One label for all of them; each exchange is its own probe
+# in `cne sources health`. A backfill is one request per exchange per session.
+[sources.futures_exchange]
+enabled = true
+min_interval_seconds = 1.0
+
 [sources.slo]
 # Probe keys this network cannot reach at all. They stay measured and reported,
 # but under `not_applicable` instead of failing the availability gate: an absent
@@ -334,6 +341,47 @@ max_symbols = 200
 # request rate (the limiter paces every request); it stops a lane idling on
 # latency. Measured serial: 1.70 req/s.
 fetch_workers = 4
+
+[futures]
+# Per-contract futures and option chains (ADR-0013): futures_contracts,
+# option_contracts, futures_bars, option_bars. Off by default and not part of
+# `cne init`; nothing here costs anything until you turn it on.
+#
+# SOURCES. Each exchange's own session file, which lists every live contract
+# every day — traded or not — with its settlement price:
+#   SHF  SHFE, INE's products included   futures 2002-01-07, options 2018-09-21
+#   CZC  CZCE                            futures 2010-01-04, options 2017-04-19
+#   GFE  GFEX                            futures 2022-12-22, options 2022-12-23
+#   CFE  CFFEX                           futures 2010-04-16, options 2019-12-23
+# Volume and open interest are single-sided throughout (the commodity exchanges
+# counted both sides until 2019; halved on the way in), turnover is 元, implied
+# volatility a fraction. Each exchange is one request per session and kind.
+#
+# HISTORY. `cne backfill futures_bars --start 2002-01-07` and `cne backfill
+# option_bars --start 2017-04-19` (each exchange is asked only from its own
+# first session), then `cne backfill futures_contracts` and `cne backfill
+# option_contracts` to rebuild the contract tables from them. A full history is
+# roughly 20,000 requests at one a second; the walk resumes where it stopped.
+enabled = false
+# Empty means every exchange this release can read ("SHF", "CZC", "GFE", "CFE";
+# "INE" is accepted as SHF, which publishes it).
+exchanges = []
+options = true
+# DCE's own endpoints answer with an access challenge. "sina" fills its futures
+# from Sina (contracts listed from mid-2018; no turnover); "off" leaves DCE out;
+# "official" reads DCE itself and is only worth choosing where
+# `cne sources health` shows the `dce` probe green.
+dce_route = "sina"
+# One-minute bars (futures_minute_bars), for a watchlist only. Sina keeps the
+# latest 1023 bars per contract — about two sessions for a product that trades
+# at night — so this grows forward from the day it is enabled, has no history
+# before that, and must run every session. Night bars belong to the next
+# trading day. `minute_products` captures each product's two most-held
+# contracts on the latest session; `minute_contracts` names contracts.
+minute_enabled = false
+minute_products = []            # e.g. ["CU.SHF", "M.DCE", "IF.CFE"]
+minute_contracts = []           # e.g. ["SC2612.INE"]
+minute_max_contracts = 100
 
 [failover]
 enabled = true
@@ -504,6 +552,19 @@ parallel = true
 steps = ["institutional_holdings", "analyst_consensus",
   "hot_rank", "sector_bars", "sector_fund_flow",
   "sentiment_scores", "compact"]
+
+# Futures and options. Every step returns without a request unless [futures]
+# enabled = true, so the group is harmless on a lake that has not opted in.
+# After macro_risk because the exchanges publish their files in the late
+# afternoon.
+[job.daily.groups.derivatives]
+at = "18:30"
+parallel = true
+steps = [
+  "futures_bars", "option_bars", "futures_contracts", "option_contracts",
+  "futures_minute_bars",
+  "compact", "derive_futures_continuous", "derive_option_greeks",
+]
 
 # Not scheduled by anything: `cne run daily --group intraday` only. Enable
 # [minute_bars] first, and read the horizon note there before expecting history.

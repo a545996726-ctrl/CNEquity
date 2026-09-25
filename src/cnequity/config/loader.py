@@ -215,6 +215,21 @@ class Config:
     # friction is the point, because the cost is theirs to accept.
     trade_ticks_max_symbols: int = 200
     trade_ticks_fetch_workers: int = 4
+    # Futures and options (ADR-0013). Off by default and outside `cne init`:
+    # the equity lake does not pay for a family nobody asked for. `exchanges`
+    # empty means every exchange this release can read.
+    futures_enabled: bool = False
+    futures_exchanges: list[str] = field(default_factory=list)
+    futures_options: bool = True
+    # DCE's own endpoints answer with an access challenge; "sina" fills its
+    # futures from Sina, "off" leaves DCE out.
+    futures_dce_route: str = "sina"
+    # One-minute bars for a watchlist: `minute_products` takes each product's
+    # main and second contract ("CU.SHF"), `minute_contracts` names contracts.
+    futures_minute_enabled: bool = False
+    futures_minute_products: list[str] = field(default_factory=list)
+    futures_minute_contracts: list[str] = field(default_factory=list)
+    futures_minute_max_contracts: int = 100
     failover_enabled: bool = True
     # Backfill source snapshots are an optional audit artifact. Keeping them
     # off the canonical backfill path prevents a slow backup vendor from
@@ -743,6 +758,7 @@ def load_config(path: str | Path) -> Config:
 
     minute_raw = raw.get("minute_bars", {})
     ticks_raw = raw.get("trade_ticks", {})
+    futures_raw = raw.get("futures", {})
     init_raw = raw.get("job", {}).get("init", {})
     phases_block = init_raw.get("phases", init_raw)
     init_phases = list(phases_block.get("names", init_raw.get("names", [])))
@@ -842,6 +858,18 @@ def load_config(path: str | Path) -> Config:
         trade_ticks_symbols=list(ticks_raw.get("symbols", [])),
         trade_ticks_max_symbols=int(ticks_raw.get("max_symbols", 200)),
         trade_ticks_fetch_workers=int(ticks_raw.get("fetch_workers", 4)),
+        futures_enabled=bool(futures_raw.get("enabled", False)),
+        futures_exchanges=[str(x).strip().upper() for x in futures_raw.get("exchanges", [])],
+        futures_options=bool(futures_raw.get("options", True)),
+        futures_dce_route=str(futures_raw.get("dce_route", "sina")).strip().lower(),
+        futures_minute_enabled=bool(futures_raw.get("minute_enabled", False)),
+        futures_minute_products=[
+            str(x).strip().upper() for x in futures_raw.get("minute_products", [])
+        ],
+        futures_minute_contracts=[
+            str(x).strip().upper() for x in futures_raw.get("minute_contracts", [])
+        ],
+        futures_minute_max_contracts=int(futures_raw.get("minute_max_contracts", 100)),
         failover_enabled=bool(failover_raw.get("enabled", True)),
         failover_backfill_snapshots=bool(failover_raw.get("backfill_snapshots", False)),
         failover_datasets=failover_datasets,
@@ -1035,6 +1063,30 @@ def validate_config(cfg: Config) -> list[str]:
         errors.append("[trade_ticks].max_symbols must be >= 1")
     if cfg.trade_ticks_fetch_workers < 1:
         errors.append("[trade_ticks].fetch_workers must be >= 1")
+
+    from cnequity.adapters.futures_exchange import SUPPORTED_EXCHANGES
+
+    for exchange in cfg.futures_exchanges:
+        if exchange not in SUPPORTED_EXCHANGES:
+            errors.append(
+                f"[futures].exchanges: {exchange!r} is not readable by this release "
+                f"(available: {', '.join(SUPPORTED_EXCHANGES)})"
+            )
+    if cfg.futures_minute_max_contracts < 1:
+        errors.append("[futures].minute_max_contracts must be >= 1")
+    if (
+        cfg.futures_minute_enabled
+        and not cfg.futures_minute_products
+        and not cfg.futures_minute_contracts
+    ):
+        errors.append(
+            "[futures].minute_enabled = true but minute_products and minute_contracts are empty"
+        )
+    if cfg.futures_dce_route not in {"sina", "official", "off"}:
+        errors.append(
+            f"[futures].dce_route: {cfg.futures_dce_route!r} is not understood "
+            "(expected 'sina', 'official' or 'off')"
+        )
 
     referenced: list[tuple[str, str]] = []
     for wave in cfg.daily_waves:

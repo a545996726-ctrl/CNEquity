@@ -78,7 +78,12 @@ class Gap:
         # Derived datasets are rebuilt from curated inputs; there is no
         # registered ingestion step named ``adj_factors`` or
         # ``industry_index`` for ``cne backfill`` to invoke.
-        if self.dataset in {"adj_factors", "industry_index"}:
+        if self.dataset in {
+            "adj_factors",
+            "industry_index",
+            "futures_continuous",
+            "option_greeks",
+        }:
             cmd = f"cne derive {self.dataset} --config {config_path}"
             if self.dataset == "industry_index":
                 if self.start is not None:

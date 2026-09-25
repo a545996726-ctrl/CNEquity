@@ -915,16 +915,33 @@ def status(
             for dataset in (INSTRUMENT_SCOPED_DATASETS if scope else ())
             if (report := _tip_scope(cfg, df, dataset)) is not None
         ]
+        if scope:
+            from cnequity.quality.derivative_checks import (
+                DERIVATIVE_BAR_CONTRACTS,
+                derivative_tip_scope,
+            )
+
+            scopes.extend(
+                report
+                for dataset in DERIVATIVE_BAR_CONTRACTS
+                if (report := derivative_tip_scope(cfg, dataset)) is not None
+            )
         gating_scopes = [
             report for report in scopes if _gates_on_dataset(cfg, report["dataset"], wanted_groups)
         ]
         scope_incomplete = any(r["state"] == "incomplete" for r in gating_scopes)
         scope_unverified = any(r["state"] == "unverified" for r in gating_scopes)
-        scope_heading = f"取数截面（{ingest_scope_label(cfg.ingest_universe)}）"
+        default_heading = f"取数截面（{ingest_scope_label(cfg.ingest_universe)}）"
         for report in scopes:
             dataset = report["dataset"]
+            scope_heading = report.get("heading", default_heading)
             if report["state"] == "complete":
                 owed_note = f"，另有 {report['owed']} 只已记账待补" if report.get("owed") else ""
+                if report.get("unverifiable_exchanges"):
+                    owed_note += (
+                        f"；{'、'.join(report['unverifiable_exchanges'])} 走供应商路线"
+                        "（无成交日缺行），不在证明之内"
+                    )
                 click.echo(
                     f"\n{scope_heading}：OK —— {dataset} "
                     f"{report['date']} 覆盖证据 {report['covered']}/"
@@ -934,7 +951,8 @@ def status(
                 sample = ", ".join(report["missing"][:5])
                 click.echo(
                     f"\n{scope_heading}：INCOMPLETE —— {dataset} "
-                    f"{report['date']} 有 {len(report['missing'])} 只 active 标的"
+                    f"{report['date']} 有 {len(report['missing'])} "
+                    f"{report.get('noun', '只 active 标的')}"
                     f"既无数据、也无停牌证据、也没有记账"
                     f"（覆盖 {report['covered']}/{report['expected']}，"
                     f"{report['ratio']:.1%}；示例：{sample}）。"
