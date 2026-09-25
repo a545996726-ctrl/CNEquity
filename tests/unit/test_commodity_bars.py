@@ -468,3 +468,76 @@ def test_a_sina_rate_limit_cools_every_lane_instead_of_retrying_straight_away():
     assert deferred == [("sina", df.SINA_RATE_LIMIT_COOLDOWN_SECONDS)] * (
         df.SINA_FETCH_ATTEMPTS - 1
     )
+
+
+def _range_frame(days: list[date]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": ["AU0.SHF"] * len(days),
+            "name": ["沪金主连"] * len(days),
+            "exchange": ["SHF"] * len(days),
+            "trade_date": days,
+            "open": [1.0] * len(days),
+            "high": [1.0] * len(days),
+            "low": [1.0] * len(days),
+            "close": [1.0] * len(days),
+            "volume": [1] * len(days),
+            "amount": [None] * len(days),
+            "open_interest": [None] * len(days),
+            "source": ["sina"] * len(days),
+        },
+        schema_overrides={"amount": pl.Float64, "open_interest": pl.Float64},
+    )
+
+
+def _backfill_config(tmp_path, start: date, end: date):
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "data")
+    cfg._backfill = True
+    cfg._backfill_start = start
+    cfg._backfill_end = end
+    return cfg
+
+
+def test_backfill_writes_every_session_of_the_window(tmp_path):
+    """The range fetch used to be rejected for not being dated the run day."""
+    from cnequity.steps.commodity import step_commodity_bars
+
+    cfg = _backfill_config(tmp_path, date(2026, 9, 23), date(2026, 9, 24))
+    days = [date(2026, 9, 23), date(2026, 9, 24)]
+    with patch(
+        "cnequity.steps.commodity.fetch_commodity_bars_range",
+        return_value=_range_frame(days),
+    ) as fetch:
+        result = step_commodity_bars(cfg, date(2026, 9, 24), "run-bf", {})
+
+    fetch.assert_called_once_with(date(2026, 9, 23), date(2026, 9, 24), config=cfg, strict=True)
+    assert result["rows_written"] == 2
+    staged = pl.concat(
+        [pl.read_parquet(p) for p in (cfg.staging_root / "commodity_bars").rglob("*.parquet")]
+    )
+    assert sorted(staged["trade_date"].to_list()) == days
+
+
+def test_backfill_rejects_rows_outside_the_window(tmp_path):
+    from cnequity.steps.commodity import step_commodity_bars
+
+    cfg = _backfill_config(tmp_path, date(2026, 9, 23), date(2026, 9, 24))
+    frame = _range_frame([date(2026, 9, 22), date(2026, 9, 23)])
+    with patch("cnequity.steps.commodity.fetch_commodity_bars_range", return_value=frame):
+        with pytest.raises(RuntimeError, match="outside the window"):
+            step_commodity_bars(cfg, date(2026, 9, 24), "run-bf", {})
+
+
+def test_backfill_window_is_capped_at_the_run_day(tmp_path):
+    from cnequity.steps.commodity import step_commodity_bars
+
+    cfg = _backfill_config(tmp_path, date(2026, 9, 23), date(2026, 12, 31))
+    with patch(
+        "cnequity.steps.commodity.fetch_commodity_bars_range",
+        return_value=_range_frame([date(2026, 9, 23)]),
+    ) as fetch:
+        step_commodity_bars(cfg, date(2026, 9, 24), "run-bf", {})
+
+    assert fetch.call_args.args == (date(2026, 9, 23), date(2026, 9, 24))

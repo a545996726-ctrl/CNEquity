@@ -10,6 +10,9 @@ already talks to, so going direct removes a parsing layer without changing the
 publisher — and picks up the project's own retry, throttle and TLS handling.
 See issue #3.
 
+The daily run asks each rate report for the run day only. The backfill reads
+the two daily rates over its whole window instead (``fetch_daily_rates_range``).
+
 Monthly observations are stamped at month end. EastMoney reports them at month
 *start* (``REPORT_DATE = 2026-07-01``), so they are converted; changing this
 convention would double-write every month already in curated under a second key.
@@ -24,7 +27,7 @@ from datetime import date
 
 import polars as pl
 
-from cnequity.adapters.eastmoney.datacenter import fetch_datacenter
+from cnequity.adapters.eastmoney.datacenter import EastMoneyDatacenterError, fetch_datacenter
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient
 
 _TREASURY_REPORT = "RPTA_WEB_TREASURYYIELD"
@@ -34,6 +37,34 @@ _SHIBOR_COLUMNS = "REPORT_DATE,IR_RATE"
 _SHIBOR_FILTER = '(MARKET_CODE="001")(CURRENCY_CODE="CNY")(INDICATOR_ID="203")'
 _LPR_REPORT = "RPTA_WEB_RATE"
 _LPR_COLUMNS = "TRADE_DATE,LPR1Y"
+
+# The daily series a backfill reads as a window instead of one day at a time.
+# Both reports take a `(COL>='…')(COL<='…')` range and page it — measured
+# 2026-09-25: inclusive at both ends, 2016..2026 in six 500-row pages. LPR stays
+# per-day: RPTA_WEB_RATE's LPR1Y is the old daily 贷款基础利率 until 2019-08 and
+# the reformed monthly LPR after it, so a range would file a different
+# benchmark under the same indicator.
+#   (indicator_id, report, columns, base filter, date column, value column)
+_DAILY_RANGE_SERIES = (
+    ("cnbond_yield_10y", _TREASURY_REPORT, _TREASURY_COLUMNS, "", "SOLAR_DATE", "EMM00166466"),
+    ("shibor_3m", _SHIBOR_REPORT, _SHIBOR_COLUMNS, _SHIBOR_FILTER, "REPORT_DATE", "IR_RATE"),
+)
+
+#: First published value of each daily series, measured 2026-09-25. The
+#: treasury report has rows from 1990-12-19, but its 10Y column is null until
+#: 2002-01-04; Shibor 3M starts with Shibor itself on 2006-10-08.
+DAILY_SERIES_FIRST_OBS = {
+    "cnbond_yield_10y": date(2002, 1, 4),
+    "shibor_3m": date(2006, 10, 8),
+}
+
+_ROW_SCHEMA = {
+    "indicator_id": pl.Utf8,
+    "obs_date": pl.Date,
+    "value": pl.Float64,
+    "frequency": pl.Utf8,
+    "source": pl.Utf8,
+}
 
 # Monthly series published on EastMoney's 经济数据 pages, read directly.
 #   pmi_manufacturing  制造业 PMI          data.eastmoney.com/cjsj/pmi.html
@@ -174,6 +205,70 @@ def _eastmoney_daily(client: EastMoneyClient, trade_date: date) -> list[dict]:
             )
 
     return rows
+
+
+def fetch_daily_rates_range(
+    start: date,
+    end: date,
+    *,
+    client: EastMoneyClient | None = None,
+    config=None,
+) -> pl.DataFrame:
+    """cnbond_yield_10y and shibor_3m for every published day in ``[start, end]``.
+
+    The backfill path. The per-day path is only ever asked for the run day, so
+    history before the first daily run never landed; here one paged range query
+    per report covers the whole window. Days a report
+    carries without a value (treasury rows kept for US-only sessions and CN
+    holidays) are dropped, as ``_eastmoney_daily`` drops them.
+
+    A row outside the window means the report ignored the range filter, so the
+    whole fetch fails rather than filing rows nobody asked for.
+    """
+    owns = client is None
+    if client is None:
+        client = EastMoneyClient(config=config)
+
+    lo, hi = start.isoformat(), end.isoformat()
+    rows: list[dict] = []
+    try:
+        for indicator_id, report, columns, base, date_col, value_col in _DAILY_RANGE_SERIES:
+            records = fetch_datacenter(
+                client,
+                report,
+                columns,
+                filter_expr=f"{base}({date_col}>='{lo}')({date_col}<='{hi}')",
+                sort_columns=date_col,
+                sort_types="1",
+            )
+            for item in records:
+                obs = _parse_obs_date(item.get(date_col))
+                val = _finite_float(item.get(value_col))
+                if obs is None or val is None:
+                    continue
+                if not start <= obs <= end:
+                    raise EastMoneyDatacenterError(
+                        f"EastMoney datacenter {report} returned {date_col}={obs.isoformat()} "
+                        f"for the range {lo}..{hi}; the range filter was not applied"
+                    )
+                rows.append(
+                    {
+                        "indicator_id": indicator_id,
+                        "obs_date": obs,
+                        "value": val,
+                        "frequency": "daily",
+                        "source": "eastmoney",
+                    }
+                )
+    finally:
+        if owns:
+            client.close()
+
+    return (
+        pl.DataFrame(rows, schema=_ROW_SCHEMA)
+        .unique(subset=["indicator_id", "obs_date"], keep="last", maintain_order=True)
+        .sort(["indicator_id", "obs_date"])
+    )
 
 
 def _eastmoney_monthly(client: EastMoneyClient, trade_date: date) -> list[dict]:

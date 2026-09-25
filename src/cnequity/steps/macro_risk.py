@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 import polars as pl
 
 from cnequity.adapters.eastmoney.share_unlock import fetch_share_unlock_schedule
-from cnequity.adapters.macro.indicators import fetch_macro_indicators
+from cnequity.adapters.macro.indicators import (
+    DAILY_SERIES_FIRST_OBS,
+    fetch_daily_rates_range,
+    fetch_macro_indicators,
+)
 from cnequity.config import Config
 from cnequity.derive.market_breadth import MARKET_BREADTH_METRICS, compute_market_breadth
 from cnequity.orchestrator.registry import register_step
 from cnequity.quality.macro_checks import macro_revision_findings
-from cnequity.steps.common import BACKFILL_START
+from cnequity.steps.common import BACKFILL_START, list_trading_dates
 from cnequity.steps.http_common import run_incremental_fetched
+
+logger = logging.getLogger(__name__)
 
 _REQUIRED_DAILY_MACRO_INDICATORS = frozenset({"cnbond_yield_10y", "shibor_3m"})
 _MARKET_BREADTH_METRICS = frozenset(MARKET_BREADTH_METRICS)
@@ -108,6 +115,48 @@ def _missing_daily_macro_indicators(df, trade_date: date) -> list[str]:
     return sorted(_REQUIRED_DAILY_MACRO_INDICATORS - observed)
 
 
+def _daily_rate_history(
+    config: Config, trade_date: date
+) -> tuple[pl.DataFrame, dict[date, list[str]]]:
+    """The backfill window's daily rates, and the sessions each series misses.
+
+    Defaults to the lake's ``BACKFILL_START``: both series are complete on
+    every session from there (measured 2026-09-25), and ``--start`` reaches back
+    to each one's first value (``DAILY_SERIES_FIRST_OBS``). A session before a
+    series' first value is not a gap, since there was nothing to publish yet.
+
+    Rows are kept on exchange sessions only. The interbank market also works
+    the make-up weekends the exchanges skip, and the daily run never files
+    those days, so keeping them would give history a density that later days
+    do not have.
+    """
+    start = getattr(config, "_backfill_start", None) or BACKFILL_START
+    end = min(getattr(config, "_backfill_end", None) or trade_date, trade_date)
+    if start > end:
+        return pl.DataFrame(), {}
+    sessions = list_trading_dates(config, start, end)
+    fetched = fetch_daily_rates_range(start, end, config=config)
+    history = fetched.filter(pl.col("obs_date").is_in(sessions))
+    logger.info(
+        "macro_indicators backfill: %d daily-rate row(s) over %s..%s (%d on non-session days skipped)",
+        history.height,
+        start.isoformat(),
+        end.isoformat(),
+        fetched.height - history.height,
+    )
+    observed = set(history.select(["indicator_id", "obs_date"]).iter_rows())
+    gaps: dict[date, list[str]] = {}
+    for day in sessions:
+        missing = sorted(
+            indicator
+            for indicator, first in DAILY_SERIES_FIRST_OBS.items()
+            if day >= first and (indicator, day) not in observed
+        )
+        if missing:
+            gaps[day] = missing
+    return history, gaps
+
+
 def _validate_market_breadth_snapshot(df: pl.DataFrame) -> pl.DataFrame:
     """Reject partial or duplicated derived metric sets before staging."""
     if df.is_empty():
@@ -164,12 +213,25 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
     # migration (issue #3) — so this records the change rather than blocking it.
     revisions: list[dict] = []
     daily_gaps: dict[date, list[str]] = {}
+    backfill = getattr(config, "_backfill", False)
 
     def _fetch(day: date):
         df = fetch_macro_indicators(day, config=config)
-        missing = _missing_daily_macro_indicators(df, day)
-        if missing:
-            daily_gaps[day] = missing
+        if backfill:
+            # The run-day fetch still runs, so a backfill writes everything it
+            # used to (monthly series, 社融, a same-day LPR) plus the window's
+            # daily rates. Gaps are judged over the window's sessions, not the
+            # run day, which for a backfill can be a weekend.
+            history, gaps = _daily_rate_history(config, day)
+            daily_gaps.update(gaps)
+            if not history.is_empty():
+                df = pl.concat([history, df], how="diagonal_relaxed").unique(
+                    subset=["indicator_id", "obs_date"], keep="last", maintain_order=True
+                )
+        else:
+            missing = _missing_daily_macro_indicators(df, day)
+            if missing:
+                daily_gaps[day] = missing
         revisions.extend(macro_revision_findings(config, df, day))
         return df
 
