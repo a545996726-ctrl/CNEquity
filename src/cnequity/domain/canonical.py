@@ -76,6 +76,32 @@ def _sort_for_canonical(frame, dataset: str):
     return frame.sort(sort_cols, descending=descending, nulls_last=False, maintain_order=True)
 
 
+def _retain_payment_evidence(frame, dataset):
+    """A date-less vendor refresh cannot erase independently sourced payment evidence.
+
+    Only propagate within identical event keys AND economic amounts. Changed
+    cash amounts require new evidence; no cross-event/date/source inference.
+    """
+    schema = frame.collect_schema() if isinstance(frame, pl.LazyFrame) else frame.schema
+    columns = set(schema.names())
+    evidence = ["payment_date", "payment_source"]
+    keys = PRIMARY_KEYS.get(dataset, []) + ["cash_dividend", "bonus_ratio", "transfer_ratio"]
+    if dataset != "corporate_actions" or not set(keys + evidence) <= columns:
+        return frame
+    stamp = (
+        pl.when(pl.col("payment_date").is_not_null())
+        .then(pl.struct(evidence))
+        .otherwise(None)
+        .forward_fill()
+        .over(keys)
+    )
+    return (
+        frame.with_columns(stamp.alias("__payment_evidence"))
+        .with_columns([pl.col("__payment_evidence").struct.field(c).alias(c) for c in evidence])
+        .drop("__payment_evidence")
+    )
+
+
 def dedupe_by_primary_key(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
     """Keep one row per registered PK, preferring the freshest provenance.
 
@@ -90,6 +116,7 @@ def dedupe_by_primary_key(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
         return df
     if any(column in df.columns for column in ("fetched_at", "source", "data_version")):
         df = _sort_for_canonical(df, dataset)
+    df = _retain_payment_evidence(df, dataset)
     out = df.unique(subset=primary_key, keep="last", maintain_order=True)
     return out.drop(*_HELPER_COLUMNS, strict=False)
 
@@ -102,6 +129,7 @@ def dedupe_lazy_by_primary_key(lf: pl.LazyFrame, dataset: str) -> pl.LazyFrame:
         return lf
     if any(column in columns for column in ("fetched_at", "source", "data_version")):
         lf = _sort_for_canonical(lf, dataset)
+    lf = _retain_payment_evidence(lf, dataset)
     return lf.unique(subset=primary_key, keep="last", maintain_order=True).drop(
         *_HELPER_COLUMNS, strict=False
     )

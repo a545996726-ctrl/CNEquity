@@ -490,10 +490,90 @@ def write_delisted_identity_evidence(config: Config, delisted: pl.DataFrame) -> 
         "source": "baostock.query_stock_basic",
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "delisted_symbols": dict(sorted(symbols.items())),
+        "listing_dates": {
+            row["symbol"]: row["list_date"].isoformat()
+            for row in delisted.select("symbol", "list_date").iter_rows(named=True)
+            if row["list_date"] is not None
+        }
+        if "list_date" in delisted.columns
+        else {},
     }
     path = _identity_evidence_path(config)
+    if path.exists():
+        previous = path.read_bytes()
+        history = path.parent / "history" / f"{hashlib.sha256(previous).hexdigest()}.json"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        if not history.exists():
+            history.write_bytes(previous)
     _write_json_atomic(path, payload)
     return path
+
+
+def _known_listing_dates(config: Config) -> dict[str, date]:
+    """IPO dates from the complete vendor identity observation, never first bars."""
+    try:
+        payload = json.loads(_identity_evidence_path(config).read_text())
+        if (
+            payload.get("claim") != _IDENTITY_CLAIM
+            or payload.get("evidence_version") != _IDENTITY_EVIDENCE_VERSION
+            or payload.get("status") != "complete"
+            or payload.get("source") != "baostock.query_stock_basic"
+        ):
+            return {}
+        return {k: date.fromisoformat(v) for k, v in payload.get("listing_dates", {}).items()}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _verified_suspended_windows(config, symbols, start, end, listing_dates):
+    """Require independent suspension evidence for every expected open session."""
+    if not symbols:
+        return {}
+    from cnequity.query.parquet_scan import scan_parquet_root
+
+    roots = [config.curated_root / name for name in ("trading_calendar", "trading_status")]
+    if any(not root.exists() or not any(root.rglob("*.parquet")) for root in roots):
+        return {}
+    calendar = scan_parquet_root(
+        roots[0], partition_col="trade_date", start=start, end=end
+    ).collect()
+    if not {"trade_date", "is_trading"} <= set(calendar.columns):
+        return {}
+    expected_calendar = {start + timedelta(days=i) for i in range((end - start).days + 1)}
+    if (
+        not expected_calendar <= set(calendar["trade_date"].to_list())
+        or calendar["is_trading"].null_count()
+    ):
+        return {}
+    days = set(calendar.filter(pl.col("is_trading"))["trade_date"].to_list())
+    if not days:
+        return {}
+    status = dedupe_lazy_by_primary_key(
+        scan_parquet_root(
+            roots[1], partition_col="trade_date", start=start, end=end, symbols=symbols
+        ),
+        "trading_status",
+    ).collect()
+    if not {"source", "is_trading", "status"} <= set(status.columns):
+        return {}
+    status = status.filter(
+        (pl.col("source") == "baostock")
+        & (~pl.col("is_trading"))
+        & (pl.col("status") == "suspended")
+    )
+    evidence = {}
+    for symbol in symbols:
+        expected = {d for d in days if d >= listing_dates.get(symbol, start)}
+        observed = set(status.filter(pl.col("symbol") == symbol)["trade_date"].to_list())
+        if expected and expected <= observed:
+            evidence[symbol] = {
+                "symbol": symbol,
+                "sessions": len(expected),
+                "source": "baostock",
+                "start": str(min(expected)),
+                "end": str(max(expected)),
+            }
+    return evidence
 
 
 def known_delisted_instruments(config: Config, as_of: date) -> dict[str, date]:
@@ -994,6 +1074,16 @@ def delisted_coverage_report(
             row["symbol"]: row["delist_date"] for row in instruments.iter_rows(named=True)
         }
 
+    listing_dates = _known_listing_dates(config)
+    not_yet_listed: list[dict] = []
+    verified_nontrading: list[dict] = []
+    uncertain = [
+        symbol
+        for symbol, last in candidates.items()
+        if symbol not in spans and last > end and listing_dates.get(symbol, start) <= end
+    ]
+    suspension_evidence = _verified_suspended_windows(config, uncertain, start, end, listing_dates)
+
     missing_bars: list[dict] = []
     unknown_overlap: list[dict] = []
     terminal_mismatches: list[dict] = []
@@ -1007,6 +1097,18 @@ def delisted_coverage_report(
         span = spans.get(symbol)
         overlap_is_definite = catalog_last <= end
         if span is None:
+            if listing_dates.get(symbol, start) > end:
+                not_yet_listed.append(
+                    {
+                        "symbol": symbol,
+                        "list_date": str(listing_dates[symbol]),
+                        "source": "baostock.query_stock_basic",
+                    }
+                )
+                continue
+            if not overlap_is_definite and symbol in suspension_evidence:
+                verified_nontrading.append(suspension_evidence[symbol])
+                continue
             finding = {"symbol": symbol, "catalog_last_traded": catalog_last.isoformat()}
             if overlap_is_definite:
                 missing_bars.append(finding)
@@ -1160,6 +1262,8 @@ def delisted_coverage_report(
             "formal_unresolved": len(formal_unresolved),
             "missing_bars": len(missing_bars),
             "unknown_overlap": len(unknown_overlap),
+            "not_yet_listed": len(not_yet_listed),
+            "verified_nontrading": len(verified_nontrading),
             "terminal_mismatch": len(terminal_mismatches),
             "terminal_nonprinting": len(terminal_nonprinting),
             "missing_instrument": len(missing_instruments),
@@ -1172,6 +1276,8 @@ def delisted_coverage_report(
             "formal_unresolved": limited(formal_unresolved),
             "missing_bars": limited(missing_bars),
             "unknown_overlap": limited(unknown_overlap),
+            "not_yet_listed": limited(not_yet_listed),
+            "verified_nontrading": limited(verified_nontrading),
             "terminal_mismatch": limited(terminal_mismatches),
             "terminal_nonprinting": limited(terminal_nonprinting),
             "missing_instrument": limited(missing_instruments),

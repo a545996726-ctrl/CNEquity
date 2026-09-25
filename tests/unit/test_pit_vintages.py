@@ -1,6 +1,8 @@
 """PIT vintages: a restatement must add a row, never overwrite the original."""
 
+import importlib.util
 from datetime import date
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -348,3 +350,53 @@ def test_revision_id_ignores_observation_time_but_tracks_value():
 
     assert revision_id_for_row(base) == revision_id_for_row(later)
     assert revision_id_for_row(base) != revision_id_for_row(restated)
+
+
+def test_cninfo_archive_recovery_requires_full_announcement_identity():
+    script = Path(__file__).parents[2] / "scripts" / "migrate_pit_vintages.py"
+    spec = importlib.util.spec_from_file_location("migrate_pit_vintages", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    existing = pl.DataFrame(
+        {
+            "announcement_id": ["a", "b"],
+            "symbol": ["002358.SZ", "002358.SZ"],
+            "announce_date": [date(2019, 6, 28), date(2019, 6, 28)],
+            "title": ["实施公告", "另一公告"],
+            "url": ["a.pdf", "b.pdf"],
+            "source_published_at": [None, None],
+            "available_at": [None, None],
+        },
+        schema_overrides={
+            "source_published_at": pl.Datetime("us", "UTC"),
+            "available_at": pl.Datetime("us", "UTC"),
+        },
+    )
+    replayed = pl.DataFrame(
+        {
+            "announcement_id": ["a", "b"],
+            "symbol": ["002358.SZ", "002358.SZ"],
+            "announce_date": [date(2019, 6, 28), date(2019, 6, 28)],
+            "title": ["实施公告", "标题已变化"],
+            "url": ["a.pdf", "b.pdf"],
+            "source_published_at": [
+                "2019-06-27T16:00:00+00:00",
+                "2019-06-27T16:00:00+00:00",
+            ],
+            "available_at": [
+                "2019-06-28T16:00:00+00:00",
+                "2019-06-28T16:00:00+00:00",
+            ],
+        }
+    ).with_columns(
+        pl.col("source_published_at", "available_at").str.to_datetime(
+            time_unit="us", time_zone="UTC"
+        )
+    )
+
+    recovered = module._recovered_announcement_rows(existing, replayed)
+
+    assert recovered["announcement_id"].to_list() == ["a"]
+    assert recovered["source_published_at"].null_count() == 0

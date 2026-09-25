@@ -195,6 +195,37 @@ def test_is_stale_respects_per_dataset_tolerance():
     assert is_stale("nope", date(2026, 7, 1), anchor) is True  # default tol=1
 
 
+def test_is_stale_counts_one_trading_session_across_a_weekend():
+    """A Friday watermark is one session behind Monday, not three calendar days."""
+    from datetime import date
+
+    from cnequity.domain.datasets import is_stale
+
+    friday = date(2026, 9, 18)
+    monday = date(2026, 9, 21)
+    assert is_stale("industry_index", friday, monday) is False
+    assert is_stale("daily_bars", friday, monday) is False
+    # The session before Friday is two sessions behind Monday.
+    assert is_stale("industry_index", date(2026, 9, 17), monday) is True
+    # National Day 2026: 09-30 → 10-08 is the next session, not eight calendar days.
+    assert is_stale("daily_bars", date(2026, 9, 30), date(2026, 10, 8)) is False
+    assert is_stale("daily_bars", date(2026, 9, 29), date(2026, 10, 8)) is True
+
+
+def test_calendar_scoped_and_quarterly_tolerances_stay_on_calendar_days():
+    from datetime import date
+
+    from cnequity.domain.datasets import is_stale
+
+    # News publishes on weekends. Saturday → Monday is two calendar days.
+    assert is_stale("news_headlines", date(2026, 9, 19), date(2026, 9, 21)) is True
+    assert is_stale("news_headlines", date(2026, 9, 20), date(2026, 9, 21)) is False
+    # 100 calendar days reaches the next quarter; 101 does not. That span is
+    # well under 100 trading sessions, so this locks the calendar unit.
+    assert is_stale("northbound_holdings", date(2026, 6, 30), date(2026, 10, 8)) is False
+    assert is_stale("northbound_holdings", date(2026, 6, 30), date(2026, 10, 9)) is True
+
+
 def test_optional_capture_freshness_follows_config_switches(tmp_path):
     from cnequity.config import Config
 

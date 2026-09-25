@@ -18,7 +18,7 @@ ST designation; bar absence alone does not establish suspension.
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
@@ -33,6 +33,12 @@ __all__ = ["fetch_st_history", "to_baostock_symbol"]
 
 # baostock k-data fields: trading status (1=trading) and the ST flag (1=ST).
 _ST_FIELDS = "date,code,tradestatus,isST"
+
+# The provider restates this issuer's whole history under its successor code.
+# Preserve the historical requested identity, only BEFORE the effective rename.
+# Primary issuer notice: https://static.cninfo.com.cn/finalpage/2018-02-13/1204419027.PDF
+# The 412 overlapping 2016..2018-02-14 raw closes were also reconciled exactly.
+_HISTORICAL_QUERY_ALIASES = {"601313.SH": ("601360.SH", date(2018, 2, 28))}
 
 # trading_status columns minus provenance (added by write_fetched).
 _OUTPUT_SCHEMA = {
@@ -50,9 +56,15 @@ def _fetch_one_st(bs, symbol: str, start: date, end: date, *, config=None) -> li
     Unexpected ``isST`` vocabulary fails the entire symbol closed. Treating an
     unknown value as ``normal`` would manufacture negative evidence.
     """
+    query_symbol = symbol
+    if symbol in _HISTORICAL_QUERY_ALIASES:
+        query_symbol, effective = _HISTORICAL_QUERY_ALIASES[symbol]
+        end = min(end, effective - timedelta(days=1))
+        if start > end:
+            return []
     with source_request(config, "baostock"):
         rs = bs.query_history_k_data_plus(
-            to_baostock_symbol(symbol),
+            to_baostock_symbol(query_symbol),
             _ST_FIELDS,
             start_date=start.isoformat(),
             end_date=end.isoformat(),
@@ -63,7 +75,7 @@ def _fetch_one_st(bs, symbol: str, start: date, end: date, *, config=None) -> li
         return None
     out: list[dict] = []
     identity_mismatches = 0
-    expected_code = to_baostock_symbol(symbol)
+    expected_code = to_baostock_symbol(query_symbol)
     while rs.next():
         row = rs.get_row_data()
         if len(row) != 4:

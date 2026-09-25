@@ -89,7 +89,7 @@ def test_backfill_recovers_terminal_staging_before_new_run(tmp_path):
         dataset="trading_status",
         blocks_compaction=False,
     )
-    manifest.finish_batch(run_id, batch_id, "failed", error_message="interrupted")
+    manifest.finish_batch(run_id, batch_id, "success")
     manifest.finish_run(run_id, "failed", error_message="interrupted")
     StagingWriter(cfg.staging_root).write_batch(
         "trading_status",
@@ -124,6 +124,49 @@ def test_backfill_recovers_terminal_staging_before_new_run(tmp_path):
     assert engine.calls[0][2] == run_id
 
 
+def test_backfill_does_not_repeat_compact_for_blocked_staging(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("backfill")
+    manifest.start_batch(
+        run_id,
+        "blocking-failure",
+        task_id="trading_status",
+        dataset="trading_status",
+        blocks_compaction=True,
+    )
+    manifest.finish_batch(run_id, "blocking-failure", "failed", error_message="source conflict")
+    manifest.finish_run(run_id, "failed", error_message="source conflict")
+    StagingWriter(cfg.staging_root).write_batch(
+        "trading_status",
+        run_id,
+        "batch-00000",
+        pl.DataFrame(
+            {
+                "symbol": ["600025.SH"],
+                "trade_date": [date(2020, 6, 19)],
+                "is_trading": [True],
+                "status": ["normal"],
+                "source": ["baostock"],
+                "data_version": ["v1"],
+                "fetched_at": [datetime.now(timezone.utc)],
+            }
+        ),
+    )
+
+    class FakeEngine:
+        def __init__(self):
+            self.config = cfg
+            self.manifest = manifest
+
+        def run_step(self, *args):
+            raise AssertionError("blocked staging must not reach compact")
+
+    assert _recover_compactable_backfill_staging(FakeEngine(), "trading_status") == []
+    assert manifest.get_run(run_id)["status"] == "failed"
+    assert StagingWriter(cfg.staging_root).list_run_files("trading_status", run_id)
+
+
 def test_backfill_recovers_staging_from_a_degraded_run(tmp_path):
     """`degraded` is terminal, and it is the tier a partial sweep lands in.
 
@@ -141,7 +184,9 @@ def test_backfill_recovers_staging_from_a_degraded_run(tmp_path):
         dataset="trading_status",
         blocks_compaction=False,
     )
-    manifest.finish_batch(run_id, batch_id, "failed", error_message="source refused the window")
+    manifest.finish_batch(run_id, batch_id, "success")
+    manifest.start_batch(run_id, "unrelated-failure", task_id="daily_bars", dataset="daily_bars")
+    manifest.finish_batch(run_id, "unrelated-failure", "failed", error_message="source refused")
     manifest.finish_run(run_id, "degraded", error_message="one or more steps failed")
     StagingWriter(cfg.staging_root).write_batch(
         "trading_status",

@@ -189,3 +189,58 @@ def test_recent_live_name_with_current_instrument_and_bars_is_not_quarantined(
 
     assert report["verified"] is True
     assert report["counts"]["recent_quarantined"] == 0
+
+
+def test_future_ipo_requires_source_identity_not_first_bar(tmp_path, monkeypatch):
+    from cnequity.steps.delisted import write_delisted_identity_evidence
+
+    cfg = _cfg(tmp_path, {"600001.SH": "2025-01-03"})
+    _write_bars(cfg, "600519.SH", date(2026, 7, 24))
+    _write_instruments(cfg, [("600001.SH", date(2025, 1, 6))])
+    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    assert not delisted_coverage_report(cfg, date(2016, 1, 1), date(2016, 12, 31))["verified"]
+    write_delisted_identity_evidence(
+        cfg,
+        pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "list_date": [date(2017, 1, 1)],
+                "delist_date": [date(2025, 1, 6)],
+            }
+        ),
+    )
+    report = delisted_coverage_report(cfg, date(2016, 1, 1), date(2016, 12, 31))
+    assert report["verified"]
+    assert report["counts"]["not_yet_listed"] == 1
+
+
+def test_suspension_needs_every_day_and_independent_source(tmp_path):
+    from cnequity.steps.delisted import _verified_suspended_windows
+
+    cfg = _cfg(tmp_path, {})
+    days = [date(2020, 1, 2), date(2020, 1, 3)]
+    calendar = cfg.curated_root / "trading_calendar"
+    calendar.mkdir(parents=True)
+    pl.DataFrame({"trade_date": days, "is_trading": [True, True]}).write_parquet(
+        calendar / "part.parquet"
+    )
+    root = cfg.curated_root / "trading_status"
+    root.mkdir(parents=True)
+    source = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"] * 2,
+            "trade_date": days,
+            "is_trading": [False, False],
+            "status": ["suspended"] * 2,
+            "source": ["baostock"] * 2,
+        }
+    )
+    for frame, expected in [
+        (source.head(1), False),
+        (source.with_columns(pl.lit("derived_bar_gap").alias("source")), False),
+        (source, True),
+    ]:
+        frame.write_parquet(root / "part.parquet")
+        result = _verified_suspended_windows(cfg, ["600001.SH"], days[0], days[-1], {})
+        assert bool(result) is expected
+    assert not _verified_suspended_windows(cfg, ["600001.SH"], date(2020, 1, 1), days[-1], {})

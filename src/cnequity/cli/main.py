@@ -18,6 +18,7 @@ import cnequity.steps  # noqa: F401 — register steps
 from cnequity.cli import (  # noqa: F401
     backfill_cmds,
     consume_cmds,
+    decision_data_cmds,
     delisted_cmds,
     govern_cmds,
     maintain_cmds,

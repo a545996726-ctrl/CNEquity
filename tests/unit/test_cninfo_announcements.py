@@ -102,6 +102,26 @@ def test_fetch_announcement_index_paginates_and_dedupes(monkeypatch):
     assert {call["column"] for call in client.calls} == {"szse"}
 
 
+def test_announcement_index_preserves_source_time_and_uses_conservative_availability():
+    pages = {
+        "szse": [
+            [
+                {
+                    "secCode": "002358",
+                    "announcementId": "1206402614",
+                    "announcementTitle": "2018年年度权益分派实施公告",
+                    "announcementTime": 1561651200000,
+                    "adjunctUrl": "finalpage/2019-06-28/1206402614.PDF",
+                }
+            ]
+        ]
+    }
+    frame = fetch_announcement_index(date(2019, 6, 28), client=_FakeClient(pages))
+    row = frame.row(0, named=True)
+    assert row["source_published_at"].isoformat() == "2019-06-27T16:00:00+00:00"
+    assert row["available_at"].isoformat() == "2019-06-28T16:00:00+00:00"
+
+
 def test_cninfo_rejects_a_row_from_a_different_announcement_date():
     pages = {
         "szse": [

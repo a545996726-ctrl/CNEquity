@@ -263,6 +263,42 @@ def _source_date(item: dict) -> date | None:
         raise ValueError(f"invalid announcement date {raw!r}") from exc
 
 
+def _source_timestamp(item: dict) -> datetime | None:
+    """Return a source-supplied timestamp when CNINFO carries one.
+
+    The live endpoint normally encodes ``announcementTime`` as epoch
+    milliseconds. Date-only legacy fixtures have no honest intraday timestamp
+    and therefore remain null instead of being promoted to midnight.
+    """
+    raw = next(
+        (
+            item[key]
+            for key in ("announcementTime", "announcementDate", "announceDate")
+            if key in item
+        ),
+        None,
+    )
+    if raw is None or str(raw).strip() == "":
+        return None
+    numeric: int | None = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        numeric = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        numeric = int(raw.strip())
+    if numeric is not None and _EPOCH_MS_MIN <= numeric <= _EPOCH_MS_MAX:
+        return datetime.fromtimestamp(numeric / 1000, tz=timezone.utc)
+    text = str(raw).strip().replace("/", "-")
+    if "T" not in text and " " not in text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=SHANGHAI_TZ)
+    return parsed.astimezone(timezone.utc)
+
+
 def _validate_source_date(item: dict, trade_date: date, *, column: str) -> None:
     """Reject a CNINFO row whose own date disagrees with the requested day.
 
@@ -2582,6 +2618,7 @@ def _announcement_rows_to_frame(rows: list[dict], *, start: date, end: date) -> 
             ) from exc
         # A missing source date is tolerated for the historical single-day
         # API contract, but cannot be assigned honestly in a broad interval.
+        source_date_was_present = source_date is not None
         if source_date is None:
             if start != end:
                 raise RawArchiveError(
@@ -2605,6 +2642,20 @@ def _announcement_rows_to_frame(rows: list[dict], *, start: date, end: date) -> 
                 "announce_date": source_date,
                 "category": str(item.get("announcementType") or ""),
                 "url": str(item.get("adjunctUrl") or ""),
+                # CNINFO's epoch field is usually a calendar-date marker, not
+                # a trustworthy wall-clock publication time. Preserve the
+                # source value separately, and make the row available from the
+                # next Shanghai calendar day. This conservative bound prevents
+                # a same-day close signal from seeing an announcement that may
+                # have been posted after that close.
+                "source_published_at": _source_timestamp(item),
+                "available_at": (
+                    datetime.combine(
+                        source_date + timedelta(days=1), datetime.min.time(), SHANGHAI_TZ
+                    ).astimezone(timezone.utc)
+                    if source_date_was_present
+                    else None
+                ),
             }
         )
     if not out:

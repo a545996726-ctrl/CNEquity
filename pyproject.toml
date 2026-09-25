@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cnequity"
-version = "0.11.0"
+version = "0.11.1"
 description = "Open, self-hosted financial data infrastructure for China markets, starting with A-shares"
 # Short PyPI page (absolute links only). GitHub keeps README.md / README.en.md.
 readme = "README.pypi.md"
@@ -54,6 +54,10 @@ dependencies = [
   "curl_cffi>=0.7",
   "polars>=1.0",
   "pyarrow>=15.0",
+  # CNINFO issuer notices are the primary source for exact historical cash
+  # payment dates.  pypdf extracts the text whose symbol, ex-date, pretax cash
+  # amount and payment date are all cross-checked before a repair is accepted.
+  "pypdf>=5.0",
   "PyYAML>=6.0",
   # No AkShare. Its two call sites wrapped endpoints already queried directly —
   # the ST board (push2 clist) and the PMI / 货币供应量 datacenter reports — so it
@@ -120,7 +124,7 @@ where = ["src"]
 # Versioned dataset contracts are release governance artifacts, not runtime
 # Python modules.  Ship the contract alongside the installed policy so an
 # offline consumer can retain the exact contract used by a release.
-"share/cnequity/contracts" = ["contracts/v0.10.0.json", "contracts/v0.11.0.json"]
+"share/cnequity/contracts" = ["contracts/v0.10.0.json", "contracts/v0.11.0.json", "contracts/v0.11.1.json"]
 
 [tool.setuptools.package-data]
 cnequity = [

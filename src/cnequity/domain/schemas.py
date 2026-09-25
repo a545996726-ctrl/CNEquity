@@ -181,6 +181,8 @@ TRADING_STATUS_SCHEMA = {
 # transfer_ratio) * split_factor; cash = shares * cash_dividend. No /10 magic numbers.
 # allotment_price stays a per-share price (yuan paid per allotted share).
 CORPORATE_ACTIONS_SCHEMA = {
+    "payment_date": pl.Date,  # source-reported cash payment, never inferred from ex-date
+    "payment_source": pl.Utf8,
     "symbol": pl.Utf8,
     "ex_date": pl.Date,
     "action_type": pl.Utf8,
@@ -917,6 +919,9 @@ def validate_dataframe(
         df = normalize_legacy(df)
 
     if dataset == "corporate_actions":
+        for name, dtype in (("payment_date", pl.Date), ("payment_source", pl.Utf8)):
+            if name not in df.columns:
+                df = df.with_columns(pl.lit(None, dtype=dtype).alias(name))
         # Old rows predate explicit fund unit splits and retain neutral units.
         # A new split event must supply its ratio; never guess it from a bonus.
         is_split = (

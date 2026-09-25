@@ -51,6 +51,36 @@ def _rows(code, days):
     return [[d, code, ts, st] for d, ts, st in days]
 
 
+def test_historical_rename_queries_successor_but_preserves_dated_original_identity():
+    bs = _FakeBaostock(
+        {
+            "sh.601360": _rows(
+                "sh.601360",
+                [
+                    ("2018-02-14", "1", "0"),
+                    ("2018-02-27", "0", "0"),
+                    ("2018-02-28", "1", "0"),
+                ],
+            )
+        }
+    )
+    frame, failed = fetch_st_history(
+        ["601313.SH"], date(2018, 2, 1), date(2018, 3, 1), bs=bs, sleep=lambda _: None
+    )
+    assert not failed
+    assert frame["symbol"].unique().to_list() == ["601313.SH"]
+    assert frame["trade_date"].to_list() == [date(2018, 2, 14), date(2018, 2, 27)]
+
+
+def test_old_code_cannot_claim_post_rename_status():
+    bs = _FakeBaostock({"sh.601360": _rows("sh.601360", [("2018-02-28", "1", "0")])})
+    frame, failed = fetch_st_history(
+        ["601313.SH"], date(2018, 2, 28), date(2018, 3, 1), bs=bs, sleep=lambda _: None
+    )
+    assert not failed
+    assert frame.is_empty()
+
+
 def test_emits_traded_st_and_normal_evidence():
     bs = _FakeBaostock(
         {

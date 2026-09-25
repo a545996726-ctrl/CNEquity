@@ -42,6 +42,7 @@ from cnequity.domain.datasets import (
     history_mode_for,
     is_dataset_enabled,
     is_stale,
+    staleness_counts_trading_sessions,
 )
 from cnequity.query.parquet_scan import (
     dataset_has_parquet,
@@ -363,7 +364,8 @@ def verify_dataset(
                 kind="stale",
                 detail=(
                     f"freshest {mark.isoformat()} vs anchor {anchor.isoformat()} "
-                    f"(tolerance {spec.max_staleness_days}d)"
+                    f"(tolerance {spec.max_staleness_days} "
+                    f"{'trading sessions' if staleness_counts_trading_sessions(spec.name) else 'calendar days'})"
                 ),
                 repairable=repairable,
                 start=mark,

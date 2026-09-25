@@ -602,6 +602,10 @@ def _heal_unrecorded_ex_events(config: Config, trade_date: date, run_id: str, ra
 
 @register_step("corporate_actions", group="core", depends_on=["instruments"])
 def step_corporate_actions(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
+    if getattr(config, "_corporate_actions_payment_repair", False):
+        from cnequity.steps.payment_dates import repair_payment_dates
+
+        return repair_payment_dates(config, trade_date, run_id, context)
     rl = config.tdx_rate_limit_spec()
     backfill = getattr(config, "_backfill", False)
     findings: list[dict] = []

@@ -82,6 +82,19 @@ from cnequity.orchestrator.engine import JobEngine
     help="仅 margin_trading 的日期推进并发数。每个请求仍然走配置里共享的源限流器；其它数据集必须为 1。",
 )
 @click.option(
+    "--payment-date-repair",
+    is_flag=True,
+    help="仅 corporate_actions：先核验发行人公告，再用 Baostock 匹配真实派息日；不改变既有金额。",
+)
+@click.option(
+    "--cninfo-notice-repair",
+    is_flag=True,
+    help=(
+        "仅 corporate_actions：只用巨潮发行人实施公告修复明确匹配的付款日；"
+        "未匹配事件保留缺口，不请求 Baostock。"
+    ),
+)
+@click.option(
     "--baostock-repair",
     is_flag=True,
     help="仅 corporate_actions：用 Baostock 显式修复已退市的沪深标的。",
@@ -131,6 +144,8 @@ def backfill(
     outstanding: bool,
     workers: int,
     baostock_repair: bool,
+    payment_date_repair: bool,
+    cninfo_notice_repair: bool,
     ths_repair: bool,
     eastmoney_bj_repair: bool,
     eastmoney_date_repair: bool,
@@ -153,6 +168,19 @@ def backfill(
             "请改为在交易日跑日更采集。"
         )
     cfg = _cfg(config_path)
+    if payment_date_repair or cninfo_notice_repair:
+        if dataset != "corporate_actions" or not symbols_str or not start_str or not end_str:
+            raise click.ClickException(
+                "付款日修复需要 corporate_actions、--symbols、--start 和 --end"
+            )
+        if payment_date_repair and cninfo_notice_repair:
+            raise click.ClickException("两种付款日修复模式不能同时使用")
+        if any(
+            (baostock_repair, ths_repair, eastmoney_bj_repair, eastmoney_date_repair, outstanding)
+        ):
+            raise click.ClickException("付款日修复必须独立运行")
+        cfg._corporate_actions_payment_repair = True
+        cfg._corporate_actions_cninfo_notice_only = cninfo_notice_repair
     attach_log_file(cfg, f"backfill-{dataset}")
     if workers < 1:
         raise click.ClickException("--workers 至少为 1")
@@ -534,6 +562,7 @@ def _recover_compactable_backfill_staging(engine: JobEngine, dataset: str) -> li
     regular compact gate still protects incomplete worker batches, and coverage
     receipts remain gated by their versioned checkpoint.
     """
+    from cnequity.orchestrator.compact_gate import compact_allowed
     from cnequity.storage import StagingWriter
 
     config = getattr(engine, "config", None)
@@ -566,6 +595,24 @@ def _recover_compactable_backfill_staging(engine: JobEngine, dataset: str) -> li
         if any(batch["dataset"] == "compact" and batch["status"] == "success" for batch in batches):
             continue
         if not writer.list_run_files(dataset, run_id):
+            continue
+        # A failed blocking batch cannot be published by compact. Replaying
+        # compact on every later backfill only rescans the same immutable
+        # partitions before the gate rejects it; leave staging and failure
+        # evidence untouched until its batch is actually resolved.
+        allowed, incomplete = compact_allowed(
+            engine.manifest,
+            run_id,
+            dataset,
+            stale_after_seconds=config.batch_stale_seconds,
+        )
+        if not allowed:
+            logging.getLogger(__name__).info(
+                "Skipped staged %s from run %s: %d blocking batch(es) remain",
+                dataset,
+                run_id,
+                incomplete,
+            )
             continue
         result = engine.run_step("compact", shanghai_today(), run_id)
         if result.get("status") == "success":

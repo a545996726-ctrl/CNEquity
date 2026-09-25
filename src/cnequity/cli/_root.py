@@ -27,7 +27,7 @@ LEFTOVER_SECTION = "其它"
 SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("从这里开始", ("config", "doctor", "init")),
     ("跑 pipeline", ("run", "backfill", "derive")),
-    ("检查数据湖", ("status", "verify", "audit")),
+    ("检查数据湖", ("status", "verify", "audit", "decision-data")),
     ("使用数据湖", ("query", "serve", "mcp")),
     (
         "治理与检视",

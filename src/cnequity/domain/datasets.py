@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from cnequity.domain.partitions import Granularity, partition_value
@@ -361,10 +361,15 @@ class DatasetSpec:
     # must not count them as a fallback. That distinction is why this is its
     # own field rather than another `supplementary_sources` entry.
     repair_sources: tuple[str, ...] = ()
-    # How many days the freshest data may lag the last trading day before it is
-    # flagged STALE. 1 tolerates normal T+1 EOD publication; larger values mark
-    # sources with a slower cadence (margin T+1, quarterly northbound holdings)
-    # so their inherent lag is not mistaken for a stuck pipeline.
+    # How far the freshest data may lag the last trading day before it is
+    # flagged STALE. For session datasets this is a count of exchange sessions,
+    # so a Friday watermark checked on Monday is one day, not three, and a
+    # holiday week does not consume the tolerance. 1 is normal T+1 publication.
+    # Larger values mark a slower cadence (margin, commodity). A tolerance of
+    # 30 or more stays a calendar span — quarterly holdings use 100 calendar
+    # days to reach the next quarter-end, and counting those in sessions would
+    # hide an extra quarter. Calendar-scoped datasets (news, announcements)
+    # also stay on calendar days, because they publish on weekends.
     max_staleness_days: int = 1
     required: bool = True
     empty_severity: Literal["error", "warning", "info"] | None = None
@@ -1364,11 +1369,51 @@ def granularity_for_dataset(dataset: str) -> Granularity:
     return spec.partition_granularity if spec else "day"
 
 
+def staleness_counts_trading_sessions(dataset: str) -> bool:
+    """Whether *dataset*'s freshness lag is a count of exchange sessions.
+
+    Unknown datasets use the session default. Calendar-scoped feeds and a
+    multi-month tolerance stay on calendar days; see ``max_staleness_days``.
+    """
+    spec = DATASETS.get(dataset)
+    if spec is None:
+        return True
+    if spec.session_scope == "calendar" or spec.max_staleness_days >= 30:
+        return False
+    return True
+
+
+def _is_exchange_session(day: date) -> bool:
+    from cnequity.adapters.calendar.holidays_cn import CLOSED_DATES, EXTRA_TRADING_DATES
+
+    iso = day.isoformat()
+    if iso in EXTRA_TRADING_DATES:
+        return True
+    return day.weekday() < 5 and iso not in CLOSED_DATES
+
+
+def _trading_session_lag(mark: date, anchor: date) -> int:
+    """Exchange sessions strictly after *mark* and through *anchor*."""
+    if anchor <= mark:
+        return 0
+    lag = 0
+    day = mark
+    while day < anchor:
+        day += timedelta(days=1)
+        if _is_exchange_session(day):
+            lag += 1
+    return lag
+
+
 def is_stale(dataset: str, mark, anchor) -> bool:
     """Whether *dataset*'s freshest date (*mark*) lags *anchor* beyond tolerance.
 
     *mark* and *anchor* are ``datetime.date`` (or None). A dataset with no mark
     is not judged here (callers treat empty separately).
+
+    Session datasets count exchange sessions, so the weekend between Friday and
+    Monday is one day of lag. Calendar-scoped datasets and multi-month
+    tolerances still count calendar days.
 
     A retired source is never stale once the lake has caught up to its last
     published session: there is nothing further to fetch, and calling that
@@ -1381,7 +1426,11 @@ def is_stale(dataset: str, mark, anchor) -> bool:
         if mark >= spec.source_retired_date:
             return False
     tolerance = spec.max_staleness_days if spec else 1
-    return (anchor - mark).days > tolerance
+    if staleness_counts_trading_sessions(dataset):
+        lag = _trading_session_lag(mark, anchor)
+    else:
+        lag = (anchor - mark).days
+    return lag > tolerance
 
 
 def empty_freshness_label(dataset: str) -> str:
