@@ -177,6 +177,7 @@ def test_macro_risk_guards_and_writes(cfg, monkeypatch):
             }
         ),
     )
+    monkeypatch.setattr(macro_risk, "fetch_daily_rates_range", lambda *_a, **_k: pl.DataFrame())
     monkeypatch.setattr(
         macro_risk,
         "fetch_share_unlock_schedule",

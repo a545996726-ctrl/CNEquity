@@ -182,6 +182,26 @@ def test_all_instruments_restores_the_previous_fetch_scope(tmp_path, monkeypatch
     assert {"158030.SZ", "512740.SH"} <= set(requested)
 
 
+def test_a_security_listing_today_is_fetched_the_same_day(tmp_path, monkeypatch):
+    """The universe comes from curated instruments, which only learn of a new
+    listing at the wave's compact; the run context carries it until then."""
+    cfg = _instrument_lake(tmp_path)
+    requested = _capture_fetch_scope(monkeypatch)
+    run_id = Manifest(cfg.manifest_path).start_run("daily:core")
+    context = {
+        "new_instruments": [
+            {"symbol": "603999.SH", "asset_type": "stock", "list_date": None},
+            {"symbol": "512999.SH", "asset_type": "etf", "list_date": None},
+        ]
+    }
+
+    with pytest.raises(RuntimeError):
+        step_daily_bars(cfg, D3, run_id, context)
+
+    assert "603999.SH" in requested
+    assert "512999.SH" not in requested  # outside the all_a ingest universe
+
+
 def test_explicit_backfill_scope_is_never_narrowed(tmp_path, monkeypatch):
     cfg = _instrument_lake(tmp_path)
     requested = _capture_fetch_scope(monkeypatch)

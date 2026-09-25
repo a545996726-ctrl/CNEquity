@@ -246,6 +246,7 @@ def _ownership_context(
                 f"delegated_delisted={len(ownership.delegated_delisted)}, "
                 f"expected_no_data={len(ownership.expected_no_data)}, "
                 f"placeholder={len(ownership.placeholder)}, "
+                f"probe={len(ownership.probe)}, "
                 f"negative_cached={len(ownership.negative_cached)}, "
                 f"unknown={len(ownership.unknown)}, "
                 f"delegated_complete={delegated_complete}"
@@ -291,6 +292,7 @@ def _ownership_context(
             "delegated_delisted": len(ownership.delegated_delisted),
             "expected_no_data": len(ownership.expected_no_data),
             "placeholder": len(ownership.placeholder),
+            "probe": len(ownership.probe),
             "negative_cached": len(ownership.negative_cached),
             "unknown": len(ownership.unknown),
             "delegated_complete": delegated_complete,
@@ -846,10 +848,11 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
             ownership.delegated_delisted.extend(routed.delegated_delisted)
             ownership.expected_no_data.extend(routed.expected_no_data)
             ownership.placeholder.extend(routed.placeholder)
+            ownership.probe.extend(routed.probe)
             ownership.unknown.extend(routed.unknown)
             ownership.negative_cached.extend(routed.negative_cached)
             ownership.no_data_reasons.update(routed.no_data_reasons)
-            fetch_scope = list(dict.fromkeys(routed.generic + routed.unknown))
+            fetch_scope = list(dict.fromkeys(routed.generic + routed.unknown + routed.probe))
             tdx_symbols, fallback_symbols = split_by_quote_source(fetch_scope)
             if tdx_symbols:
                 remaining.append((batch_id, tdx_symbols, spec_start, spec_end))
@@ -865,7 +868,12 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
                     spec_end,
                     batch_id=delegated_id,
                 )
-            elif not routed.generic and not routed.unknown and not routed.placeholder:
+            elif (
+                not routed.generic
+                and not routed.unknown
+                and not routed.probe
+                and not routed.placeholder
+            ):
                 # The original failed batch now has only proven no-data symbols.
                 from cnequity.orchestrator.manifest import Manifest
 
@@ -874,7 +882,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
                     [batch_id],
                     superseded_by="ownership-expected-no-data",
                 )
-            elif not routed.generic and routed.placeholder:
+            elif not routed.generic and not routed.probe and routed.placeholder:
                 # Keep the audit distinction above, but do not leave the old
                 # worker failure blocking compaction forever.
                 from cnequity.orchestrator.manifest import Manifest
@@ -961,6 +969,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
             expected_no_data_symbols=sorted(
                 set(ownership.expected_no_data) - set(ownership.negative_cached)
             ),
+            probe_symbols=ownership.probe,
         )
         return _merge_ownership_result(out, config, ownership, start, end)
 
@@ -999,6 +1008,20 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         symbols = list(dict.fromkeys(rebackfill + symbols))
 
     spans = _instrument_spans(config)
+    if explicit_scope is None:
+        # A security listing today is in this run's instruments output but not
+        # yet in curated, which is where the universe is read from; without
+        # this its first session is never fetched (920201.BJ, 2026-09-24).
+        discovered = [
+            row
+            for row in context.get("new_instruments") or ()
+            if row.get("symbol") and in_ingest_universe_symbol(row["symbol"], config)
+        ]
+        for row in discovered:
+            spans.setdefault(
+                row["symbol"], (row.get("list_date"), row.get("delist_date"), row.get("asset_type"))
+            )
+        symbols = list(dict.fromkeys([*symbols, *(row["symbol"] for row in discovered)]))
     metadata = instrument_metadata(config)
     ownership = classify_daily_bar_ownership(
         symbols,
@@ -1029,7 +1052,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
     # the fallback leg below reaches for TDX before Sina — see
     # `_fetch_bj_history_via_tdx`. Tip gaps after TDX are a second routing case
     # (ADR-0005): EastMoney clist.
-    fetch_scope = list(dict.fromkeys(ownership.generic + ownership.unknown))
+    fetch_scope = list(dict.fromkeys(ownership.generic + ownership.unknown + ownership.probe))
     tdx_symbols, fallback_symbols = split_by_quote_source(fetch_scope)
     reused_symbols = _reuse_successful_daily_bars(config, run_id, fetch_scope, start, end)
     fetch_tdx_symbols = [symbol for symbol in tdx_symbols if symbol not in reused_symbols]
@@ -1102,6 +1125,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         expected_no_data_symbols=sorted(
             set(ownership.expected_no_data) - set(ownership.negative_cached)
         ),
+        probe_symbols=ownership.probe,
     )
     out.setdefault("metrics", {})["cache_hits"] = int(
         out.get("metrics", {}).get("cache_hits", 0) or 0
@@ -1128,6 +1152,11 @@ def _owed_keys_for_symbols(
         last = min(end, delisted) if delisted else end
         owed |= {(symbol, day) for day in sessions if first <= day <= last}
     return owed
+
+
+def in_ingest_universe_symbol(symbol: str, config: Config) -> bool:
+    """Whether *symbol* belongs to this lake's configured ingest universe."""
+    return bool(filter_ingest_universe([symbol], config.ingest_universe))
 
 
 def _in_bar_universe(symbol: str, universe: str) -> bool:
@@ -1618,6 +1647,7 @@ def _finish_daily_bars(
     tdx_result: dict,
     sina_result: dict | None,
     expected_no_data_symbols: list[str] | None = None,
+    probe_symbols: list[str] | None = None,
 ) -> dict:
     """Apply gap-fill and validate the latest fetched session.
 
@@ -1820,6 +1850,44 @@ def _finish_daily_bars(
 
     _reject_preopen_placeholder(config, run_id, end)
 
+    # An undated, never-traded equity was asked for only to learn whether it
+    # has listed. A clean empty answer settles that it has not: it joins the
+    # proven no-data set instead of the unresolved keys, which is what once
+    # held a whole market snapshot hostage (2026-09-15). A transport failure
+    # settles nothing and stays with the strict unknowns.
+    probe = {str(symbol).strip().upper() for symbol in (probe_symbols or ()) if str(symbol).strip()}
+    probe_settled: set[str] = set()
+    if probe:
+        staged_probe = _staged_daily_bar_symbols(config, run_id, end) & probe
+        unanswered = set(failed_symbols) | fallback_failed_symbols
+        not_listed = probe - staged_probe - unanswered
+        if not_listed:
+            probe_settled = not_listed
+            explicit_no_data.update(not_listed)
+            _record_daily_negative_observations(
+                config,
+                not_listed,
+                start,
+                end,
+                reason="not_yet_listed",
+                source="probe",
+            )
+        findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "info",
+                "check": "daily_bars_undated_probe",
+                "message": (
+                    f"{len(probe)} undated equity code(s) probed: "
+                    f"{len(staged_probe)} listed (bars staged), "
+                    f"{len(not_listed)} not yet listed, "
+                    f"{len(probe & unanswered)} unanswered"
+                ),
+                "listed": sorted(staged_probe),
+                "not_listed": sorted(not_listed),
+            }
+        )
+
     # Symbols proven to have no data in this window, collected by the
     # certification below so the interior-session gate does not re-report them.
     certified_no_data: set[str] = set()
@@ -1842,7 +1910,7 @@ def _finish_daily_bars(
                 certified_no_data.update(certified)
                 _record_certified_daily_no_data(
                     config,
-                    certified,
+                    certified - probe_settled,
                     source_empty_symbols,
                     ownership,
                     end,
@@ -1950,7 +2018,7 @@ def _finish_daily_bars(
                 certified_no_data.update(certified)
                 _record_certified_daily_no_data(
                     config,
-                    certified,
+                    certified - probe_settled,
                     source_empty_symbols,
                     ownership,
                     start,

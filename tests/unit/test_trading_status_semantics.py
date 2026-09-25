@@ -470,3 +470,153 @@ def test_beijing_rows_come_from_the_beijing_exchange_not_eastmoney(tmp_path, mon
     assert got["920023.BJ"]["source"] == "bse"
     assert got["920999.BJ"]["is_trading"] is False
     assert got["920999.BJ"]["source"] == "bse"
+
+
+# --- codes that have not started trading --------------------------------------
+
+
+def _write_listing(cfg, rows):
+    """Instruments with per-row listing dates (None = no listing date known)."""
+    part = cfg.curated_root / "instruments"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": [r["symbol"] for r in rows],
+            "name": [None] * len(rows),
+            "exchange": [r["symbol"].rsplit(".", 1)[-1] for r in rows],
+            "asset_type": ["stock"] * len(rows),
+            "list_date": [r.get("list_date") for r in rows],
+            "delist_date": [None] * len(rows),
+            "prev_symbol": [None] * len(rows),
+            "source": ["tdx_protocol"] * len(rows),
+            "data_version": ["v1"] * len(rows),
+            "fetched_at": [datetime.now(timezone.utc)] * len(rows),
+        },
+        schema_overrides={
+            "delist_date": pl.Date,
+            "list_date": pl.Date,
+            "name": pl.Utf8,
+            "prev_symbol": pl.Utf8,
+        },
+    ).write_parquet(part / "part-merged.parquet")
+
+
+def _all_normal(symbols, day, **_kw):
+    return pl.DataFrame(
+        {
+            "symbol": list(symbols),
+            "trade_date": [day] * len(symbols),
+            "is_trading": [True] * len(symbols),
+            "status": [STATUS_NORMAL] * len(symbols),
+            "risk_warning": [False] * len(symbols),
+        }
+    )
+
+
+def _boards(monkeypatch, *, sh_sz: list[str] | None, bj: dict[str, str] | None = None):
+    from cnequity.adapters.bse import trading_status as bse
+    from cnequity.adapters.exchange import trading_status as exchange
+
+    def _exchange(symbols, day, *, config=None):
+        if sh_sz is None:
+            return exchange.ExchangeStatusResult(
+                rows=pl.DataFrame(), covered=frozenset(), failures={"sse": "down", "szse": "down"}
+            )
+        return exchange.ExchangeStatusResult(
+            rows=_all_normal(sh_sz, day), covered=frozenset({"sse", "szse"}), failures={}
+        )
+
+    monkeypatch.setattr(exchange, "fetch_trading_status_exchange", _exchange)
+    monkeypatch.setattr(bse, "board_names", lambda day, **_kw: (dict(bj or {}), bj is not None))
+    monkeypatch.setattr(
+        bse,
+        "fetch_trading_status_bse",
+        lambda symbols, day, **_kw: bse.BseStatusResult(
+            rows=pl.DataFrame(), complete=False, listed=frozenset()
+        ),
+    )
+
+
+def test_a_code_with_no_listing_and_no_place_on_its_board_gets_no_row(lake, monkeypatch):
+    """001246.SZ was stored as trading normally on 2026-09-24, unlisted."""
+    from cnequity.steps import reference
+
+    _write_listing(
+        lake,
+        [
+            {"symbol": "600519.SH", "list_date": date(2001, 8, 27)},
+            {"symbol": "001246.SZ"},
+            {"symbol": "301999.SZ"},
+        ],
+    )
+    monkeypatch.setattr(reference, "fetch_trading_status", _all_normal)
+    _boards(monkeypatch, sh_sz=["600519.SH", "301999.SZ"])
+
+    result = reference.step_trading_status(lake, TD, "run-unlisted", {})
+
+    staged = set(_staged(lake)["symbol"].to_list())
+    # On its board it is a first session, kept; off it, not listed yet.
+    assert staged == {"600519.SH", "301999.SZ"}
+    findings = result["context_updates"]["audit_findings"]
+    assert [f["symbols"] for f in findings if f["check"] == "trading_status_unlisted_dropped"] == [
+        ["001246.SZ"]
+    ]
+
+
+def test_a_board_that_did_not_answer_proves_nothing(lake, monkeypatch):
+    from cnequity.steps import reference
+
+    _write_listing(
+        lake, [{"symbol": "600519.SH", "list_date": date(2001, 8, 27)}, {"symbol": "001246.SZ"}]
+    )
+    monkeypatch.setattr(reference, "fetch_trading_status", _all_normal)
+    _boards(monkeypatch, sh_sz=None)
+
+    reference.step_trading_status(lake, TD, "run-no-board", {})
+
+    assert set(_staged(lake)["symbol"].to_list()) == {"600519.SH", "001246.SZ"}
+
+
+def test_a_security_listing_today_is_asked_about_the_same_day(lake, monkeypatch):
+    """920201.BJ listed on 2026-09-24 and got no status row: the universe is
+    read from curated instruments, which only learn of it at the wave's end."""
+    from cnequity.orchestrator.registry import STEP_REGISTRY
+    from cnequity.steps import reference
+
+    _write_listing(lake, [{"symbol": "600519.SH", "list_date": date(2001, 8, 27)}])
+    requested: list[list[str]] = []
+
+    def _fetch(symbols, day, **_kw):
+        requested.append(list(symbols))
+        return _all_normal(symbols, day)
+
+    monkeypatch.setattr(reference, "fetch_trading_status", _fetch)
+    _boards(monkeypatch, sh_sz=["600519.SH"], bj={"920201.BJ": "N百瑞吉"})
+    context = {
+        "new_instruments": [{"symbol": "920201.BJ", "asset_type": "stock", "list_date": None}]
+    }
+
+    reference.step_trading_status(lake, TD, "run-new", context)
+
+    assert requested == [["600519.SH", "920201.BJ"]]
+    assert "920201.BJ" in set(_staged(lake)["symbol"].to_list())
+    assert "instruments" in STEP_REGISTRY["trading_status"].depends_on
+
+
+def test_instruments_hands_on_only_rows_curated_does_not_hold(lake):
+    from cnequity.steps.reference import new_instrument_rows
+
+    _write_listing(lake, [{"symbol": "600519.SH", "list_date": date(2001, 8, 27)}])
+    today = pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "920201.BJ"],
+            "asset_type": ["stock", "stock"],
+            "list_date": [date(2001, 8, 27), None],
+            "delist_date": [None, None],
+        },
+        schema_overrides={"list_date": pl.Date, "delist_date": pl.Date},
+    )
+
+    assert new_instrument_rows(lake, today) == [
+        {"symbol": "920201.BJ", "asset_type": "stock", "list_date": None, "delist_date": None}
+    ]

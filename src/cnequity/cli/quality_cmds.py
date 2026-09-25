@@ -116,6 +116,30 @@ def _owed_symbols_on(cfg, dataset: str, day: date) -> set[str]:
     }
 
 
+def _proven_absent_on(cfg, dataset: str, day: date) -> set[str]:
+    """Symbols with live no-data evidence covering *day*.
+
+    The ingest side already routes these out of the expected key set
+    (``classify_daily_bar_ownership``); the proof has to honour the same
+    evidence or the two contradict each other. A code the daily_bars probe
+    found not yet listed has no trading status to publish either, so that
+    claim also answers for ``trading_status``.
+    """
+    from cnequity.steps.common import load_negative_evidence, negative_evidence_covers
+
+    try:
+        evidence = list(load_negative_evidence(cfg, "daily_bars"))
+    except Exception:  # noqa: BLE001 — missing/garbled evidence proves nothing
+        return set()
+    if dataset != "daily_bars":
+        evidence = [item for item in evidence if item.get("reason") == "not_yet_listed"]
+    return {
+        str(item["symbol"]).strip().upper()
+        for item in evidence
+        if item.get("symbol") and negative_evidence_covers(item, str(item["symbol"]), day, day)
+    }
+
+
 def _tip_scope(cfg, catalog: pl.DataFrame, dataset: str = "daily_bars") -> dict | None:
     """Cheap cross-section proof for a date-fresh daily-bars watermark.
 
@@ -230,6 +254,7 @@ def _tip_scope(cfg, catalog: pl.DataFrame, dataset: str = "daily_bars") -> dict 
         excused: set[str] = set()
         if status is not None and not status.is_empty():
             excused = set(status.filter(~pl.col("is_trading"))["symbol"].drop_nulls().to_list())
+        excused |= _proven_absent_on(cfg, dataset, tip)
         covered = expected & (observed | excused)
         ratio = len(covered) / len(expected)
         # Keys the ingest side already judged, tolerated and wrote down are
@@ -966,7 +991,9 @@ def status(
                     "日期 fresh 仍不代表标的覆盖完整。",
                     err=True,
                 )
-        incomplete_init = Manifest(cfg.manifest_path).latest_incomplete_init_run()
+        incomplete_init = Manifest(cfg.manifest_path).latest_incomplete_init_run(
+            discharged_by_later_runs=True
+        )
         if incomplete_init is not None:
             click.echo(
                 "\ninit 尚未完成："

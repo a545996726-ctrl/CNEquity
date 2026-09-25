@@ -890,9 +890,18 @@ class DailyBarOwnership:
     delegated_delisted: list[str] = field(default_factory=list)
     expected_no_data: list[str] = field(default_factory=list)
     placeholder: list[str] = field(default_factory=list)
+    #: Undated, never-traded equities: fetched once per window to find out.
+    #: A clean empty answer settles them as not yet listed (see bars.py); a
+    #: bar settles them as listed. Funds stay ``placeholder``.
+    probe: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)
     negative_cached: list[str] = field(default_factory=list)
     no_data_reasons: dict[str, str] = field(default_factory=dict)
+
+
+def _hold_undated(out: DailyBarOwnership, symbol: str, asset_type: str | None) -> None:
+    """Route an undated, never-traded code: equities are probed, funds held."""
+    (out.probe if asset_type in {"stock", "cdr"} else out.placeholder).append(symbol)
 
 
 def _never_started(symbol: str, list_date: date | None, bar_universe: set[str] | None) -> bool:
@@ -924,9 +933,11 @@ def classify_daily_bar_ownership(
     an incomplete source response remains ``unknown`` and must be retried.
 
     ``bar_universe`` is historical positive-volume evidence. A symbol with no
-    list_date and no traded bar anywhere in it has not started trading, so it
-    is held as a ``placeholder``: kept out of the expensive per-symbol fallback
-    and out of the expected key set, without claiming its absence was proven.
+    list_date and no traded bar anywhere in it has probably not started
+    trading. A fund is held as a ``placeholder``: kept out of the expensive
+    per-symbol fallback and out of the expected key set, without claiming its
+    absence was proven. An equity is a ``probe``: asked for once, because a
+    late list_date looks exactly the same and hides a real listing.
     """
     from cnequity.domain.symbols import is_etf_symbol, parse_symbol
 
@@ -1017,7 +1028,7 @@ def classify_daily_bar_ownership(
                     # drops them, which leaves a row no enrichment can reach —
                     # so without this a pre-IPO code blocks the market
                     # snapshot every run, permanently.
-                    out.placeholder.append(normalized)
+                    _hold_undated(out, normalized, asset_type)
                 else:
                     out.generic.append(normalized)
                 continue
@@ -1038,9 +1049,12 @@ def classify_daily_bar_ownership(
             out.unknown.append(normalized)
         elif _never_started(normalized, list_date, normalized_bar_universe):
             # Likely an issued-but-not-yet-listed code, but a delayed list_date
-            # enrichment is indistinguishable here. Keep it out of the fetch
-            # batch without claiming the absence was proven.
-            out.placeholder.append(normalized)
+            # enrichment is indistinguishable here: the only list_date source
+            # for a new listing is EastMoney push2, and while it was down
+            # (2026-09-21 on) three Beijing listings were skipped here every
+            # day although TDX had their bars. Equities are therefore asked
+            # once (``probe``); funds, hundreds of them undated, stay out.
+            _hold_undated(out, normalized, asset_type)
         else:
             out.generic.append(normalized)
 
@@ -1054,7 +1068,7 @@ def classify_daily_bar_ownership(
             and not positive_status
         ):
             if any(negative_evidence_covers(item, normalized, start, end) for item in evidence):
-                for bucket in (out.generic, out.placeholder):
+                for bucket in (out.generic, out.placeholder, out.probe):
                     if normalized in bucket:
                         bucket.remove(normalized)
                 out.expected_no_data.append(normalized)

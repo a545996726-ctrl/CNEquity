@@ -87,7 +87,40 @@ def step_instruments(config: Config, trade_date: date, run_id: str, context: dic
     if getattr(config, "_backfill", False):
         df = _merge_delisted_instruments(config, df)
     df = _carry_lake_facts(config, df)
-    return write_simple(config, run_id, "instruments", df)
+    result = write_simple(config, run_id, "instruments", df)
+    new = new_instrument_rows(config, df)
+    if new:
+        result["context_updates"] = {"new_instruments": new}
+    return result
+
+
+def new_instrument_rows(config: Config, df: pl.DataFrame) -> list[dict]:
+    """Today's instrument rows the curated table does not hold yet.
+
+    Everything downstream reads its universe from *curated* instruments, and
+    this step's rows only reach curated at the wave's compact. So a security
+    listing today was invisible to every step of today's run: 920201.BJ listed
+    on 2026-09-24 and got neither a bar nor a status row that day. The next
+    day's incremental window starts after the watermark, so the first session
+    was left to a later reconciliation pass to recover. Handing the new rows on
+    through the run context closes that without reading stray staging
+    fragments.
+    """
+    if df.is_empty() or "symbol" not in df.columns:
+        return []
+    curated = load_curated_instruments(config)
+    known = set(curated["symbol"].to_list()) if curated is not None else set()
+    columns = [c for c in ("symbol", "asset_type", "list_date", "delist_date") if c in df.columns]
+    fresh = df.filter(~pl.col("symbol").is_in(sorted(known)) & pl.col("symbol").is_not_null())
+    if "delist_date" in fresh.columns:
+        fresh = fresh.filter(pl.col("delist_date").is_null())
+    return fresh.select(columns).to_dicts()
+
+
+def _with_new_instruments(symbols: list[str], context: dict) -> list[str]:
+    """*symbols* plus the instruments this run discovered (see above)."""
+    new = [row["symbol"] for row in context.get("new_instruments") or () if row.get("symbol")]
+    return list(dict.fromkeys([*symbols, *new]))
 
 
 def _require_beijing_instrument_scope(
@@ -493,6 +526,87 @@ def _beijing_status(
     )
 
 
+def _drop_unlisted_codes(
+    config: Config, df: pl.DataFrame, trade_date: date, context: dict
+) -> tuple[pl.DataFrame, list[dict], object | None]:
+    """Remove run-day rows for codes that have not started trading.
+
+    The EastMoney feed is a suspension list, so every requested code off it is
+    written ``normal`` — including a code TDX publishes before its listing
+    (001246.SZ and 301716.SZ were stored as trading normally on 2026-09-24
+    with no listing yet). The Beijing board does the mirror image and calls a
+    complete walk's absentees halted. A code with no listing date and no bar
+    anywhere in the lake is only kept when its own exchange's board lists it
+    that session; a board that did not answer proves nothing, and its rows
+    stay. Returns the frame, findings, and the SH/SZ board reading so the
+    daily exchange snapshot can reuse it instead of asking twice.
+    """
+    if df.is_empty() or "symbol" not in df.columns:
+        return df, [], None
+    from cnequity.steps.common import instrument_metadata
+
+    undated = set(
+        instrument_metadata(config).filter(pl.col("list_date").is_null())["symbol"].to_list()
+    )
+    undated |= {
+        row["symbol"]
+        for row in context.get("new_instruments") or ()
+        if row.get("symbol") and row.get("list_date") is None
+    }
+    today = set(df.filter(pl.col("trade_date") == trade_date)["symbol"].drop_nulls().to_list())
+    candidates = undated & today
+    if not candidates:
+        return df, [], None
+    candidates -= load_bar_universe(config)
+    if not candidates:
+        return df, [], None
+
+    unlisted: set[str] = set()
+    sh_sz_board = None
+    sh_sz = {s for s in candidates if not s.endswith(".BJ")}
+    if sh_sz and config.sources.get("exchange", True):
+        from cnequity.adapters.exchange.trading_status import fetch_trading_status_exchange
+
+        try:
+            sh_sz_board = fetch_trading_status_exchange(None, trade_date, config=config)
+        except Exception as exc:  # noqa: BLE001 — no board, no verdict
+            logger.warning(
+                "trading_status: exchange boards unavailable for %s: %s", trade_date, exc
+            )
+        if sh_sz_board is not None and not sh_sz_board.is_empty:
+            on_board = set(sh_sz_board.rows["symbol"].to_list())
+            answered = {"SH"} if "sse" in sh_sz_board.covered else set()
+            answered |= {"SZ"} if "szse" in sh_sz_board.covered else set()
+            unlisted |= {s for s in sh_sz if s.rsplit(".", 1)[-1] in answered and s not in on_board}
+    bj = candidates - sh_sz
+    if bj and config.sources.get("bse", True):
+        from cnequity.adapters.bse.trading_status import board_names
+
+        try:
+            listed, complete = board_names(trade_date, config=config)
+        except Exception as exc:  # noqa: BLE001 — no board, no verdict
+            logger.warning("trading_status: BSE board unavailable for %s: %s", trade_date, exc)
+        else:
+            if complete and listed:
+                unlisted |= bj - set(listed)
+    if not unlisted:
+        return df, [], sh_sz_board
+    kept = df.filter(
+        ~(pl.col("symbol").is_in(sorted(unlisted)) & (pl.col("trade_date") == trade_date))
+    )
+    finding = {
+        "dataset": "trading_status",
+        "severity": "info",
+        "check": "trading_status_unlisted_dropped",
+        "message": (
+            f"{len(unlisted)} code(s) with no listing date, no bar and no place on their "
+            f"exchange's board for {trade_date} are not listed yet; no status row written"
+        ),
+        "symbols": sorted(unlisted),
+    }
+    return kept, [finding], sh_sz_board
+
+
 def _delisted_status_rows(
     delisted: pl.DataFrame, symbols: list[str], days: list[date]
 ) -> pl.DataFrame:
@@ -519,7 +633,7 @@ def _delisted_status_rows(
     )
 
 
-@register_step("trading_status", group="core")
+@register_step("trading_status", group="core", depends_on=["instruments"])
 def step_trading_status(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if getattr(config, "_backfill", False):
         return _backfill_trading_status_st(
@@ -529,7 +643,7 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
             batch_id=context.get("_batch_id"),
         )
 
-    symbols = context.get("symbols") or load_symbols(config)
+    symbols = context.get("symbols") or _with_new_instruments(load_symbols(config), context)
     rl = config.tdx_rate_limit_spec()
 
     # A delisted security is not something the daily boards can report on, so
@@ -798,12 +912,14 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
     # EastMoney fails, so a normal day leaves no exchange-grade record of SH/SZ
     # status — and the ST evidence receipt admits a board precisely because a
     # board is not an aggregator. Snapshot only: authority is unchanged.
+    df, unlisted_findings, sh_sz_board = _drop_unlisted_codes(config, df, trade_date, context)
     try:
         captured = snapshot_trading_status_exchange(
             config,
             trade_date=trade_date,
             symbols=_live_symbols(trade_date),
             run_id=run_id,
+            prefetched=sh_sz_board,
         )
         if captured:
             logger.info("trading_status: snapshotted %d exchange board row(s)", captured)
@@ -814,7 +930,7 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
         if _findings:
             result["context_updates"] = {"audit_findings": _findings}
         return result
-    findings = list(_findings)
+    findings = [*_findings, *unlisted_findings]
     if fallback_days:
         findings.append(
             {

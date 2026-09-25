@@ -137,15 +137,33 @@ def test_macro_indicators_rejects_empty_fetch(monkeypatch, tmp_path):
         "fetch_macro_indicators",
         lambda *_args, **_kwargs: pl.DataFrame(),
     )
+    monkeypatch.setattr(macro_risk, "fetch_daily_rates_range", lambda *_a, **_k: pl.DataFrame())
     with pytest.raises(RuntimeError, match="macro_indicators: no rows returned"):
         macro_risk.step_macro_indicators(cfg, date(2024, 6, 28), "run-empty", {})
 
 
+def _only_treasury(start, end, *, client=None, config=None):
+    """A range read where Shibor never answers: 10Y only, every weekday."""
+    days = pl.date_range(start, end, eager=True).to_list()
+    return pl.DataFrame(
+        {
+            "indicator_id": ["cnbond_yield_10y"] * len(days),
+            "obs_date": days,
+            "value": [2.25] * len(days),
+            "frequency": ["daily"] * len(days),
+            "source": ["eastmoney"] * len(days),
+        }
+    )
+
+
 def test_macro_indicators_warns_when_one_daily_series_is_missing(monkeypatch, tmp_path):
     from cnequity.steps import macro_risk
+    from cnequity.storage.state import StateStore
 
     cfg = Config(data_root=tmp_path / "data")
     cfg.staging_root.mkdir(parents=True)
+    StateStore(cfg.meta_root).set_date("macro_indicators", date(2024, 6, 27))
+    monkeypatch.setattr(macro_risk, "fetch_daily_rates_range", _only_treasury)
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
@@ -162,11 +180,63 @@ def test_macro_indicators_warns_when_one_daily_series_is_missing(monkeypatch, tm
 
     result = macro_risk.step_macro_indicators(cfg, date(2024, 6, 28), "run-gap", {})
 
+    # Shibor absent on sessions that have already left the run day is a gap...
     assert result["status"] == "warning"
-    finding = result["context_updates"]["audit_findings"][0]
-    assert finding["check"] == "daily_series_gap"
-    assert finding["missing_dates"]["2024-06-28"] == ["shibor_3m"]
-    assert len(finding["missing_dates"]) == 5
+    findings = {f["check"]: f for f in result["context_updates"]["audit_findings"]}
+    gap = findings["daily_series_gap"]
+    assert gap["missing_dates"]["2024-06-27"] == ["shibor_3m"]
+    assert "2024-06-28" not in gap["missing_dates"]
+    # ...while the run day's own absence is only pending.
+    assert findings["daily_series_pending"]["pending_dates"] == {"2024-06-28": ["shibor_3m"]}
+
+
+def test_a_rate_not_yet_published_on_the_run_day_does_not_hold_the_run(monkeypatch, tmp_path):
+    """2026-09-22..24: the run-day 10Y yield was not out yet at run time, the
+    step returned `warning`, and that batch kept every other row out of the
+    lake for three days. The next run's lookback reads the late value."""
+    from cnequity.steps import macro_risk
+    from cnequity.storage.state import StateStore
+
+    cfg = Config(data_root=tmp_path / "data")
+    cfg.staging_root.mkdir(parents=True)
+    run_day = date(2024, 6, 28)
+    StateStore(cfg.meta_root).set_date("macro_indicators", date(2024, 6, 27))
+
+    def _range(start, end, *, client=None, config=None):
+        days = [d for d in pl.date_range(start, end, eager=True).to_list() if d.weekday() < 5]
+        rows = [("shibor_3m", d) for d in days]
+        rows += [("cnbond_yield_10y", d) for d in days if d != run_day]
+        return pl.DataFrame(
+            {
+                "indicator_id": [r[0] for r in rows],
+                "obs_date": [r[1] for r in rows],
+                "value": [1.9] * len(rows),
+                "frequency": ["daily"] * len(rows),
+                "source": ["eastmoney"] * len(rows),
+            }
+        )
+
+    monkeypatch.setattr(macro_risk, "fetch_daily_rates_range", _range)
+    monkeypatch.setattr(
+        macro_risk,
+        "fetch_macro_indicators",
+        lambda d, config=None: pl.DataFrame(
+            {
+                "indicator_id": ["shibor_3m"],
+                "obs_date": [d],
+                "value": [1.9],
+                "frequency": ["daily"],
+                "source": ["eastmoney"],
+            }
+        ),
+    )
+
+    result = macro_risk.step_macro_indicators(cfg, run_day, "run-late", {})
+
+    assert result.get("status") != "warning"
+    assert result["rows_written"] > 1
+    checks = [f["check"] for f in result["context_updates"]["audit_findings"]]
+    assert checks == ["daily_series_pending"]
 
 
 def test_macro_indicators_honours_eastmoney_source_switch(tmp_path):

@@ -461,3 +461,32 @@ def test_a_fully_successful_phase_does_not_block_the_next_one(cfg, monkeypatch):
     manifest.finish_batch(run_id, "ca-0", "success", rows_read=1, rows_written=1)
 
     assert "index_bars" in engine._missing_init_steps(run_id)
+
+
+def test_a_step_a_later_run_completed_no_longer_leaves_init_open(cfg):
+    """An init from 2026-07-06 never recorded `derive_industry_index`; the daily
+    schedule has derived it every session since, yet `cne status` failed the
+    health gate on it daily from 2026-09-19. Resuming keeps the strict view."""
+    from cnequity.orchestrator.init_phases import expected_steps
+
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    phases = ["phase4_finalize"]
+    init_id = manifest.start_run("init", {"phases": phases, "trade_date": "2024-06-28"})
+    for step in expected_steps(phases):
+        if step == "derive_industry_index":
+            continue
+        manifest.start_batch(init_id, f"b-{step}", task_id=step, dataset=step)
+        manifest.finish_batch(init_id, f"b-{step}", "success")
+    manifest.finish_run(init_id, "success")
+
+    assert manifest.latest_incomplete_init_run(discharged_by_later_runs=True) is not None
+
+    daily = manifest.start_run("daily:core")
+    manifest.start_batch(
+        daily, "b-idx", task_id="derive_industry_index", dataset="derive_industry_index"
+    )
+    manifest.finish_batch(daily, "b-idx", "success")
+
+    assert manifest.latest_incomplete_init_run(discharged_by_later_runs=True) is None
+    assert manifest.latest_incomplete_init_run()["run_id"] == init_id

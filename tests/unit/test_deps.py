@@ -12,10 +12,13 @@ from cnequity.orchestrator.deps import (
 from cnequity.orchestrator.registry import STEP_REGISTRY, register_step
 
 
-def test_reference_wave_steps_are_single_parallel_level():
+def test_trading_status_waits_for_instruments():
+    """A security listing today reaches trading_status through the run context
+    that `instruments` fills, so the two cannot share a parallel level."""
     levels = step_execution_levels(["instruments", "trading_calendar", "trading_status"])
-    assert len(levels) == 1
-    assert set(levels[0]) == {"instruments", "trading_calendar", "trading_status"}
+    assert len(levels) == 2
+    assert set(levels[0]) == {"instruments", "trading_calendar"}
+    assert levels[1] == ["trading_status"]
 
 
 def test_corp_actions_before_daily_bars_in_sequential_wave():

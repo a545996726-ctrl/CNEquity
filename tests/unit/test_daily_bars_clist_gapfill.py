@@ -1920,3 +1920,61 @@ def test_a_partly_halted_symbol_is_not_certified_as_having_no_data(tmp_path, mon
 
     assert result["expected_no_data_symbols"] == []
     assert result["complete"] is False
+
+
+def _probe_run(tmp_path, monkeypatch):
+    from cnequity.steps import bars
+
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("daily:core")
+    tip = date(2026, 9, 24)
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-batch-0", _bar_frame(["600519.SH"], tip)
+    )
+    monkeypatch.setattr(bars, "_gapfill_tip_via_clist", lambda *a, **k: {})
+    monkeypatch.setattr(
+        bars, "_gapfill_multiday_via_kline", lambda *a, **k: {"rows_read": 0, "rows_written": 0}
+    )
+    return cfg, run_id, tip
+
+
+def test_a_probed_code_with_no_bars_is_settled_as_not_listed(tmp_path, monkeypatch):
+    """2026-09-24: 力勤资源 001246.SZ had a code but no listing; asked for, it
+    comes back empty, and that is a proof, not an unresolved key."""
+    from cnequity.steps.common import load_negative_evidence
+
+    cfg, run_id, tip = _probe_run(tmp_path, monkeypatch)
+    result = _finish_daily_bars(
+        cfg,
+        tip,
+        run_id,
+        start=tip,
+        end=tip,
+        expected_tdx_symbols=["600519.SH", "001246.SZ"],
+        tdx_result={"rows_read": 1, "rows_written": 1},
+        sina_result=None,
+        probe_symbols=["001246.SZ"],
+    )
+
+    checks = {f["check"]: f for f in result["context_updates"]["audit_findings"]}
+    assert "daily_bars_unknown_missing_symbols" not in checks
+    assert checks["daily_bars_undated_probe"]["not_listed"] == ["001246.SZ"]
+    assert "001246.SZ" in checks["daily_bars_expected_no_data"]["symbols"]
+    evidence = load_negative_evidence(cfg, "daily_bars")
+    assert [(e["symbol"], e["reason"]) for e in evidence] == [("001246.SZ", "not_yet_listed")]
+
+
+def test_a_probe_the_source_never_answered_settles_nothing(tmp_path, monkeypatch):
+    cfg, run_id, tip = _probe_run(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="unknown"):
+        _finish_daily_bars(
+            cfg,
+            tip,
+            run_id,
+            start=tip,
+            end=tip,
+            expected_tdx_symbols=["600519.SH", "001246.SZ"],
+            tdx_result={"rows_read": 1, "rows_written": 1, "failed_symbols": ["001246.SZ"]},
+            sina_result=None,
+            probe_symbols=["001246.SZ"],
+        )

@@ -157,6 +157,7 @@ def snapshot_trading_status_exchange(
     trade_date: date,
     symbols: list[str],
     run_id: str,
+    prefetched=None,
 ) -> int:
     """Record what the SH/SZ boards said about halts and ST this session.
 
@@ -179,10 +180,15 @@ def snapshot_trading_status_exchange(
         return 0
     from cnequity.adapters.exchange.trading_status import fetch_trading_status_exchange
 
-    result = fetch_trading_status_exchange(sh_sz, trade_date, config=config)
+    # ``prefetched`` is a whole-board reading the caller already made for this
+    # session (see steps/reference.py); asking the exchanges twice is waste.
+    result = prefetched or fetch_trading_status_exchange(sh_sz, trade_date, config=config)
     if result.is_empty:
         return 0
-    frame = with_provenance(result.rows, source="exchange", data_version="v1")
+    rows = result.rows.filter(pl.col("symbol").is_in(sorted(set(sh_sz))))
+    if rows.is_empty():
+        return 0
+    frame = with_provenance(rows, source="exchange", data_version="v1")
     write_backup_snapshot(
         config,
         "trading_status",

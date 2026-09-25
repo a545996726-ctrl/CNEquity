@@ -291,15 +291,23 @@ def test_backfill_with_a_window_after_the_run_day_fetches_no_history(cfg, monkey
     assert result["rows_written"] == 1
 
 
-def test_daily_run_never_reads_the_range(cfg, monkeypatch):
+def test_daily_run_reads_only_a_short_recent_window(cfg, monkeypatch):
     from cnequity.storage.state import StateStore
 
-    def _range(*_args, **_kwargs):
-        raise AssertionError("the daily path must stay per-day")
+    calls: list[tuple[date, date]] = []
+
+    def _range(start, end, *, client=None, config=None):
+        calls.append((start, end))
+        return pl.DataFrame(
+            [*_rate_rows("shibor_3m", [end]), *_rate_rows("cnbond_yield_10y", [end])]
+        )
 
     day = date(2024, 6, 28)
     StateStore(cfg.meta_root).set_date("macro_indicators", date(2024, 6, 27))
     monkeypatch.setattr(macro_risk, "fetch_daily_rates_range", _range)
+    monkeypatch.setattr(
+        macro_risk, "list_trading_dates", lambda _cfg, _s, _e: [date(2024, 6, 27), day]
+    )
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
@@ -310,5 +318,8 @@ def test_daily_run_never_reads_the_range(cfg, monkeypatch):
 
     result = macro_risk.step_macro_indicators(cfg, day, "run-daily", {})
 
-    assert result["rows_written"] == 2
-    assert result.get("status") != "warning"
+    # The lookback window, never the lake's whole history.
+    assert calls == [(date(2024, 6, 27), day)]
+    assert result.get("status") == "warning"  # 06-27 was asked for and not answered
+    gap = result["context_updates"]["audit_findings"][0]
+    assert gap["missing_dates"] == {"2024-06-27": ["cnbond_yield_10y", "shibor_3m"]}

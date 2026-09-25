@@ -518,6 +518,49 @@ def test_status_datasets_rejects_a_fresh_but_narrow_daily_bar_tip(cfg_path, monk
     assert "日期 fresh 不代表标的覆盖完整" in result.output
 
 
+def test_a_code_the_probe_found_unlisted_is_not_owed_a_bar(tmp_path):
+    """001246.SZ / 301660.SZ / 301716.SZ held codes on 2026-09-24 without a
+    listing; the daily_bars probe proved it, and the proof has to agree."""
+    from cnequity.cli.quality_cmds import _tip_scope
+    from cnequity.steps.common import record_negative_evidence
+
+    cfg = Config(data_root=tmp_path / "data")
+    tip = date(2024, 6, 28)
+    symbols = ["600000.SH", "000001.SZ", "001246.SZ", "920001.BJ"]
+    (cfg.curated_root / "instruments").mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "list_date": [date(2000, 1, 1), date(2000, 1, 1), None, date(2000, 1, 1)],
+            "delist_date": [None] * len(symbols),
+        }
+    ).write_parquet(cfg.curated_root / "instruments" / "part-0.parquet")
+    for dataset in ("daily_bars", "trading_status"):
+        part = cfg.curated_root / dataset / f"trade_date={tip.isoformat()}"
+        part.mkdir(parents=True)
+        frame = {"symbol": ["600000.SH", "000001.SZ", "920001.BJ"], "trade_date": [tip] * 3}
+        if dataset == "trading_status":
+            frame["is_trading"] = [True] * 3
+        pl.DataFrame(frame).write_parquet(part / "part-0.parquet")
+    record_negative_evidence(
+        cfg, "daily_bars", ["001246.SZ"], tip, tip, reason="not_yet_listed", source="probe"
+    )
+
+    for dataset in ("daily_bars", "trading_status"):
+        catalog = pl.DataFrame(
+            {
+                "dataset": [dataset],
+                "has_data": [True],
+                "watermarked": [True],
+                "watermark": [tip],
+                "coverage_end": [tip],
+            }
+        )
+        scope = _tip_scope(cfg, catalog, dataset)
+        assert scope is not None and scope["state"] == "complete", (dataset, scope)
+        assert scope["covered"] == 4
+
+
 @pytest.mark.parametrize(
     ("suspended_evidence", "expected_state"),
     [(False, "incomplete"), (True, "complete")],

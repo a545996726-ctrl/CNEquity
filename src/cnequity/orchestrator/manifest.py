@@ -1300,8 +1300,23 @@ class Manifest:
                 cur = conn.execute("SELECT * FROM ingestion_runs ORDER BY started_at DESC")
             return cur.fetchall()
 
-    def latest_incomplete_init_run(self) -> sqlite3.Row | None:
-        from cnequity.orchestrator.init_phases import init_run_complete
+    def latest_incomplete_init_run(
+        self, *, discharged_by_later_runs: bool = False
+    ) -> sqlite3.Row | None:
+        """The newest init run with a phase step that never succeeded.
+
+        ``discharged_by_later_runs`` is the coverage question ``cne status``
+        asks: a step the init left undone but a later run has since completed
+        owes the lake nothing. Without it, an init from 2026-07-06 that never
+        recorded ``derive_industry_index`` failed the health gate every day
+        from 2026-09-19 on, while the daily schedule derived that dataset each
+        session. Resuming (``cne init``) keeps the strict reading.
+        """
+        from cnequity.orchestrator.init_phases import (
+            expected_steps,
+            init_run_complete,
+            step_succeeded,
+        )
 
         for run in self.list_runs("init"):
             meta = json.loads(run["metadata_json"] or "{}")
@@ -1311,8 +1326,26 @@ class Manifest:
             batches = self.get_batches_for_run(run["run_id"])
             if init_run_complete(phases, batches):
                 continue
+            if discharged_by_later_runs:
+                missing = [s for s in expected_steps(phases) if not step_succeeded(batches, s)]
+                if all(self._succeeded_after(step, run["started_at"]) for step in missing):
+                    continue
             return run
         return None
+
+    def _succeeded_after(self, dataset: str, started_at: str) -> bool:
+        """Whether a run started after *started_at* completed *dataset*."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM ingestion_batches b
+                JOIN ingestion_runs r ON r.run_id = b.run_id
+                WHERE b.dataset = ? AND b.status = 'success' AND r.started_at > ?
+                LIMIT 1
+                """,
+                (dataset, started_at),
+            ).fetchone()
+        return row is not None
 
     def latest_run(self, job_name: str | None = None) -> sqlite3.Row | None:
         with self._connect() as conn:

@@ -242,7 +242,10 @@ def test_a_never_traded_code_is_not_a_coverage_obligation_despite_positive_statu
         trading_sessions=[date(2026, 9, 15)],
     )
 
-    assert result.placeholder == ["301686.SZ"]
+    # An equity is probed rather than skipped: a late list_date looks the same
+    # as a pending IPO, and skipping it hid three live Beijing listings.
+    assert result.probe == ["301686.SZ"]
+    assert result.placeholder == []
     # Never claimed as proven no-data, and a name that has traded before keeps
     # its obligation — a real fetch miss must still block the snapshot.
     assert result.expected_no_data == []
@@ -271,3 +274,22 @@ def test_a_dated_code_that_has_never_traded_still_blocks():
 
     assert result.placeholder == []
     assert result.generic == ["301686.SZ"]
+
+
+def test_undated_equities_are_probed_while_undated_funds_stay_held():
+    result = classify_daily_bar_ownership(
+        ["920229.BJ", "589430.SH", "600519.SH"],
+        {
+            "920229.BJ": (None, None, "stock"),
+            "589430.SH": (None, None, "etf"),
+            "600519.SH": (date(2001, 8, 27), None, "stock"),
+        },
+        date(2026, 9, 24),
+        date(2026, 9, 24),
+        bar_universe={"600519.SH"},
+    )
+
+    assert result.probe == ["920229.BJ"]
+    assert result.placeholder == ["589430.SH"]
+    assert result.generic == ["600519.SH"]
+    assert result.expected_no_data == []

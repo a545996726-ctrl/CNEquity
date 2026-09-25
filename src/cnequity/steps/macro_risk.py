@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
@@ -23,6 +23,13 @@ from cnequity.steps.http_common import run_incremental_fetched
 logger = logging.getLogger(__name__)
 
 _REQUIRED_DAILY_MACRO_INDICATORS = frozenset({"cnbond_yield_10y", "shibor_3m"})
+#: Sessions the daily run re-reads for the two daily rates. Their values can
+#: land after the scheduled run (the 10Y treasury yield is a late-afternoon
+#: Beijing publication), and holding the whole run back for them kept every
+#: other row out of the lake for days (2026-09-22..24). The run's own session
+#: may therefore be pending; the next run's window picks it up. A session still
+#: missing once it has left the run day is a gap.
+DAILY_RATE_LOOKBACK_SESSIONS = 5
 _MARKET_BREADTH_METRICS = frozenset(MARKET_BREADTH_METRICS)
 
 
@@ -115,36 +122,38 @@ def _missing_daily_macro_indicators(df, trade_date: date) -> list[str]:
     return sorted(_REQUIRED_DAILY_MACRO_INDICATORS - observed)
 
 
-def _daily_rate_history(
-    config: Config, trade_date: date
+def _daily_rates_between(
+    config: Config, start: date, end: date
 ) -> tuple[pl.DataFrame, dict[date, list[str]]]:
-    """The backfill window's daily rates, and the sessions each series misses.
-
-    Defaults to the lake's ``BACKFILL_START``: both series are complete on
-    every session from there (measured 2026-09-25), and ``--start`` reaches back
-    to each one's first value (``DAILY_SERIES_FIRST_OBS``). A session before a
-    series' first value is not a gap, since there was nothing to publish yet.
+    """The daily rates over [start, end], and the sessions each series misses.
 
     Rows are kept on exchange sessions only. The interbank market also works
     the make-up weekends the exchanges skip, and the daily run never files
     those days, so keeping them would give history a density that later days
-    do not have.
+    do not have. A session before a series' first value is not a gap, since
+    there was nothing to publish yet.
     """
-    start = getattr(config, "_backfill_start", None) or BACKFILL_START
-    end = min(getattr(config, "_backfill_end", None) or trade_date, trade_date)
     if start > end:
         return pl.DataFrame(), {}
     sessions = list_trading_dates(config, start, end)
     fetched = fetch_daily_rates_range(start, end, config=config)
-    history = fetched.filter(pl.col("obs_date").is_in(sessions))
+    history = (
+        fetched.filter(pl.col("obs_date").is_in(sessions))
+        if "obs_date" in fetched.columns
+        else pl.DataFrame()
+    )
     logger.info(
-        "macro_indicators backfill: %d daily-rate row(s) over %s..%s (%d on non-session days skipped)",
+        "macro_indicators: %d daily-rate row(s) over %s..%s (%d on non-session days skipped)",
         history.height,
         start.isoformat(),
         end.isoformat(),
         fetched.height - history.height,
     )
-    observed = set(history.select(["indicator_id", "obs_date"]).iter_rows())
+    observed = (
+        set(history.select(["indicator_id", "obs_date"]).iter_rows())
+        if not history.is_empty()
+        else set()
+    )
     gaps: dict[date, list[str]] = {}
     for day in sessions:
         missing = sorted(
@@ -155,6 +164,31 @@ def _daily_rate_history(
         if missing:
             gaps[day] = missing
     return history, gaps
+
+
+def _daily_rate_history(
+    config: Config, trade_date: date
+) -> tuple[pl.DataFrame, dict[date, list[str]]]:
+    """The backfill window's daily rates, and the sessions each series misses.
+
+    Defaults to the lake's ``BACKFILL_START``: both series are complete on
+    every session from there (measured 2026-09-25), and ``--start`` reaches back
+    to each one's first value (``DAILY_SERIES_FIRST_OBS``).
+    """
+    start = getattr(config, "_backfill_start", None) or BACKFILL_START
+    end = min(getattr(config, "_backfill_end", None) or trade_date, trade_date)
+    return _daily_rates_between(config, start, end)
+
+
+def _recent_daily_rates(
+    config: Config, trade_date: date
+) -> tuple[pl.DataFrame, dict[date, list[str]]]:
+    """The last ``DAILY_RATE_LOOKBACK_SESSIONS`` sessions of daily rates."""
+    sessions = list_trading_dates(config, trade_date - timedelta(days=21), trade_date)
+    if not sessions:
+        return pl.DataFrame(), {}
+    start = sessions[-min(DAILY_RATE_LOOKBACK_SESSIONS, len(sessions))]
+    return _daily_rates_between(config, start, trade_date)
 
 
 def _validate_market_breadth_snapshot(df: pl.DataFrame) -> pl.DataFrame:
@@ -213,6 +247,7 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
     # migration (issue #3) — so this records the change rather than blocking it.
     revisions: list[dict] = []
     daily_gaps: dict[date, list[str]] = {}
+    daily_pending: dict[date, list[str]] = {}
     backfill = getattr(config, "_backfill", False)
 
     def _fetch(day: date):
@@ -229,9 +264,16 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
                     subset=["indicator_id", "obs_date"], keep="last", maintain_order=True
                 )
         else:
-            missing = _missing_daily_macro_indicators(df, day)
-            if missing:
-                daily_gaps[day] = missing
+            history, gaps = _recent_daily_rates(config, day)
+            if not history.is_empty():
+                df = pl.concat([history, df], how="diagonal_relaxed").unique(
+                    subset=["indicator_id", "obs_date"], keep="last", maintain_order=True
+                )
+            gaps.pop(day, None)
+            daily_gaps.update(gaps)
+            pending = _missing_daily_macro_indicators(df, day)
+            if pending:
+                daily_pending[day] = pending
         revisions.extend(macro_revision_findings(config, df, day))
         return df
 
@@ -272,6 +314,26 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
             },
         ]
         result["status"] = "warning"
+    if daily_pending:
+        updates = result.setdefault("context_updates", {})
+        updates["audit_findings"] = [
+            *(updates.get("audit_findings") or []),
+            {
+                "dataset": "macro_indicators",
+                "severity": "info",
+                "check": "daily_series_pending",
+                "message": (
+                    "run-day daily rate(s) not published yet, picked up by the next run: "
+                    + "; ".join(
+                        f"{day.isoformat()}: {', '.join(indicators)}"
+                        for day, indicators in sorted(daily_pending.items())
+                    )
+                ),
+                "pending_dates": {
+                    day.isoformat(): indicators for day, indicators in sorted(daily_pending.items())
+                },
+            },
+        ]
     return result
 
 
