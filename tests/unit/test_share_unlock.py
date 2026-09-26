@@ -104,6 +104,15 @@ def test_window_is_applied_client_side(monkeypatch):
     assert sorted(df["symbol"].to_list()) == ["600002.SH", "600003.SH", "600004.SH"]
 
 
+def test_source_ten_thousand_shares_are_normalized_to_shares(monkeypatch):
+    """Issuer notices give shares; the EastMoney report gives 万股."""
+    row = _row("300338", date(2018, 5, 9), "SZ")
+    row["ABLE_FREE_SHARES"] = 1050.6138
+    monkeypatch.setattr(su, "fetch_datacenter", lambda *a, **k: [row])
+    df = su.fetch_share_unlock_schedule(date(2018, 5, 1), client=MagicMock())
+    assert df["unlock_shares"][0] == 10_506_138
+
+
 def test_stop_after_halts_paging_and_skips_the_count_guard():
     """A short read is the point here, so the completeness guard must not fire."""
     pages = [

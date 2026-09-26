@@ -127,11 +127,15 @@ def fetch_share_unlock_schedule(
         shares = item.get("ABLE_FREE_SHARES")
         if shares is None:
             shares = item.get("CURRENT_FREE_SHARES")
+        # RPT_LIFT_STAGE reports share counts in 万股, while the curated
+        # contract (and the decision engine's float denominator) uses 股.
+        # Keep missing/malformed values null rather than turning them into 0.
+        shares_10k = _to_float(shares)
         rows.append(
             {
                 "symbol": sym,
                 "unlock_date": unlock_date,
-                "unlock_shares": _to_float(shares),
+                "unlock_shares": shares_10k * 10_000 if shares_10k is not None else None,
                 "unlock_ratio": _to_float(item.get("FREE_RATIO")),
                 "unlock_type": str(item.get("FREE_SHARES_TYPE") or ""),
             }
