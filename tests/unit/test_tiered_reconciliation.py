@@ -27,6 +27,14 @@ def _cfg(tmp_path, **kwargs) -> Config:
     return Config(data_root=tmp_path / "data", **kwargs)
 
 
+def _deep_done(cfg: Config, dataset: str = "announcement_index", day: date = date(2026, 9, 12)):
+    """The previous Saturday's deep sweep, so a weekday run is an ordinary one."""
+    from cnequity.steps.common import _DEEP_RECONCILED_FIELD
+    from cnequity.storage.state import StateStore
+
+    StateStore(cfg.meta_root).set_date(dataset, day, field=_DEEP_RECONCILED_FIELD)
+
+
 def test_announcement_index_declares_both_windows():
     spec = DATASETS["announcement_index"]
     assert spec.reconciliation_lookback_days == 30
@@ -35,6 +43,7 @@ def test_announcement_index_declares_both_windows():
 
 def test_the_near_tail_is_walked_on_an_ordinary_run(tmp_path):
     cfg = _cfg(tmp_path)
+    _deep_done(cfg)
     window = incremental_window(cfg, "announcement_index", TUESDAY)
     assert (TUESDAY - window).days + 1 == 7
 
@@ -126,6 +135,7 @@ def test_the_near_tail_is_walked_once_a_day_then_only_the_tip(tmp_path):
     import polars as pl
 
     cfg = _cfg(tmp_path)
+    _deep_done(cfg)
     asked: list[date] = []
 
     def _fetch(d):
@@ -145,6 +155,7 @@ def test_the_near_tail_is_walked_once_a_day_then_only_the_tip(tmp_path):
 
 def test_a_failed_tail_is_walked_again(tmp_path):
     cfg = _cfg(tmp_path)
+    _deep_done(cfg)
 
     def _boom(d):
         raise RuntimeError("cninfo 502")
@@ -152,3 +163,34 @@ def test_a_failed_tail_is_walked_again(tmp_path):
     with pytest.raises(RuntimeError):
         _sweep(cfg, TUESDAY, _boom)
     assert (TUESDAY - incremental_window(cfg, "announcement_index", TUESDAY)).days + 1 == 7
+
+
+def test_a_fresh_lake_keeps_the_weekly_rhythm(tmp_path):
+    """No record yet: an ordinary weekday stays shallow, the deep day goes deep."""
+    cfg = _cfg(tmp_path)
+    assert (TUESDAY - incremental_window(cfg, "announcement_index", TUESDAY)).days + 1 == 7
+    fresh = _cfg(tmp_path / "other")
+    assert (SATURDAY - incremental_window(fresh, "announcement_index", SATURDAY)).days + 1 == 30
+
+
+def test_a_sessions_only_feed_goes_deep_on_its_first_run_after_the_deep_day(tmp_path):
+    """daily_bars never runs on a Saturday; its weekly tail used to never run."""
+    from cnequity.steps.common import _deep_reconciliation_due
+
+    cfg = _cfg(tmp_path)
+    _deep_done(cfg, "daily_bars", date(2026, 9, 14))  # the Monday after 9-12
+    assert not _deep_reconciliation_due(cfg, "daily_bars", date(2026, 9, 18))  # Friday
+    assert _deep_reconciliation_due(cfg, "daily_bars", date(2026, 9, 21))  # next Monday
+
+
+def test_the_daily_bar_tip_does_not_re_read_the_settled_session(tmp_path):
+    """shallow=1 is the tip alone: the window starts after the watermark."""
+    from cnequity.storage.state import StateStore
+
+    cfg = _cfg(tmp_path)
+    _deep_done(cfg, "daily_bars", date(2026, 9, 14))
+    StateStore(cfg.meta_root).set_date("daily_bars", date(2026, 9, 17))
+    assert incremental_window(cfg, "daily_bars", date(2026, 9, 18)) == date(2026, 9, 18)
+    # Behind by a few sessions: every missed session is still in the window.
+    StateStore(cfg.meta_root).set_date("daily_bars", date(2026, 9, 15))
+    assert incremental_window(cfg, "daily_bars", date(2026, 9, 18)) == date(2026, 9, 16)

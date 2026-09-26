@@ -186,6 +186,9 @@ def test_the_kept_wire_calls_are_exactly_the_documented_set():
         "get_security_bars",
         "get_security_count",
         "get_security_list",
+        # Batch quotes (0x053e, 80 per request) for the daily_bars tip: one
+        # session for SH/SZ in ~70 requests instead of ~5,000 per-symbol bars.
+        "get_security_quotes",
         "get_transaction_data",
         "get_xdxr_info",
     }

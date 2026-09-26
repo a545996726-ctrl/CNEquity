@@ -139,6 +139,14 @@ def daily_bars_volume_unit_findings(
 # covers rounding in the published figures without admitting a real break.
 IMPLIED_PRICE_SLACK = 0.01
 
+# TDX's daily history counts whole lots while turnover stays exact, so a
+# thin fund's 2,155 shares arrive as 2,100 and the implied price overshoots the
+# high by 2.6%. Measured on 2026-09-27: all 109 ETF days this check still
+# raised after the decode repair were that, and none was further than a lot.
+# A decode artefact is at least 15 lots and 45% off, so a lot of slack on the
+# share count hides none of them.
+IMPLIED_PRICE_LOT_SLACK = 99
+
 # Per finding, not per row: 255 fund rows must not bury 8 stock ones.
 IMPLIED_PRICE_SAMPLE = 6
 
@@ -186,8 +194,18 @@ def daily_bars_implied_price_findings(
         )
         .with_columns((pl.col("amount") / pl.col("volume")).alias("_px"))
         .filter(
-            (pl.col("_px") < pl.col("low") * (1 - IMPLIED_PRICE_SLACK))
-            | (pl.col("_px") > pl.col("high") * (1 + IMPLIED_PRICE_SLACK))
+            (
+                pl.col("amount")
+                < pl.col("low")
+                * (pl.col("volume") - IMPLIED_PRICE_LOT_SLACK).clip(lower_bound=0)
+                * (1 - IMPLIED_PRICE_SLACK)
+            )
+            | (
+                pl.col("amount")
+                > pl.col("high")
+                * (pl.col("volume") + IMPLIED_PRICE_LOT_SLACK)
+                * (1 + IMPLIED_PRICE_SLACK)
+            )
         )
         .select("symbol", "trade_date", "low", "high", "volume", "amount", "_px", "source")
         .collect(engine="streaming")

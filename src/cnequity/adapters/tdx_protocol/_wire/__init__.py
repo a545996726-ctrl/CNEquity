@@ -40,6 +40,10 @@ from cnequity.adapters.tdx_protocol._wire.parser.std.get_security_count import (
     GetSecurityCountCmd,
 )
 from cnequity.adapters.tdx_protocol._wire.parser.std.get_security_list import GetSecurityList
+from cnequity.adapters.tdx_protocol._wire.parser.std.get_security_quotes import (
+    MAX_QUOTES_PER_REQUEST,
+    GetSecurityQuotesCmd,
+)
 from cnequity.adapters.tdx_protocol._wire.parser.std.get_transaction_data import (
     GetTransactionDataCmd,
 )
@@ -83,6 +87,13 @@ class TdxWireClient(BaseSocketClient):
     def get_security_bars(self, category: int, market: int, code: str, start: int, count: int):
         cmd = GetSecurityBarsCmd(self.client, lock=self.lock)
         cmd.setParams(category, market, code, start, min(int(count), MAX_PAGE))
+        return cmd.call_api()
+
+    @last_ack_time
+    def get_security_quotes(self, stocks: list[tuple[int, str]]):
+        """Batch quotes for up to ``MAX_QUOTES_PER_REQUEST`` (market, code) pairs."""
+        cmd = GetSecurityQuotesCmd(self.client, lock=self.lock)
+        cmd.setParams(list(stocks)[:MAX_QUOTES_PER_REQUEST])
         return cmd.call_api()
 
     @last_ack_time

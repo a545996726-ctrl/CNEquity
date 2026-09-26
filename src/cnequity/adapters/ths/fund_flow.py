@@ -95,30 +95,10 @@ def _now() -> datetime:
 
 
 def last_closed_session(now: datetime | None = None) -> date | None:
-    """The session the live ranking describes at *now*, or None while one is open.
+    """See :func:`cnequity.domain.market_time.last_closed_session`."""
+    from cnequity.domain.market_time import last_closed_session as _shared
 
-    Walks the exchange calendar, so a weekend or holiday still points at the
-    last session before it (Saturday → Thursday when Friday was closed).
-    """
-    from datetime import time as dtime
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo
-
-    from cnequity.domain.datasets import _is_exchange_session
-
-    local = (now or _now()).astimezone(ZoneInfo("Asia/Shanghai"))
-    day, clock = local.date(), local.time()
-    if _is_exchange_session(day):
-        if clock >= dtime(15, 30):
-            return day
-        if clock >= dtime(9, 15):
-            return None
-    day -= timedelta(days=1)
-    for _ in range(40):
-        if _is_exchange_session(day):
-            return day
-        day -= timedelta(days=1)
-    return None
+    return _shared(now or _now())
 
 
 def require_closed_session(trade_date: date, now: datetime | None = None) -> None:

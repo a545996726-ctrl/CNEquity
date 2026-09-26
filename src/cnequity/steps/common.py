@@ -57,18 +57,6 @@ def write_simple(
     return {"rows_read": df.height, "rows_written": df.height}
 
 
-def _is_deep_reconciliation_day(config: Config, trade_date: date) -> bool:
-    """Whether *trade_date* is the day a tiered feed walks its full window.
-
-    ``[incremental].deep_reconciliation_dow`` is an ISO weekday (1=Mon..7=Sun);
-    0 disables tiering entirely, so every run pays the full window as before.
-    """
-    dow = int(getattr(config, "deep_reconciliation_dow", 6) or 0)
-    if dow <= 0:
-        return True
-    return trade_date.isoweekday() == dow
-
-
 # StateStore field recording the day a tiered feed last completed its deep
 # sweep, so a job that runs several times on the deep day (the 6-hourly events
 # job ran announcement_index's 30-day sweep four times every Saturday — ~2 h of
@@ -85,10 +73,23 @@ def _deep_reconciliation_due(config: Config, dataset: str, trade_date: date) -> 
     spec = DATASETS.get(dataset)
     if not int(getattr(spec, "shallow_reconciliation_lookback_days", 0) or 0):
         return False
-    if not _is_deep_reconciliation_day(config, trade_date):
-        return False
+    dow = int(getattr(config, "deep_reconciliation_dow", 6) or 0)
+    if dow <= 0:
+        return True
+    # Due on the first run on or after the deep weekday, once a week. A feed
+    # that runs every calendar day (announcements) still goes deep on that
+    # day; one that runs only on sessions (daily_bars, Saturday never trades)
+    # goes deep on its first session after it — before this, never.
+    last_deep_day = trade_date - timedelta(days=(trade_date.isoweekday() - dow) % 7)
     state = StateStore(config.meta_root)
-    return state.get_date(dataset, field=_DEEP_RECONCILED_FIELD) != trade_date
+    done = state.get_date(dataset, field=_DEEP_RECONCILED_FIELD)
+    if done is None:
+        # First look at a lake without a record: start the weekly clock at the
+        # last deep day instead of sweeping deep now (on the deep day itself,
+        # go deep as the day-of-week rule always did).
+        done = last_deep_day - timedelta(days=7) if trade_date == last_deep_day else last_deep_day
+        state.set_date(dataset, done, field=_DEEP_RECONCILED_FIELD)
+    return done < last_deep_day
 
 
 def _reconciliation_depth(config: Config, dataset: str, trade_date: date) -> str | None:
@@ -126,17 +127,25 @@ def incremental_window(config: Config, dataset: str, trade_date: date) -> date:
     lookback = max(int(getattr(spec, "reconciliation_lookback_days", 0) or 0), 0)
     shallow = max(int(getattr(spec, "shallow_reconciliation_lookback_days", 0) or 0), 0)
     depth = _reconciliation_depth(config, dataset, trade_date) if shallow else None
+    mode = getattr(spec, "reconciliation_lookback_mode", "calendar")
+    if depth in {"tail", "tip"} and shallow == 1 and mode == "trading_day":
+        # A one-session tier means the tip alone (daily_bars: a settled session
+        # is not re-read daily — its tail is the weekly deep sweep). Counting
+        # the watermark session as "one" re-fetched yesterday on every run and
+        # sent the whole market through the per-symbol sweep each day.
+        if watermark is not None:
+            return min(watermark + timedelta(days=1), trade_date)
+        return trade_date
     if depth == "tip":
         # Tail already walked today: from the watermark day to the run day.
         lookback = 1
     elif depth == "tail":
-        # The deep tail is swept once, on its own day (see `_is_deep_reconciliation_day`);
+        # The deep tail is swept once a week (see `_deep_reconciliation_due`);
         # every other run walks the near tail only. Coverage over a week is
         # unchanged — a late-indexed record is picked up by the next deep sweep
         # instead of the next run — while the per-run page count drops with the
         # window.
         lookback = shallow
-    mode = getattr(spec, "reconciliation_lookback_mode", "calendar")
 
     if lookback:
         anchor = min(watermark, trade_date) if watermark is not None else trade_date

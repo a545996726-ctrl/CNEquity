@@ -174,8 +174,9 @@ def test_an_ordinary_day_still_covers_everything_since_the_watermark(tmp_path):
     friday = date(2024, 6, 28)
     assert friday.isoweekday() != cfg.deep_reconciliation_dow
 
+    # Every missed session; not the settled watermark session itself, whose
+    # revisions are the weekly deep sweep's to catch.
     assert incremental_trade_dates(cfg, "daily_bars", friday) == [
-        date(2024, 6, 25),
         date(2024, 6, 26),
         date(2024, 6, 27),
         date(2024, 6, 28),

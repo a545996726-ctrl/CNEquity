@@ -137,6 +137,14 @@ from cnequity.orchestrator.engine import JobEngine
     help="仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。",
 )
 @click.option(
+    "--tdx-volume-repair",
+    is_flag=True,
+    help=(
+        "仅 daily_bars：重读 TDX，只改写已存 TDX 行的成交量（修 2026-09-17 前的解码错误）；"
+        "价格须一致，64.5 元以下被放大的成交额一并改写；不新增行。需要 --symbols 和 --start/--end。"
+    ),
+)
+@click.option(
     "--fill-em-outage",
     is_flag=True,
     help=(
@@ -163,6 +171,7 @@ def backfill(
     ex_dates_str: str | None,
     bse_tip_repair: bool,
     bj_amount_repair: bool,
+    tdx_volume_repair: bool,
     fill_em_outage: bool,
 ):
     """回填一个数据集。
@@ -242,6 +251,12 @@ def backfill(
         if start_d is None or end_d is None:
             raise click.ClickException("--bj-amount-repair 需要同时给 --start 和 --end")
         cfg._bj_amount_repair = True
+    if tdx_volume_repair:
+        if dataset != "daily_bars":
+            raise click.ClickException("--tdx-volume-repair 只适用于 daily_bars")
+        if not symbols_str or start_d is None or end_d is None:
+            raise click.ClickException("--tdx-volume-repair 需要 --symbols 和 --start/--end")
+        cfg._tdx_volume_repair = True
     if fill_em_outage:
         if dataset != "valuation_metrics":
             raise click.ClickException("--fill-em-outage 只适用于 valuation_metrics")

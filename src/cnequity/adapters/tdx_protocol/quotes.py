@@ -78,6 +78,10 @@ class Quotes:
         client.connect(host, int(port), time_out=timeout)
         return cls(client, (host, int(port)))
 
+    def security_quotes(self, pairs: list[tuple[int, str]]) -> list[dict]:
+        """Batch quotes, up to 80 (market, code) pairs per call; see ``quote_bars``."""
+        return self._client.get_security_quotes(pairs)
+
     def close(self) -> None:
         try:
             self._client.close()
@@ -199,3 +203,56 @@ class Quotes:
                 )
             out.extend(page)
         return out
+
+
+def quote_bars(client, symbols: list[str], trade_date: date, *, pace=None) -> dict[str, dict]:
+    """``daily_bars`` rows for *trade_date* from TDX batch quotes, 80 per request.
+
+    Only for the session the quotes describe (see
+    ``domain.market_time.last_closed_session``; the caller checks). A symbol
+    that did not trade (volume 0), lacks a price coefficient, or does not come
+    back is simply absent: the per-symbol path owns it.
+
+    Measured 2026-09-26 against the 2026-09-24 TDX daily bars, 5,222 SH/SZ
+    symbols in 66 requests (11.8 s): OHLC and amount identical for every traded
+    symbol; volume identical for 99.3%, and one lot lower for 38 names — the
+    quote truncates odd lots where the K-line rounds them.
+    """
+    from cnequity.adapters.tdx_protocol._wire import MAX_QUOTES_PER_REQUEST
+    from cnequity.adapters.tdx_protocol._wire.helper import get_security_coefficient
+
+    pairs = []
+    for symbol in symbols:
+        code, _, exchange = symbol.partition(".")
+        if exchange in ("SH", "SZ"):
+            pairs.append((MARKET_SH if exchange == "SH" else MARKET_SZ, code))
+    out: dict[str, dict] = {}
+    fetch = getattr(client, "security_quotes", None) or client.get_security_quotes
+    for offset in range(0, len(pairs), MAX_QUOTES_PER_REQUEST):
+        if pace is not None:
+            pace()
+        for row in fetch(pairs[offset : offset + MAX_QUOTES_PER_REQUEST]) or []:
+            if int(row.get("vol") or 0) <= 0:
+                continue
+            try:
+                coefficient = get_security_coefficient(row["market"], row["code"])
+            except NotImplementedError:
+                continue
+            prices = [
+                round(row[key] * coefficient, 4)
+                for key in ("open_raw", "high_raw", "low_raw", "price_raw")
+            ]
+            if min(prices) <= 0:
+                continue
+            symbol = f"{row['code']}.{'SH' if row['market'] == MARKET_SH else 'SZ'}"
+            out[symbol] = {
+                "symbol": symbol,
+                "trade_date": trade_date,
+                "open": prices[0],
+                "high": prices[1],
+                "low": prices[2],
+                "close": prices[3],
+                "volume": int(row["vol"]) * 100,
+                "amount": float(row["amount"]),
+            }
+    return out

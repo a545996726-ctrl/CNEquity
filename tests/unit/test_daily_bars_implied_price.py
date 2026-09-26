@@ -75,6 +75,18 @@ def test_a_bar_that_agrees_with_itself_says_nothing(tmp_path):
     assert daily_bars_implied_price_findings(cfg, DAY) == []
 
 
+def test_a_share_count_rounded_to_whole_lots_says_nothing(tmp_path):
+    """TDX history counts lots and keeps turnover exact: 2,155 shares at 1.305
+    arrive as 2,100 shares and 2,812.3 yuan, an implied 1.339 over a 1.305 high."""
+    cfg = _lake(
+        tmp_path,
+        [_bar("164508.SZ", volume=2100, amount=2812.3, low=1.305, high=1.305)],
+        {"164508.SZ": "etf"},
+    )
+
+    assert daily_bars_implied_price_findings(cfg, DAY) == []
+
+
 def test_a_volume_that_cannot_produce_that_turnover_is_reported(tmp_path):
     """The real 160806.SZ row: turnover matches the minute stream, volume does not."""
     cfg = _lake(
