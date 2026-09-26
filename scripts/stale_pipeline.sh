@@ -19,6 +19,23 @@ LOG_DIR="${CNE_LOG_DIR:-$REPO_ROOT/data/cnequity/logs}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/stale-$(date +%Y%m%d).log"
 TRADE_DATE="${1:-${CNE_TRADE_DATE:-}}"
+PY="${CNE_PYTHON:-$REPO_ROOT/.venv/bin/python}"
+# Launched by the scheduler (hourly, CNE_SCHEDULED=1): run only when this
+# session's Beijing run_at has passed and it has not run yet. A manual run —
+# or one given an explicit trade date — is never gated.
+GATED=0
+if [[ "${CNE_SCHEDULED:-0}" == "1" && -z "$TRADE_DATE" ]]; then
+  gate_out="$("$PY" "$REPO_ROOT/scripts/scheduler_gate.py" check stale --config "$CONFIG" 2>>"$LOG_DIR/scheduler-gate.err")"
+  gate_rc=$?
+  if [[ "$gate_rc" -eq 3 ]]; then
+    exit 0
+  elif [[ "$gate_rc" -ne 0 || -z "$gate_out" ]]; then
+    echo "[$(date '+%F %T')] stale gate failed (rc=$gate_rc)" >>"$LOG_DIR/scheduler-gate.err"
+    exit 1
+  fi
+  TRADE_DATE="$gate_out"
+  GATED=1
+fi
 # The late pass never touches EastMoney push2: a second daily round against a
 # host that bans IPs for volume is what the push2 budget exists to prevent.
 # Snapshot datasets it cannot repair wait for the next daily run.
@@ -52,10 +69,17 @@ elif [[ "$lock_rc" -ne 0 ]]; then
   exit 1
 fi
 scheduler_lock_install_traps
+if [[ "$GATED" == "1" ]]; then
+  # Counted as run once the lock is ours: one attempt per session.
+  "$PY" "$REPO_ROOT/scripts/scheduler_gate.py" mark stale "$TRADE_DATE" --config "$CONFIG"
+fi
 
 log "==== stale pipeline start $(date '+%Y-%m-%d %H:%M:%S') trade_date=${TRADE_DATE:-latest} ===="
 log "--- stale-only repair ---"
-if "$CNE" run daily --stale-only --config "$CONFIG" \
+# Snapshot datasets only: they have no history to catch up tomorrow, so a
+# failed one is retried tonight. History datasets wait for the next daily run,
+# which fetches every date since their watermark anyway.
+if "$CNE" run daily --stale-only --snapshots-only --config "$CONFIG" \
   ${GROUP_ARGS[@]+"${GROUP_ARGS[@]}"} \
   ${DATE_ARGS[@]+"${DATE_ARGS[@]}"} >>"$LOG" 2>&1; then
   log "stale-only repair OK"

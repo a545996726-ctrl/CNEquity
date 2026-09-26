@@ -532,6 +532,14 @@ steps = [
 # A mainland Linux box with workers=8 finishes core in minutes and will find
 # this schedule far roomier than it needs. That is the intended asymmetry —
 # starting late costs nothing, being skipped costs a day of data.
+# When the scheduled jobs run, in Beijing time — whatever the host timezone.
+# launchd/cron wake them hourly; each runs once per session after its run_at.
+[job.daily]
+run_at = "17:30"
+[job.stale]
+# Only retries the snapshot datasets the day's run missed.
+run_at = "21:00"
+
 # Per-group fetch frequency (docs/getting-started/configuration.md, 取数频率):
 #   cadence = "daily"   (default) or "weekly"
 #   weekday = 5         weekly: run on the last session of the week up to this ISO weekday

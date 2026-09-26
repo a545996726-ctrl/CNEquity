@@ -148,6 +148,11 @@ class Config:
     bj_history_lookback_days: int = 1
     daily_waves: list[WaveConfig] = field(default_factory=list)
     schedule_groups: dict[str, ScheduleGroup] = field(default_factory=dict)
+    # Beijing wall-clock times the scheduled daily pipeline and its snapshot
+    # catch-up run each session (orchestrator/run_window.py). The host's own
+    # timezone and daylight saving never enter into it.
+    daily_run_at: str = "17:30"
+    stale_run_at: str = "21:00"
     # Continuous event streams. Same shape as a daily schedule group, but the
     # job they belong to runs on the natural calendar and takes its own
     # ingestion lock, so a disclosure or news sweep neither waits for the
@@ -804,6 +809,8 @@ def load_config(path: str | Path) -> Config:
         )
 
     schedule_groups: dict[str, ScheduleGroup] = {}
+    daily_run_at = str(raw.get("job", {}).get("daily", {}).get("run_at", "17:30")).strip()
+    stale_run_at = str(raw.get("job", {}).get("stale", {}).get("run_at", "21:00")).strip()
     groups_raw = raw.get("job", {}).get("daily", {}).get("groups", {})
     for name, group in groups_raw.items():
         schedule_groups[name] = ScheduleGroup(
@@ -945,6 +952,8 @@ def load_config(path: str | Path) -> Config:
         ),
         daily_waves=daily_waves,
         schedule_groups=schedule_groups,
+        daily_run_at=daily_run_at,
+        stale_run_at=stale_run_at,
         events_groups=events_groups,
         init_phases=init_phases,
         on_demand_enabled=bool(on_demand.get("enabled", True)),
@@ -1035,6 +1044,14 @@ def validate_config(cfg: Config) -> list[str]:
         "processpool",
     }:
         errors.append("orchestrator.tdx_daily_backend must be 'auto', 'thread', or 'process'")
+    import re as _re
+
+    for key in ("daily_run_at", "stale_run_at"):
+        value = str(getattr(cfg, key, ""))
+        match = _re.fullmatch(r"(\d{1,2}):(\d{2})", value)
+        if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+            section = "job.daily" if key == "daily_run_at" else "job.stale"
+            errors.append(f"{section}.run_at must be Beijing time HH:MM; got {value!r}")
     for name, group in (getattr(cfg, "schedule_groups", None) or {}).items():
         if getattr(group, "cadence", "daily") not in {"daily", "weekly"}:
             errors.append(

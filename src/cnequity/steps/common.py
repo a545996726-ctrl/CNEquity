@@ -69,6 +69,24 @@ def _is_deep_reconciliation_day(config: Config, trade_date: date) -> bool:
     return trade_date.isoweekday() == dow
 
 
+# StateStore field recording the day a tiered feed last completed its deep
+# sweep, so a job that runs several times on the deep day (the 6-hourly events
+# job ran announcement_index's 30-day sweep four times every Saturday — ~2 h of
+# CNINFO requests where one pass was the design) walks the full window once.
+_DEEP_RECONCILED_FIELD = "deep_reconciled_on"
+
+
+def _deep_reconciliation_due(config: Config, dataset: str, trade_date: date) -> bool:
+    """Whether this run of a tiered feed should walk its full window."""
+    spec = DATASETS.get(dataset)
+    if not int(getattr(spec, "shallow_reconciliation_lookback_days", 0) or 0):
+        return False
+    if not _is_deep_reconciliation_day(config, trade_date):
+        return False
+    state = StateStore(config.meta_root)
+    return state.get_date(dataset, field=_DEEP_RECONCILED_FIELD) != trade_date
+
+
 def incremental_window(config: Config, dataset: str, trade_date: date) -> date:
     """Return the start of a dataset's incremental reconciliation window.
 
@@ -87,8 +105,8 @@ def incremental_window(config: Config, dataset: str, trade_date: date) -> date:
     spec = DATASETS.get(dataset)
     lookback = max(int(getattr(spec, "reconciliation_lookback_days", 0) or 0), 0)
     shallow = max(int(getattr(spec, "shallow_reconciliation_lookback_days", 0) or 0), 0)
-    if shallow and not _is_deep_reconciliation_day(config, trade_date):
-        # The deep tail is swept on its own day (see `_is_deep_reconciliation_day`);
+    if shallow and not _deep_reconciliation_due(config, dataset, trade_date):
+        # The deep tail is swept once, on its own day (see `_is_deep_reconciliation_day`);
         # every other run walks the near tail only. Coverage over a week is
         # unchanged — a late-indexed record is picked up by the next deep sweep
         # instead of the next run — while the per-run page count drops with the
@@ -380,6 +398,8 @@ def fetch_incremental_daily(
         dates = [trade_date]
     else:
         dates = incremental_trade_dates(config, dataset, trade_date)
+    # Decided before the fetch, with the same state the window was built from.
+    deep_run = _deep_reconciliation_due(config, dataset, trade_date)
     if (
         not dates
         and semantics == "snapshot"
@@ -449,6 +469,9 @@ def fetch_incremental_daily(
         findings.append(_dense_empty_day_finding(dataset, empty_days))
     if failed_days:
         findings.append(_fetch_failed_day_finding(dataset, failed_days))
+    elif deep_run:
+        # Only a clean deep sweep counts; a partial one is retried deep.
+        StateStore(config.meta_root).set_date(dataset, trade_date, field=_DEEP_RECONCILED_FIELD)
     if not frames:
         return pl.DataFrame(), findings
     combined = pl.concat(frames, how="diagonal_relaxed")

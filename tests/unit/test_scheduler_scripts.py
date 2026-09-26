@@ -110,7 +110,9 @@ def test_stale_template_is_a_late_independent_agent():
     payload = plistlib.loads(STALE_PLIST.read_bytes())
     assert payload["Label"] == "com.cnequity.stale"
     assert payload["ProgramArguments"][-1].endswith("scripts/stale_pipeline.sh")
-    assert payload["StartCalendarInterval"] == {"Hour": 17, "Minute": 5}
+    # Hourly wake-up; scheduler_gate.py picks the run by Beijing time.
+    assert payload["StartCalendarInterval"] == {"Minute": 37}
+    assert payload["EnvironmentVariables"]["CNE_SCHEDULED"] == "1"
 
 
 def test_events_template_runs_every_calendar_day_on_its_own_lock():
@@ -177,6 +179,7 @@ def test_stale_pipeline_forwards_target_date_and_returns_cne_failure(tmp_path):
         "run",
         "daily",
         "--stale-only",
+        "--snapshots-only",
         "--config",
         str(tmp_path / "cnequity.toml"),
         "--trade-date",

@@ -30,7 +30,12 @@ def test_renderer_preserves_host_groups_cadence_and_event_scope(tmp_path):
     assert jobs["com.cnequity.daily"]["EnvironmentVariables"] == {
         **old["EnvironmentVariables"],
         "CNE_STALE_RETRY": "0",
+        "CNE_SCHEDULED": "1",
     }
+    # The run time lives in the config ([job.daily] run_at, Beijing time); an
+    # old host-local launch time must not survive regeneration.
+    assert jobs["com.cnequity.daily"]["StartCalendarInterval"] == {"Minute": 7}
+    assert jobs["com.cnequity.stale"]["EnvironmentVariables"]["CNE_SCHEDULED"] == "1"
     assert jobs["com.cnequity.stale"]["EnvironmentVariables"]["CNE_GROUPS"] == "core"
     assert jobs["com.cnequity.stale"]["EnvironmentVariables"]["CNE_CONFIG"] == "/my/config.toml"
     assert jobs["com.cnequity.events"]["StartInterval"] == 900
@@ -102,13 +107,15 @@ def test_python_launchctl_stub_is_run_with_this_interpreter(tmp_path, monkeypatc
     assert module._launchctl_command() == ["launchctl"]
 
 
-def test_stale_time_override_is_scoped_and_survives_regeneration(tmp_path):
+def test_stale_at_is_retired_and_an_old_catch_up_time_is_replaced(tmp_path):
     dest = tmp_path / "installed"
     dest.mkdir()
     old = {"EnvironmentVariables": {"CNE_GROUPS": "core", "CNE_SOURCE_VANTAGE": "overseas"}}
     daily = dest / "com.cnequity.daily.plist"
     daily.write_bytes(plistlib.dumps(old))
     before = daily.read_bytes()
+    stale = dest / "com.cnequity.stale.plist"
+    stale.write_bytes(plistlib.dumps({"StartCalendarInterval": {"Hour": 23, "Minute": 0}}))
     env = dict(
         os.environ,
         CNE_SCHEDULER_DEST_DIR=str(dest),
@@ -122,16 +129,16 @@ def test_stale_time_override_is_scoped_and_survives_regeneration(tmp_path):
             [sys.executable, str(SCRIPT), *args], env=env, capture_output=True, text=True
         )
 
-    result = run("--stale-only", "--stale-at", "23:00")
+    retired = run("--stale-only", "--stale-at", "23:00")
+    assert retired.returncode == 2
+    assert "run_at" in retired.stderr
+    result = run("--stale-only")
     assert result.returncode == 0, result.stderr
     assert daily.read_bytes() == before
     assert not (dest / "com.cnequity.events.plist").exists()
-    job = plistlib.loads((dest / "com.cnequity.stale.plist").read_bytes())
-    assert job["StartCalendarInterval"] == {"Hour": 23, "Minute": 0}
+    job = plistlib.loads(stale.read_bytes())
+    assert job["StartCalendarInterval"] == {"Minute": 37}
     assert job["EnvironmentVariables"]["CNE_GROUPS"] == "core"
+    assert job["EnvironmentVariables"]["CNE_SCHEDULED"] == "1"
     assert job["RunAtLoad"] is False
     assert run("--check", "--stale-only").returncode == 0
-    assert run("--check", "--stale-only", "--stale-at", "22:00").returncode == 1
-    for invalid in ("24:00", "23:60", "-1:00", "23", "1:00"):
-        assert run("--stale-only", "--stale-at", invalid).returncode == 2
-    assert run("--daily-only", "--stale-at", "23:00").returncode == 2

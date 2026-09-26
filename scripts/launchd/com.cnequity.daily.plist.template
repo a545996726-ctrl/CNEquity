@@ -25,16 +25,14 @@
     <string>__REPO_ROOT__/scripts/daily_pipeline.sh</string>
   </array>
 
-  <!-- Fire at 11:15 in the host's local time every day. Choose a time that
-       lands comfortably after the 15:00 CST A-share close in the host's
-       timezone — for a UTC+2/+3 host that is 16:15/17:15 CST — while leaving
-       enough time for Workbench's downstream run. -->
+  <!-- Wake at :07 every hour. The pipeline itself decides whether this is
+       the run (scripts/scheduler_gate.py): once per session, after
+       [job.daily] run_at in *Beijing* time. So no host timezone or daylight-
+       saving arithmetic lives here, and a Mac asleep at run_at runs on waking. -->
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key>
-    <integer>11</integer>
     <key>Minute</key>
-    <integer>15</integer>
+    <integer>7</integer>
   </dict>
 
   <key>RunAtLoad</key>
@@ -51,6 +49,9 @@
          an upgraded install cannot accidentally reintroduce a 30-minute wait. -->
     <key>CNE_STALE_RETRY</key>
     <string>0</string>
+    <!-- Hourly wake-ups are gated; a manual scripts/daily_pipeline.sh is not. -->
+    <key>CNE_SCHEDULED</key>
+    <string>1</string>
     <key>CNE_SOURCE_VANTAGE</key>
     <string>__SOURCE_VANTAGE__</string>
   </dict>

@@ -546,6 +546,18 @@ def _announcement_coverage(config: Config, start: date, end: date) -> tuple[date
                     "requested_start": requested_start.isoformat(),
                 }
             )
+    # Announcements are dated by session: a weekend or holiday rarely carries
+    # any, so an index that stops at the last session is complete. Measuring the
+    # lag against the calendar end made every weekend run of the events job
+    # `degraded` (exit 2 from 2026-09-26, Saturday), with nothing missing.
+    from cnequity.steps.common import last_session_on_or_before
+
+    try:
+        expected_through = last_session_on_or_before(config, end)
+    except Exception:  # noqa: BLE001 — no calendar: keep the strict calendar test
+        expected_through = end
+    if watermark < end and watermark >= expected_through:
+        end = watermark
     if watermark < end:
         findings.append(
             {

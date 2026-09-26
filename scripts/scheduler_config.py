@@ -77,12 +77,16 @@ def render_jobs(root: Path, dest: Path, *, groups: str | None, vantage: str | No
         job = substitute(job)
         old = read_plist(dest / f"{label}.plist")
         # Existing event cadence and host-specific config/proxy overrides are
-        # operator choices. Regeneration must not silently erase them.
-        for key in ("StartCalendarInterval", "StartInterval"):
-            if key in old:
-                job.pop("StartCalendarInterval", None)
-                job.pop("StartInterval", None)
-                job[key] = old[key]
+        # operator choices. Regeneration must not silently erase them. The
+        # daily and catch-up agents are the exception: they wake hourly and
+        # take their run time from [job.daily] / [job.stale] run_at (Beijing
+        # time) in the config, so an old host-local time must not survive.
+        if name not in {"daily", "stale"}:
+            for key in ("StartCalendarInterval", "StartInterval"):
+                if key in old:
+                    job.pop("StartCalendarInterval", None)
+                    job.pop("StartInterval", None)
+                    job[key] = old[key]
         env = job.setdefault("EnvironmentVariables", {})
         if name == "stale":
             for key in (
@@ -102,6 +106,8 @@ def render_jobs(root: Path, dest: Path, *, groups: str | None, vantage: str | No
             # The host copy may carry CNE_CONFIG and a retuned interval; both
             # survive above. The group is what makes this agent this agent.
             env.setdefault("CNE_EVENTS_GROUP", "news_wire")
+        if name in {"daily", "stale"}:
+            env["CNE_SCHEDULED"] = "1"
         if name == "daily":
             env["CNE_STALE_RETRY"] = "0"
         jobs[label] = job
@@ -119,11 +125,17 @@ def main() -> int:
         "--stale-only", action="store_true", help="Update only the catch-up agent"
     )
     parser.add_argument(
-        "--stale-at", type=local_time, metavar="HH:MM", help="Host local catch-up time"
+        "--stale-at",
+        type=local_time,
+        metavar="HH:MM",
+        help="Retired: set [job.stale] run_at (Beijing time) in the config instead",
     )
     args = parser.parse_args()
-    if args.daily_only and args.stale_at is not None:
-        parser.error("--stale-at cannot be combined with --daily-only")
+    if args.stale_at is not None:
+        parser.error(
+            "--stale-at is retired: the catch-up now wakes hourly and runs once per session "
+            "after [job.stale] run_at, in Beijing time — set it in configs/cnequity.toml"
+        )
     dest = Path(os.environ.get("CNE_SCHEDULER_DEST_DIR", Path.home() / "Library/LaunchAgents"))
     try:
         jobs = render_jobs(
@@ -132,9 +144,6 @@ def main() -> int:
             groups=os.environ.get("CNE_GROUPS"),
             vantage=os.environ.get("CNE_SOURCE_VANTAGE"),
         )
-        if args.stale_at is not None:
-            jobs["com.cnequity.stale"].pop("StartInterval", None)
-            jobs["com.cnequity.stale"]["StartCalendarInterval"] = args.stale_at
         if args.daily_only:
             jobs = {"com.cnequity.daily": jobs["com.cnequity.daily"]}
         elif args.stale_only:

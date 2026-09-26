@@ -318,6 +318,7 @@ def _run_stale_only(
     backfill: bool,
     repair_gaps: bool = False,
     groups: set[str] | None = None,
+    snapshots_only: bool = False,
 ) -> None:
     """Second attempt, same day, for whatever the first attempt did not land.
 
@@ -336,6 +337,12 @@ def _run_stale_only(
         if groups is None
         else stale_fetch_plan(cfg, anchor, groups=groups)
     )
+    if snapshots_only:
+        # History datasets catch up by date on the next daily run; only a
+        # snapshot's missed session is lost for good, so only those are retried.
+        from cnequity.domain.datasets import DATASETS
+
+        plan = [item for item in plan if DATASETS[item["dataset"]].fetch_semantics == "snapshot"]
     steps = [item["dataset"] for item in plan]
     if not plan:
         click.echo(f"截至 {anchor.isoformat()} 没有落后的数据集")
@@ -484,6 +491,11 @@ def datasets_outside_the_daily_waves(cfg) -> list[str]:
     help="只重抓仍然落后于最后交易日的数据集。挂在主 pipeline 几小时之后跑："
     "snapshot 类数据集一旦因源端中断丢掉当天窗口，第二天就补不回来了。",
 )
+@click.option(
+    "--snapshots-only",
+    is_flag=True,
+    help="配合 --stale-only：只重抓 snapshot 类数据集；历史类留给下一次日更按日期补。",
+)
 def run_daily(
     config_path: str,
     group_name: str | None,
@@ -494,6 +506,7 @@ def run_daily(
     stale_only: bool,
     quiet: bool,
     stale_groups: str | None = None,
+    snapshots_only: bool = False,
 ):
     """跑日更采集（Wave DAG 或指定调度组）。"""
     _progress_logging(quiet)
@@ -509,6 +522,8 @@ def run_daily(
     attach_log_file(cfg, "run-daily", quiet=quiet)
     engine = JobEngine(cfg)
     td = parse_date_option(trade_date_str, "--trade-date")
+    if snapshots_only and not stale_only:
+        raise click.ClickException("--snapshots-only 只能配合 --stale-only")
     if stale_groups is not None and not stale_only:
         raise click.ClickException("--groups 只能配合 --stale-only；普通的一次 run 请用 --group")
     if all_groups and group_name:
@@ -523,7 +538,15 @@ def run_daily(
             groups = set(stale_groups.replace(",", " ").split())
             if not groups:
                 raise click.ClickException("--groups 不能为空")
-        _run_stale_only(cfg, engine, td, backfill=backfill, repair_gaps=repair_gaps, groups=groups)
+        _run_stale_only(
+            cfg,
+            engine,
+            td,
+            backfill=backfill,
+            repair_gaps=repair_gaps,
+            groups=groups,
+            snapshots_only=snapshots_only,
+        )
         return
     repairs = []
     if repair_gaps:

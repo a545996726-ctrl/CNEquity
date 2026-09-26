@@ -250,3 +250,26 @@ def test_turning_off_cninfo_stops_this_dataset_too(tmp_path):
 
     with pytest.raises(RuntimeError, match="cninfo source disabled"):
         step_regulatory_events(cfg, DAY, "run-off", {})
+
+
+def test_a_weekend_with_no_announcements_is_not_a_coverage_gap(tmp_path):
+    """The events job exited 2 every Saturday: index through Thursday, window to Saturday."""
+    cfg = Config(data_root=tmp_path / "data", raw_archive_enabled=False)
+    # 2026-09-25 (Fri) was the Mid-Autumn close, so Thursday 09-24 is the last session.
+    _seed_announcements(cfg, [("A1", "关于收到监管函的公告")], day=date(2026, 9, 24))
+
+    result = step_regulatory_events(cfg, date(2026, 9, 26), "run-weekend", {})
+
+    assert result.get("status") != "degraded"
+    assert result["window"]["end"] == "2026-09-24"
+    assert not result.get("context_updates", {}).get("audit_findings")
+
+
+def test_an_index_behind_the_last_session_is_still_reported(tmp_path):
+    cfg = Config(data_root=tmp_path / "data", raw_archive_enabled=False)
+    _seed_announcements(cfg, [("A1", "关于收到监管函的公告")], day=date(2026, 9, 23))
+
+    result = step_regulatory_events(cfg, date(2026, 9, 26), "run-behind-weekend", {})
+
+    assert result["status"] == "degraded"
+    assert result["context_updates"]["audit_findings"][0]["check"] == "pending_source_coverage"

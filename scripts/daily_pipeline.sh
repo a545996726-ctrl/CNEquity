@@ -38,6 +38,23 @@ LOG_DIR="${CNE_LOG_DIR:-$REPO_ROOT/data/cnequity/logs}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/daily-$(date +%Y%m%d).log"
 TRADE_DATE="${1:-${CNE_TRADE_DATE:-}}"
+PY="${CNE_PYTHON:-$REPO_ROOT/.venv/bin/python}"
+# Launched by the scheduler (hourly, CNE_SCHEDULED=1): run only when this
+# session's Beijing run_at has passed and it has not run yet. A manual run —
+# or one given an explicit trade date — is never gated.
+GATED=0
+if [[ "${CNE_SCHEDULED:-0}" == "1" && -z "$TRADE_DATE" ]]; then
+  gate_out="$("$PY" "$REPO_ROOT/scripts/scheduler_gate.py" check daily --config "$CONFIG" 2>>"$LOG_DIR/scheduler-gate.err")"
+  gate_rc=$?
+  if [[ "$gate_rc" -eq 3 ]]; then
+    exit 0
+  elif [[ "$gate_rc" -ne 0 || -z "$gate_out" ]]; then
+    echo "[$(date '+%F %T')] daily gate failed (rc=$gate_rc)" >>"$LOG_DIR/scheduler-gate.err"
+    exit 1
+  fi
+  TRADE_DATE="$gate_out"
+  GATED=1
+fi
 # Expanded below as ${DATE_ARGS[@]+"${DATE_ARGS[@]}"}: macOS ships bash 3.2,
 # where "${arr[@]}" on an empty array is an unbound-variable error under `set -u`
 # (fixed in bash 4.4). Every scheduled run omits --trade-date, so the array is
@@ -83,6 +100,10 @@ elif [[ "$lock_rc" -ne 0 ]]; then
   exit 1
 fi
 scheduler_lock_install_traps
+if [[ "$GATED" == "1" ]]; then
+  # Counted as run once the lock is ours: one attempt per session.
+  "$PY" "$REPO_ROOT/scripts/scheduler_gate.py" mark daily "$TRADE_DATE" --config "$CONFIG"
+fi
 
 _is_gate_group() {
   local g="$1" x

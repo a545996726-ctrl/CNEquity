@@ -79,3 +79,42 @@ def test_the_weekday_knob_is_validated(tmp_path):
     )
     errors = validate_config(load_config(path))
     assert any("deep_reconciliation_dow" in error for error in errors)
+
+
+def _sweep(cfg, day, fetch):
+    from cnequity.steps.common import fetch_incremental_daily
+
+    return fetch_incremental_daily(cfg, "announcement_index", day, fetch, allow_empty=True)
+
+
+def test_the_deep_tail_is_walked_once_per_deep_day(tmp_path):
+    """The 6-hourly events job used to repeat the 30-day sweep on every Saturday run."""
+    import polars as pl
+
+    cfg = _cfg(tmp_path)
+    asked: list[date] = []
+
+    def _fetch(d):
+        asked.append(d)
+        return pl.DataFrame()
+
+    _sweep(cfg, SATURDAY, _fetch)
+    first = len(asked)
+    asked.clear()
+    _sweep(cfg, SATURDAY, _fetch)
+    assert first == 30 and len(asked) == 7
+    # The next deep day walks the full window again.
+    assert (
+        date(2026, 9, 26) - incremental_window(cfg, "announcement_index", date(2026, 9, 26))
+    ).days + 1 == 30
+
+
+def test_a_failed_deep_sweep_is_retried_deep(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def _boom(d):
+        raise RuntimeError("cninfo 502")
+
+    with pytest.raises(RuntimeError):
+        _sweep(cfg, SATURDAY, _boom)
+    assert (SATURDAY - incremental_window(cfg, "announcement_index", SATURDAY)).days + 1 == 30
