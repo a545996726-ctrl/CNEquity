@@ -1,11 +1,10 @@
-"""Probe every public source this lake depends on, from one vantage point.
+"""Probe selected public source routes this lake depends on, from one vantage point.
 
 WHY THIS EXISTS. Anyone pulling A-share data — through AkShare, through a
-skill file, through their own scraper — hits the same dozen endpoints, and when
-one of them changes there is no place to look it up. Finding out costs an
-afternoon of debugging your own code first. This lake already runs the full
-sweep every trading day, so it knows; publishing what it knows costs one extra
-request per source.
+skill file, through their own scraper — hits many of the same endpoints, and
+when one of them changes there is no place to look it up. Validated ingest
+can provide passive evidence; the scheduled stale-only pass probes routine
+endpoints only when there is no recent matching evidence.
 
 **HTTP 200 is not "up".** EastMoney answers a challenge page with 200, Sina
 answers an unknown symbol with an empty array, and THS answers a rate-limited
@@ -20,9 +19,13 @@ egress at the WAF, so the same probe is honestly ``ok`` in Shanghai and
 is why a report carries the vantage it was taken from and the page shows them
 side by side rather than merging them into one verdict.
 
-**One probe is not an SLA.** It is a single request at a single moment. A green
-row means that request worked; it does not promise the next thousand will, which
+**One probe is not an SLA.** It is a bounded observation at a single moment,
+potentially involving more than one wire request. A green row means that
+observation worked; it does not promise the next thousand will, which
 for the rate-limited sources here is a genuinely different question.
+
+Previously challenged or cumulative-quota endpoints are manual-only. Routine
+and scheduled sweeps report them as skipped unless explicitly selected.
 
 Probes reuse the adapters' own URL constants and clients, so the fragile part —
 EastMoney's headers, THS's pacing, the TDX wire — is the part being tested, and
@@ -31,7 +34,9 @@ an adapter that moves takes its probe with it.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -40,12 +45,14 @@ from enum import Enum
 from urllib.parse import urlparse
 
 from cnequity.config import Config
+from cnequity.domain.http_policy import SourceCoolingDown, record_http_response
 from cnequity.domain.market_time import shanghai_today
 from cnequity.domain.rate_limit import source_request
+from cnequity.storage.atomic import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
-# Every probe is one request, so a slow source costs the sweep its own timeout
+# Each probe is bounded, so a slow source costs the sweep its own timeout
 # and nothing else. Short enough that a hung host cannot stall a scheduled run,
 # long enough that a merely sluggish one is not reported as down.
 TIMEOUT_SECONDS = 20.0
@@ -72,7 +79,7 @@ STATUS_MEANING: dict[ProbeStatus, str] = {
     ProbeStatus.EMPTY: "连上了、HTTP 也正常，但没有数据——最危险的一档，回填会静默截断。",
     ProbeStatus.BLOCKED: "到达了但被拒绝（403 / 风控页 / 人机验证）。常见于非大陆出口。",
     ProbeStatus.DOWN: "连不上或超时。",
-    ProbeStatus.SKIPPED: "本次未探测（配置里关掉了，或用 --only 排除）。",
+    ProbeStatus.SKIPPED: "本次未探测（配置关闭、--only 排除，或高成本端点需要显式选择）。",
 }
 
 
@@ -96,6 +103,8 @@ class SourceProbe:
     # "all of EastMoney is out" instead of listing six independent-looking rows.
     blast_radius: str = ""
     config_key: str = ""
+    # Expensive or previously challenged endpoints require an explicit --only.
+    manual_only: bool = False
 
 
 @dataclass
@@ -109,6 +118,7 @@ class ProbeResult:
     detail: str
     note: str = ""
     blast_radius: str = ""
+    sample_kind: str = "active"
 
 
 @dataclass
@@ -152,14 +162,16 @@ def _recent_weekday(days_back: int = 3) -> date:
     return day
 
 
-_BLOCKED_STATUS_CODES = frozenset({401, 403, 429, 451})
+_BLOCKED_STATUS_CODES = frozenset({401, 403, 412, 429, 451, 456})
 
 
 def _classify(exc: Exception) -> tuple[ProbeStatus, str]:
     """Blocked, empty or down — the distinction is the whole point of the page."""
     import httpx
 
-    if isinstance(exc, ProbeBlocked):
+    from cnequity.adapters.eastmoney.host_guard import EastMoneyHostBlockedError
+
+    if isinstance(exc, (ProbeBlocked, SourceCoolingDown, EastMoneyHostBlockedError)):
         return ProbeStatus.BLOCKED, str(exc)
     if isinstance(exc, ProbeEmpty):
         return ProbeStatus.EMPTY, str(exc)
@@ -224,7 +236,9 @@ def _probe_em_push2(config: Config) -> str:
         )
         try:
             payload = _eastmoney_json(config, url)
-        except Exception as exc:  # noqa: BLE001 — try the next host, as the adapter does
+        except Exception as exc:  # noqa: BLE001 — alternate host only for non-refusals
+            if _classify(exc)[0] == ProbeStatus.BLOCKED:
+                raise
             last_exc = exc
             continue
         total = int((payload.get("data") or {}).get("total") or 0)
@@ -308,11 +322,11 @@ def _probe_sina_futures(config: Config) -> str:
 
 
 def _probe_futures_exchange(exchange: str, reader=None) -> Callable[[Config], str]:
-    """One exchange's own daily file, which the futures/option datasets read.
+    """One exchange's futures daily file, with at most two session attempts.
 
-    Walks back over a few weekdays because a closed session answers "no file"
-    (a redirect, a 404 page or an all-zero total, depending on the exchange);
-    five weekdays covers any single holiday.
+    A probe must not download option and reference files as a side effect.
+    Two recent weekdays tolerate a single unpublished session; longer holiday
+    closures are reported as empty rather than spending more requests.
     """
 
     def probe(config: Config) -> str:
@@ -325,9 +339,9 @@ def _probe_futures_exchange(exchange: str, reader=None) -> Callable[[Config], st
         from cnequity.steps.derivatives import READERS
 
         day = _recent_weekday()
-        for _ in range(5):
+        for _ in range(2):
             try:
-                parsed = (reader or READERS[exchange]).fetch_day(day, config=config)
+                parsed = (reader or READERS[exchange]).fetch(day, kind="futures", config=config)
             except FuturesSourceBlocked as exc:
                 raise ProbeBlocked(str(exc)) from exc
             except FuturesDayUnavailable:
@@ -335,11 +349,13 @@ def _probe_futures_exchange(exchange: str, reader=None) -> Callable[[Config], st
                 while day.weekday() >= 5:
                     day -= timedelta(days=1)
                 continue
-            return (
-                f"{day.isoformat()} 期货 {parsed.futures.height} 个、"
-                f"期权 {parsed.options.height} 个合约"
+            if parsed.futures.is_empty():
+                raise ProbeEmpty(f"{day.isoformat()} 期货文件无合约")
+            extra = (
+                f"、期权 {parsed.options.height} 个合约" if not parsed.options.is_empty() else ""
             )
-        raise ProbeEmpty("最近五个工作日都没有取到日行情文件")
+            return f"{day.isoformat()} 期货 {parsed.futures.height} 个合约{extra}"
+        raise ProbeEmpty("最近两个工作日都没有取到期货日行情文件")
 
     return probe
 
@@ -349,7 +365,7 @@ def _probe_dce_official(config: Config) -> str:
 
     Kept as a probe so the answer is measured on each machine rather than
     assumed: `[futures] dce_route = "official"` is only worth choosing where
-    this is green.
+    this is green; a green probe still does not validate its field mapping.
     """
     from cnequity.steps.derivatives import DCE_OFFICIAL
 
@@ -375,6 +391,7 @@ def _probe_cninfo(config: Config) -> str:
                     "seDate": f"{day.isoformat()}~{day.isoformat()}",
                 },
             )
+            record_http_response(config, "cninfo", resp)
         resp.raise_for_status()
         payload = resp.json()
     total = int(payload.get("totalAnnouncement") or 0)
@@ -407,19 +424,22 @@ def _probe_ths_pages(config: Config) -> str:
 
 
 def _probe_baostock(config: Config) -> str:
-    from cnequity.adapters.baostock._session import _login, import_baostock
+    from cnequity.adapters.baostock._session import _login, check_result, import_baostock
 
     bs = import_baostock()
     _login(bs, config=config)
     try:
         day = _recent_weekday()
         with source_request(config, "baostock"):
-            rs = bs.query_history_k_data_plus(
-                "sh.600519",
-                "date,close",
-                start_date=day.isoformat(),
-                end_date=day.isoformat(),
-                frequency="d",
+            rs = check_result(
+                bs.query_history_k_data_plus(
+                    "sh.600519",
+                    "date,close",
+                    start_date=day.isoformat(),
+                    end_date=day.isoformat(),
+                    frequency="d",
+                ),
+                config=config,
             )
         if rs.error_code != "0":
             raise ProbeBlocked(f"error_code={rs.error_code} {rs.error_msg}")
@@ -435,6 +455,34 @@ def _probe_baostock(config: Config) -> str:
     return f"{rows} 行"
 
 
+def _probe_bse(config: Config) -> str:
+    """Check the first board page without consuming a full ~30-page sweep."""
+    import httpx
+
+    from cnequity.adapters.bse.daily_quotes import (
+        _HEADERS,
+        _QUOTATION_API,
+        _QUOTATION_PAGE,
+        _parse_page,
+        _request_data,
+    )
+
+    with httpx.Client(timeout=TIMEOUT_SECONDS, follow_redirects=False, headers=_HEADERS) as client:
+        with source_request(config, "bse"):
+            landing = client.get(_QUOTATION_PAGE)
+            record_http_response(config, "bse", landing)
+        if landing.status_code not in (301, 302, 307, 308):
+            landing.raise_for_status()
+        with source_request(config, "bse"):
+            response = client.post(_QUOTATION_API, data=_request_data(0))
+            record_http_response(config, "bse", response, expected_json=True)
+        response.raise_for_status()
+        rows, total = _parse_page(response.text)
+    if not rows or total <= 0:
+        raise ProbeEmpty("首分页没有行情行")
+    return f"首分页 {len(rows)} 行、全板宣称 {total} 行（未检查余页）"
+
+
 def _probe_sse(config: Config) -> str:
     from cnequity.adapters.exchange.st_lists import _SSE_HEADERS, SSE_URL, _client
 
@@ -445,6 +493,7 @@ def _probe_sse(config: Config) -> str:
         resp = _client().get(
             SSE_URL, headers=_SSE_HEADERS, impersonate="chrome", timeout=TIMEOUT_SECONDS
         )
+        record_http_response(config, "exchange", resp)
     resp.raise_for_status()
     text = resp.content.decode("gbk", "ignore")
     rows = [ln for ln in text.splitlines()[1:] if ln.split("\t")[0].strip().isdigit()]
@@ -460,6 +509,7 @@ def _probe_szse(config: Config) -> str:
         resp = _client().get(
             SZSE_URL, headers=_SZSE_HEADERS, impersonate="chrome", timeout=TIMEOUT_SECONDS
         )
+        record_http_response(config, "exchange", resp)
     resp.raise_for_status()
     payload = resp.content
     # An xlsx is a zip; a WAF page is HTML. Length alone would pass either.
@@ -500,12 +550,22 @@ def _probe_sw(config: Config) -> str:
     with sw_client(timeout=TIMEOUT_SECONDS) as client:
         with source_request(config, "sw"):
             resp = client.get(SW_INDUSTRY_XLS_URL, headers=_HEADERS)
+            record_http_response(config, "sw", resp)
         resp.raise_for_status()
         body = resp.content
     # An XLS starts with the OLE2 magic; a WAF page starts with '<'.
     if body[:2] not in (b"\xd0\xcf", b"PK"):
         raise ProbeBlocked("申万成分下载返回的不是表格文件")
     return f"{len(body)} 字节表格"
+
+
+def _probe_cni(config: Config) -> str:
+    from cnequity.adapters.cni.index_constituents_history import fetch_cni_index_adjustments
+
+    rows = fetch_cni_index_adjustments("399001.SZ", config=config)
+    if rows.is_empty():
+        raise ProbeEmpty("国证历史成分文件没有有效行")
+    return f"399001.SZ 历史成分 {rows.height} 行"
 
 
 PROBES: tuple[SourceProbe, ...] = (
@@ -535,7 +595,7 @@ PROBES: tuple[SourceProbe, ...] = (
         host="push2his.eastmoney.com",
         powers=("daily_bars", "commodity_bars", "sector_bars"),
         run=_probe_em_push2his,
-        note="与 push2 同一套按 IP 的封禁；被封时用 [sources.eastmoney].push2_paused 停请求冷却，或用 proxy 换出口 IP。",
+        note="与 push2 共用出口保护；被拒时暂停受影响源，保留状态并等待冷却后小范围验证。",
         blast_radius="eastmoney",
         config_key="eastmoney",
     ),
@@ -579,7 +639,7 @@ PROBES: tuple[SourceProbe, ...] = (
         key="shfe",
         label="上期所官网（逐合约日行情，含上期能源）",
         host="www.shfe.com.cn",
-        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        powers=("futures_bars", "futures_contracts"),
         run=_probe_futures_exchange("SHF"),
         note="一次请求同时覆盖上期所与上期能源的品种；休市日返回 404 页面。",
         blast_radius="shfe",
@@ -589,17 +649,18 @@ PROBES: tuple[SourceProbe, ...] = (
         key="dce",
         label="大商所官网（逐合约日行情，dce_route = official）",
         host="www.dce.com.cn",
-        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        powers=("futures_bars", "futures_contracts"),
         run=_probe_dce_official,
-        note="2026-09 起从本项目测过的出口都返回 412 JS 挑战（blocked），所以默认走新浪；这里变绿才值得切到 official。",
+        note="此前观测到 412 挑战，默认路由走新浪；仅显式诊断，绿色只证明期货文件可达，不证明官方字段映射已验收。",
         blast_radius="dce",
         config_key="futures_exchange",
+        manual_only=True,
     ),
     SourceProbe(
         key="czce",
         label="郑商所官网（逐合约日行情）",
         host="www.czce.com.cn",
-        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        powers=("futures_bars", "futures_contracts"),
         run=_probe_futures_exchange("CZC"),
         note="2015-10 前走逗号分隔旧存档；休市日返回「当日无数据」页。",
         blast_radius="czce",
@@ -609,7 +670,7 @@ PROBES: tuple[SourceProbe, ...] = (
         key="gfex",
         label="广期所官网（逐合约日行情）",
         host="www.gfex.com.cn",
-        powers=("futures_bars", "option_bars", "futures_contracts", "option_contracts"),
+        powers=("futures_bars", "futures_contracts"),
         run=_probe_futures_exchange("GFE"),
         note="POST 接口；休市日返回只有全零「总计」的 200。",
         blast_radius="gfex",
@@ -641,7 +702,7 @@ PROBES: tuple[SourceProbe, ...] = (
         host="d.10jqka.com.cn",
         powers=("daily_bars", "sector_bars", "index_bars"),
         run=_probe_ths_kline,
-        note="pre-2016 深历史与板块行情靠它；1 req/s 实测安全。",
+        note="深历史与板块行情依赖此端点；配置间隔是客户端保护值，不是源方配额。",
         blast_radius="ths",
         config_key="ths",
     ),
@@ -651,9 +712,10 @@ PROBES: tuple[SourceProbe, ...] = (
         host="q.10jqka.com.cn",
         powers=("sector_bars",),
         run=_probe_ths_pages,
-        note="比 K 线主机脆弱得多：实测 1 req/s 到第 23 个请求就 401。仅目录构建会碰它。",
+        note="目录页曾在连续请求后返回 401；仅显式诊断，日常优先复用目录缓存。",
         blast_radius="ths_pages",
         config_key="ths_pages",
+        manual_only=True,
     ),
     SourceProbe(
         key="baostock",
@@ -661,9 +723,20 @@ PROBES: tuple[SourceProbe, ...] = (
         host="baostock.com",
         powers=("valuation_metrics", "trading_status", "daily_bars"),
         run=_probe_baostock,
-        note="免费额度紧：实测一个会话约 43 次查询后进黑名单，冷却约 40 分钟。探测只发一次。",
+        note="登录、查询、退出均占请求；曾遇到 IP 黑名单，默认只使用被动采集证据。",
         blast_radius="baostock",
         config_key="baostock",
+        manual_only=True,
+    ),
+    SourceProbe(
+        key="bse",
+        label="北交所官方行情板（首分页）",
+        host="www.bse.cn",
+        powers=("instruments", "trading_status", "daily_bars"),
+        run=_probe_bse,
+        note="一次页面握手加一页行情；只证明当前接口可达，不证明全板分页完整或某日历史。",
+        blast_radius="bse",
+        config_key="bse",
     ),
     SourceProbe(
         key="exchange_sse",
@@ -698,6 +771,17 @@ PROBES: tuple[SourceProbe, ...] = (
         config_key="sw",
     ),
     SourceProbe(
+        key="cni",
+        label="国证指数历史成分文件",
+        host="www.cnindex.com.cn",
+        powers=("index_constituents",),
+        run=_probe_cni,
+        note="下载并解析完整历史文件；仅显式诊断，日常优先用采集校验证据。",
+        blast_radius="cni",
+        config_key="cni",
+        manual_only=True,
+    ),
+    SourceProbe(
         key="pboc",
         label="人民银行 调查统计司（社融）",
         host="www.pbc.gov.cn",
@@ -721,6 +805,97 @@ PROBES: tuple[SourceProbe, ...] = (
 
 PROBES_BY_KEY = {probe.key: probe for probe in PROBES}
 
+# Only map a validated dataset to a probe when both use the same source and
+# request family. A successful EastMoney clist, for example, does not prove
+# that the datacenter endpoint worked, so it cannot suppress that probe.
+_PASSIVE_PROBES: dict[tuple[str, str], str] = {
+    ("bse", "instruments"): "bse",
+    ("bse", "trading_status"): "bse",
+    ("bse", "daily_bars"): "bse",
+    ("sw", "industry_members"): "sw",
+    ("cni", "index_constituents"): "cni",
+    ("cninfo", "announcement_index"): "cninfo",
+    ("pboc", "macro_indicators"): "pboc",
+    ("nbs", "macro_indicators"): "nbs",
+    ("baostock", "valuation_metrics"): "baostock",
+    ("baostock", "trading_status"): "baostock",
+    ("sina", "daily_bars"): "sina",
+    ("ths", "sector_bars"): "ths_kline",
+    ("eastmoney", "financial_statement_items"): "eastmoney_datacenter",
+    ("eastmoney_backfill", "financial_statement_items"): "eastmoney_datacenter",
+    ("eastmoney", "share_structure"): "eastmoney_datacenter",
+    ("eastmoney", "shareholder_counts"): "eastmoney_datacenter",
+    ("eastmoney", "top_holders"): "eastmoney_datacenter",
+    ("eastmoney_backfill", "share_structure"): "eastmoney_datacenter",
+    ("eastmoney_backfill", "shareholder_counts"): "eastmoney_datacenter",
+    ("eastmoney_backfill", "top_holders"): "eastmoney_datacenter",
+}
+
+
+def record_validated_ingest(
+    config: Config, *, dataset: str, source: str, rows: int, run_id: str
+) -> None:
+    """Save a parsed, validated fetch as operational evidence for its endpoint."""
+    key = _PASSIVE_PROBES.get((source, dataset))
+    if key is None or rows <= 0:
+        return
+    vantage = os.environ.get("CNE_SOURCE_VANTAGE", "local")
+    validate_vantage(vantage)
+    path = config.meta_root / "source_health" / "passive" / vantage / f"{key}.json"
+    write_json_atomic(
+        path,
+        {
+            "key": key,
+            "source": source,
+            "dataset": dataset,
+            "run_id": run_id,
+            "rows": rows,
+            "validated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "sample_kind": "passive",
+        },
+        indent=2,
+    )
+
+
+def _recent_passive_result(
+    config: Config, probe: SourceProbe, vantage: str, *, max_age: timedelta
+) -> ProbeResult | None:
+    if _probe_disabled(probe, config):
+        return None
+    path = config.meta_root / "source_health" / "passive" / vantage / f"{probe.key}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        when = datetime.fromisoformat(payload["validated_at"])
+        if when.tzinfo is None:
+            return None
+        if (
+            payload.get("key") != probe.key
+            or payload.get("sample_kind") != "passive"
+            or int(payload.get("rows", 0)) <= 0
+            or not timedelta(0) <= datetime.now(timezone.utc) - when <= max_age
+        ):
+            return None
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+    return ProbeResult(
+        key=probe.key,
+        label=probe.label,
+        host=probe.host,
+        powers=list(probe.powers),
+        status=ProbeStatus.OK.value,
+        latency_ms=None,
+        detail=f"采集校验通过：{payload['dataset']} {payload['rows']} 行 ({when.isoformat()})",
+        note=probe.note,
+        blast_radius=probe.blast_radius,
+        sample_kind="passive",
+    )
+
+
+def _probe_disabled(probe: SourceProbe, config: Config) -> bool:
+    return (probe.key == "tdx_protocol" and not config.tdx_enabled) or bool(
+        probe.config_key and not config.sources.get(probe.config_key, True)
+    )
+
 
 def run_probe(probe: SourceProbe, config: Config) -> ProbeResult:
     """Run one probe. Never raises: a failure *is* the measurement."""
@@ -732,7 +907,7 @@ def run_probe(probe: SourceProbe, config: Config) -> ProbeResult:
         "note": probe.note,
         "blast_radius": probe.blast_radius,
     }
-    if probe.config_key and not config.sources.get(probe.config_key, True):
+    if _probe_disabled(probe, config):
         return ProbeResult(
             **base,
             status=ProbeStatus.SKIPPED.value,
@@ -751,16 +926,25 @@ def run_probe(probe: SourceProbe, config: Config) -> ProbeResult:
     return ProbeResult(**base, status=status.value, latency_ms=elapsed_ms, detail=detail)
 
 
+def validate_vantage(vantage: str) -> None:
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", vantage):
+        raise ValueError("vantage 必须是 1–64 位字母/数字/点/下划线/连字符，且以字母或数字开头")
+
+
 def run_probes(
     config: Config,
     *,
     vantage: str,
     only: list[str] | None = None,
+    stale_only: bool = False,
+    passive_max_age: timedelta = timedelta(hours=12),
 ) -> HealthReport:
-    """Probe every source once and assemble a report for *vantage*.
+    """Probe routine sources once and assemble a report for *vantage*.
 
     Serial rather than concurrent. These are the same hosts the daily pipeline
-    depends on, and firing fourteen requests at once is how a health check earns
+    depends on, and firing many requests at once is how a health check earns
     the lake a rate-limit ban — which would be the check causing the outage it
     is meant to observe.
     """
@@ -769,13 +953,37 @@ def run_probes(
     # `only is None` means "everything"; an empty list means "nothing". Treating
     # the two alike would turn `--only ""` into a full sweep of every source,
     # which is the opposite of what anyone typing it wants.
-    selected = (
-        PROBES if only is None else tuple(PROBES_BY_KEY[k] for k in only if k in PROBES_BY_KEY)
-    )
+    validate_vantage(vantage)
+    unknown = sorted(set(only or []) - set(PROBES_BY_KEY))
+    if unknown:
+        raise ValueError(f"未知探测源：{', '.join(unknown)}；用 cne sources probe --list 查看")
+    selected = PROBES if only is None else tuple(PROBES_BY_KEY[k] for k in dict.fromkeys(only))
     try:
         pkg_version = version("cnequity")
     except PackageNotFoundError:  # pragma: no cover — source checkout
         pkg_version = "unknown"
+
+    def measure(probe: SourceProbe) -> ProbeResult:
+        passive = (
+            _recent_passive_result(config, probe, vantage, max_age=passive_max_age)
+            if stale_only
+            else None
+        )
+        if passive is not None:
+            return passive
+        if only is None and probe.manual_only and not _probe_disabled(probe, config):
+            return ProbeResult(
+                key=probe.key,
+                label=probe.label,
+                host=probe.host,
+                powers=list(probe.powers),
+                status=ProbeStatus.SKIPPED.value,
+                latency_ms=None,
+                detail="高风险/高成本端点；需用 --only 显式探测",
+                note=probe.note,
+                blast_radius=probe.blast_radius,
+            )
+        return run_probe(probe, config)
 
     return HealthReport(
         vantage=vantage,
@@ -783,5 +991,5 @@ def run_probes(
         # and a bare local timestamp is unreadable in all but one of them.
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         version=pkg_version,
-        results=[run_probe(probe, config) for probe in selected],
+        results=[measure(probe) for probe in selected],
     )

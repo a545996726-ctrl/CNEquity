@@ -599,6 +599,14 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
         ]
     if empty_days or incomplete_days:
         result.setdefault("status", "warning")
+    if empty_days and not incomplete_days:
+        # An empty source response leaves that day absent and visible in the
+        # audit finding; it does not invalidate the other, independently
+        # checked daily snapshots staged by this sweep.  Settle only this
+        # physical batch so compact may publish those snapshots.  A later
+        # backfill will still retry every absent day.  Short/incomplete
+        # responses remain blocking because they could hide a partial market.
+        result["batch_settled"] = True
     return result
 
 

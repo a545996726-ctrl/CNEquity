@@ -36,6 +36,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from cnequity.adapters.numeric import finite_int64
+from cnequity.domain.http_policy import (
+    SourceCoolingDown,
+    record_business_refusal,
+    record_http_response,
+)
 from cnequity.domain.market_time import shanghai_today
 from cnequity.domain.rate_limit import source_request
 from cnequity.storage.atomic import write_json_atomic
@@ -76,16 +81,9 @@ _CATALOG_FILE = "ths_board_catalog.json"
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_SECONDS = 2.0
 _DEFAULT_MIN_INTERVAL = 1.0
-# The listing host is much less tolerant than the data host:
-# `d.10jqka.com.cn` served ~1300 sequential kline requests at 1 req/s without a
-# single failure, while `q.10jqka.com.cn` started returning 401 after ~23 at the
-# same pace. They therefore get separate limiters.
-#
-# The listing interval was 20.0 as an admitted guess. Measured 2026-08 at 25
-# sequential requests per rung, 8s / 5s / 3s / 2s / 1.5s all came back 25/25
-# clean, so 3.0 is twice the fastest rate observed safe and three times the one
-# known to fail. The measurement was 25 requests of a single URL where a real
-# rebuild is ~95 across several, so go lower only with a longer run behind it.
+# The listing host has returned 401 partway through catalog rebuilds, so it
+# has a separate slower lane and a disk cache. These intervals are client
+# protection defaults, not a provider quota or proof that a full rebuild is safe.
 _PAGE_HOST = "q.10jqka.com.cn"
 _PAGE_SOURCE = "ths_pages"
 _DEFAULT_PAGE_MIN_INTERVAL = 3.0
@@ -121,6 +119,9 @@ def _get(url: str, *, config: Config | None, timeout: float = 20.0) -> str:
             source = _PAGE_SOURCE if _PAGE_HOST in url else "ths"
             with source_request(config, source):
                 resp = httpx.get(url, headers=_HEADERS, timeout=timeout, follow_redirects=True)
+                record_http_response(config, source, resp)
+        except SourceCoolingDown:
+            raise
         except Exception as exc:  # noqa: BLE001 — retried below, raised as ThsError
             last_exc = exc
         else:
@@ -129,6 +130,8 @@ def _get(url: str, *, config: Config | None, timeout: float = 20.0) -> str:
             # 401/403 mean the endpoint wants the JS-derived `hexin-v` token;
             # retrying cannot produce one, so fail immediately and loudly.
             if resp.status_code in (401, 403):
+                if resp.status_code == 401:
+                    record_business_refusal(config, source, kind="public_token_gate")
                 raise ThsError(f"{url} -> HTTP {resp.status_code} (token-gated endpoint)")
             # 404 means the year file itself does not exist — routine for a
             # board younger than the year being asked for (see
@@ -173,11 +176,9 @@ def _read_catalog(path: Path) -> list[dict]:
 def load_cached_catalog(config: Config) -> list[dict]:
     """Cached board catalog, falling back to the seed shipped with the package.
 
-    Rebuilding the catalog means ~95 requests to the listing host, and that host
-    starts answering 401 partway through: a sweep at 1 req/s got 23 boards in
-    before it tripped, and kept refusing while the requests continued. How long
-    it stays tripped is not known — it had cleared by the time it was checked
-    again, so treat a rebuild as something that may or may not finish today.
+    Rebuilding the catalog needs many requests to a host that has returned
+    401 during a sweep. The rejection duration is not known, so a rebuild may
+    not finish in one attempt and must stop on the first refusal.
 
     That is enough to want a fallback: without one, losing the workspace cache
     would strand board bars behind a host that may not cooperate on demand. The

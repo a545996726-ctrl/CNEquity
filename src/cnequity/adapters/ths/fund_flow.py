@@ -31,6 +31,7 @@ import httpx
 import polars as pl
 
 from cnequity.adapters.ths.hexin import hexin_v
+from cnequity.domain.http_policy import record_business_refusal, record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, infer_exchange_from_code, is_all_a_symbol
 
@@ -240,16 +241,20 @@ def _get_page(client: httpx.Client, kind: str, page: int, config) -> str:
         try:
             with source_request(config, _LANE):
                 resp = client.get(url, headers=headers)
+                record_http_response(config, _LANE, resp)
         except httpx.HTTPError as exc:
             last = exc
         else:
             if resp.status_code == 200:
                 return resp.content.decode("gbk", errors="replace")
             last = ThsFundFlowError(f"{url} -> HTTP {resp.status_code}")
-            if resp.status_code not in (401, 403):
-                break
-        # A 401 with a fresh token next time is the one retry worth making;
-        # anything else stops the sweep rather than hammering the page.
+            if resp.status_code in (401, 403):
+                if resp.status_code == 401:
+                    record_business_refusal(config, _LANE, kind="public_token_gate")
+                raise last
+            break
+        # Only a transport error gets a second attempt; token/refusal statuses
+        # stop this source before the next page or dataset can send again.
         if attempt == 0:
             time.sleep(5.0)
     raise ThsFundFlowError(f"同花顺 {kind} page {page} failed: {last}") from last

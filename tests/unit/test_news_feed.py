@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import httpx
 import polars as pl
@@ -89,13 +89,15 @@ def _seed(cfg: Config, dataset: str, when: str) -> None:
     ).write_parquet(part / "part-0.parquet")
 
 
-def test_the_fetch_starts_from_the_older_datasets_newest_item(tmp_path):
+def test_the_fetch_follows_the_canonical_news_watermark(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     assert news_feed.since_for(cfg, date(2026, 9, 27)) == datetime(2026, 9, 27, tzinfo=CST)
     _seed(cfg, "news_headlines", "2026-09-27T03:10:55")
     _seed(cfg, "flash_news_wire", "2026-09-26T23:00:00")
-    # flash lags: start from its newest item, less the overlap.
-    assert news_feed.since_for(cfg, date(2026, 9, 27)) == datetime(2026, 9, 26, 22, 30, tzinfo=CST)
+    # Legacy flash revisions do not force a duplicate wire fetch.
+    assert news_feed.since_for(cfg, date(2026, 9, 27)) == datetime(
+        2026, 9, 27, 2, 40, 55, tzinfo=CST
+    )
 
 
 def test_both_datasets_share_one_fetch_per_run(tmp_path, monkeypatch):
@@ -120,7 +122,7 @@ def test_both_datasets_share_one_fetch_per_run(tmp_path, monkeypatch):
     rotation.step_news_headlines(cfg, date(2026, 9, 27), "run-1", {})
     newsboard.step_flash_news_wire(cfg, date(2026, 9, 27), "run-1", {})
     assert len(requests) == 1
-    assert sorted(written) == [("flash_news_wire", 1), ("news_headlines", 1)]
+    assert written == [("news_headlines", 1)]
 
 
 def test_an_empty_window_is_fine_once_the_lake_holds_news(tmp_path, monkeypatch):
@@ -137,3 +139,54 @@ def test_an_empty_window_is_fine_once_the_lake_holds_news(tmp_path, monkeypatch)
     _seed(cfg, "news_headlines", "2026-09-27T03:00:00")
     news_feed._CACHE.clear()
     assert newsboard.step_flash_news_wire(cfg, date(2026, 9, 27), "run-b", {})["rows_written"] == 0
+
+
+def test_corrupt_canonical_staging_is_not_treated_as_completed_news(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "data", raw_archive_enabled=False)
+    path = cfg.staging_root / "news_headlines" / "run_id=run-bad" / "part-batch-0.parquet"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"not parquet")
+    monkeypatch.setattr(news_feed, "shared_fetch", lambda *_a: pytest.fail("must inspect staging"))
+    with pytest.raises(RuntimeError, match="unreadable staging"):
+        news_feed.stage_news(cfg, date(2026, 9, 27), "run-bad", "flash_news_wire")
+
+
+def test_flash_wire_reads_canonical_news_and_legacy_rows(tmp_path):
+    import duckdb
+
+    from cnequity.adapters.eastmoney.news_wire import flash_rows_from_news
+    from cnequity.query.reader import load
+    from cnequity.query.views import ensure_duckdb_views
+
+    cfg = Config(data_root=tmp_path / "data")
+    now = datetime(2026, 9, 27, tzinfo=timezone.utc)
+
+    def news_row(news_id: str) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "news_id": [news_id],
+                "publish_date": [date(2026, 9, 27)],
+                "publish_time": ["09:00:00"],
+                "title": [f"headline {news_id}"],
+                "summary": ["summary"],
+                "related_symbols": [None],
+                "channel": ["fast_news"],
+                "source": ["eastmoney"],
+                "data_version": ["v1"],
+                "fetched_at": [now],
+            }
+        )
+
+    canonical = cfg.curated_root / "news_headlines" / "publish_date=2026-09"
+    canonical.mkdir(parents=True)
+    news_row("new").write_parquet(canonical / "part-0.parquet")
+    legacy = cfg.curated_root / "flash_news_wire" / "publish_date=2026-09"
+    legacy.mkdir(parents=True)
+    flash_rows_from_news(news_row("old")).write_parquet(legacy / "part-0.parquet")
+
+    frame = load("flash_news_wire", config=cfg)
+    assert set(frame["wire_id"]) == {"eastmoney:new", "eastmoney:old"}
+    path = ensure_duckdb_views(cfg)
+    with duckdb.connect(str(path), read_only=True) as conn:
+        rows = conn.execute("SELECT wire_id FROM flash_news_wire ORDER BY wire_id").fetchall()
+    assert rows == [("eastmoney:new",), ("eastmoney:old",)]

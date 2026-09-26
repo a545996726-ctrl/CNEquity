@@ -125,7 +125,7 @@ def test_quick_profile_reaches_the_engine(tmp_path, monkeypatch):
     assert start == date(2023, 8, 2)
     assert "2023-08-02" in output
     assert "沪深京全市场" in output
-    assert "约 1 小时" in output
+    assert "批次进度和 ETA" in output
     assert "[sources.baostock] 未启用" in output
     assert "只有 400 条数据" in output
     assert "cne backfill trading_status" in output
@@ -134,10 +134,8 @@ def test_quick_profile_reaches_the_engine(tmp_path, monkeypatch):
 def test_default_init_is_the_shallow_window(tmp_path, monkeypatch):
     """A bare `cne init` takes the quick window — a usable lake on the first run.
 
-    Measured per 10 symbols on one connection: 3 years ~4.8s against ~15.1s for
-    everything from 2001. Going shallower than that buys little (1 year ~3.9s,
-    the per-symbol round trip dominating once the window is short) and costs
-    the multi-year windows factor work needs, so `quick` is the floor, not 1y.
+    A deeper window needs more pages, while even a shallow window still pays
+    per-symbol request overhead. Quick retains a multi-year research window.
     """
     # Derived, not hardcoded: a bare `cne init` anchors on today, so a literal
     # date here passes only on the day it was written and fails at the next
@@ -161,7 +159,7 @@ def test_full_profile_still_takes_everything(tmp_path, monkeypatch):
     assert start is None
     assert "历史窗口" not in output
     assert "日线从 2016-01-01 起" in output
-    assert "约 3 小时" in output
+    assert "深历史需要更多分页" in output
 
 
 def test_custom_init_window_does_not_claim_a_fixed_duration(tmp_path, monkeypatch):

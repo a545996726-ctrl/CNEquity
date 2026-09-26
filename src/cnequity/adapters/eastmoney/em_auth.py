@@ -40,6 +40,7 @@ from cnequity.adapters.eastmoney.host_guard import (  # noqa: F401 — re-export
     Push2BudgetExhaustedError,
     Push2PausedError,
 )
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 
 if TYPE_CHECKING:
@@ -109,6 +110,7 @@ def fetch_nid(client: httpx.Client | None = None, *, config: Config | None = Non
     try:
         with source_request(config, "eastmoney"):
             resp = client.post(url, json=payload)
+            record_http_response(config, "eastmoney", resp, expected_json=True)
         for cookie in resp.cookies.jar:
             if cookie.name == "nid":
                 return cookie.value or ""
@@ -309,11 +311,15 @@ class EastMoneyClient:
 
     def _get_direct(self, url: str, *, headers: dict[str, str], **kwargs) -> httpx.Response:
         # A second route is a second request: the breaker and the budget apply.
-        host_guard.admit(self.config, url)
+        host_guard.ensure_open(self.config, url)
         logger.warning("EastMoney push2his proxy route failed; retrying once via direct route")
         try:
             with source_request(self.config, _request_source(url)):
+                host_guard.admit(self.config, url)
                 response = self._get_direct_client().get(url, headers=headers, **kwargs)
+                record_http_response(
+                    self.config, _request_source(url), response, expected_json=True
+                )
         except Exception as exc:
             self._note_outcome(url, exc=exc)
             raise
@@ -340,7 +346,7 @@ class EastMoneyClient:
         self._last_request = time.time()
 
     def get(self, url: str, **kwargs) -> httpx.Response:
-        host_guard.admit(self.config, url)
+        host_guard.ensure_open(self.config, url)
         if self.config is None:
             # Bare clients retain their historical per-instance pacing. A
             # configured client gets both pacing and the shared lease from the
@@ -369,7 +375,11 @@ class EastMoneyClient:
         }
         try:
             with source_request(self.config, _request_source(url)):
+                host_guard.admit(self.config, url)
                 response = self._client.get(url, headers=headers, **kwargs)
+                record_http_response(
+                    self.config, _request_source(url), response, expected_json=True
+                )
         except (
             httpx.TimeoutException,
             httpx.ConnectError,
@@ -411,14 +421,18 @@ class EastMoneyClient:
         return response
 
     def post(self, url: str, **kwargs) -> httpx.Response:
-        host_guard.admit(self.config, url)
+        host_guard.ensure_open(self.config, url)
         if self.config is None:
             self._throttle()
         headers = kwargs.pop("headers", {})
         headers.update(build_eastmoney_headers(url, self._client, config=self.config))
         try:
             with source_request(self.config, _request_source(url)):
+                host_guard.admit(self.config, url)
                 response = self._client.post(url, headers=headers, **kwargs)
+                record_http_response(
+                    self.config, _request_source(url), response, expected_json=True
+                )
         except Exception as exc:
             self._note_outcome(url, exc=exc)
             raise

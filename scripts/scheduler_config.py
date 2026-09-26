@@ -12,8 +12,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+from cnequity.orchestrator.schedule_groups import resolve_group_names
+
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GROUPS = "core capital signals fundamentals macro_risk research"
+DEFAULT_GROUPS = " ".join(resolve_group_names(ROOT / "configs" / "cnequity.toml"))
 
 
 def read_plist(path: Path) -> dict:
@@ -44,7 +46,10 @@ def _launchctl_command() -> list[str]:
 def render_jobs(root: Path, dest: Path, *, groups: str | None, vantage: str | None) -> dict:
     daily = read_plist(dest / "com.cnequity.daily.plist")
     host_env = daily.get("EnvironmentVariables", {})
-    groups = groups if groups is not None else host_env.get("CNE_GROUPS", DEFAULT_GROUPS)
+    groups = groups if groups is not None else host_env.get("CNE_GROUPS")
+    if groups is None:
+        config_path = Path(host_env.get("CNE_CONFIG") or root / "configs" / "cnequity.toml")
+        groups = " ".join(resolve_group_names(config_path))
     groups = " ".join(dict.fromkeys(groups.replace(",", " ").split()))
     if not groups or any(not re.fullmatch(r"[A-Za-z0-9_-]+", g) for g in groups.split()):
         raise ValueError("CNE_GROUPS must contain valid, non-empty schedule group names")

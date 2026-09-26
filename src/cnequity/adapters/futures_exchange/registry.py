@@ -26,6 +26,14 @@ class ExchangeReader:
     fetch_day: Callable[..., ExchangeDay]
     fetch_reference: Callable[..., pl.DataFrame] | None = None
 
+    reference_history: bool = True
+    separate_kinds: bool = False
+
+    def fetch(self, day: date, *, kind: Kind, config) -> ExchangeDay:
+        if self.separate_kinds:
+            return self.fetch_day(day, config=config, kind=kind)
+        return self.fetch_day(day, config=config)
+
     def first_session(self, kind: Kind) -> date | None:
         return self.first_futures_session if kind == "futures" else self.first_options_session
 
@@ -36,6 +44,7 @@ READERS: dict[str, ExchangeReader] = {
         first_futures_session=shfe.FIRST_SESSION,
         first_options_session=shfe.FIRST_OPTION_SESSION,
         fetch_day=shfe.fetch_shfe_day,
+        separate_kinds=True,
         fetch_reference=shfe.fetch_shfe_reference,
     ),
     "CZC": ExchangeReader(
@@ -43,6 +52,7 @@ READERS: dict[str, ExchangeReader] = {
         first_futures_session=czce.FIRST_SESSION,
         first_options_session=czce.FIRST_OPTION_SESSION,
         fetch_day=czce.fetch_czce_day,
+        separate_kinds=True,
         fetch_reference=czce.fetch_czce_reference,
     ),
     "GFE": ExchangeReader(
@@ -50,7 +60,9 @@ READERS: dict[str, ExchangeReader] = {
         first_futures_session=gfex.FIRST_SESSION,
         first_options_session=gfex.FIRST_OPTION_SESSION,
         fetch_day=gfex.fetch_gfex_day,
+        separate_kinds=True,
         fetch_reference=gfex.fetch_gfex_reference,
+        reference_history=False,
     ),
     # DCE's own endpoints answer with an access challenge, so the default route
     # is Sina: futures only, contracts listed from mid-2018 (ADR-0013).
@@ -75,6 +87,7 @@ DCE_OFFICIAL = ExchangeReader(
     first_futures_session=date(2000, 1, 4),
     first_options_session=date(2017, 3, 31),
     fetch_day=dce.fetch_dce_official_day,
+    separate_kinds=True,
 )
 
 
@@ -113,3 +126,31 @@ def earliest_session(config: Config, kind: Kind) -> date | None:
         if reader(config, e).first_session(kind) is not None
     ]
     return min(firsts) if firsts else None
+
+
+def capabilities() -> list[dict]:
+    """Serializable source capabilities shared by documentation and clients.
+
+    Dates describe adapter routing bounds, never verified lake coverage.
+    """
+    rows = []
+    for key, route in [*READERS.items(), ("DCE", DCE_OFFICIAL)]:
+        rows.append(
+            {
+                "exchange": key,
+                "route": "official" if route is DCE_OFFICIAL or key != "DCE" else "sina",
+                "futures_since": route.first_futures_session.isoformat(),
+                "options_since": route.first_options_session.isoformat()
+                if route.first_options_session
+                else None,
+                "reference": route.fetch_reference is not None,
+                "reference_history": route.fetch_reference is not None and route.reference_history,
+                "status": "experimental" if route is DCE_OFFICIAL else "supported",
+                "limitations": "live payload mapping unverified"
+                if route is DCE_OFFICIAL
+                else "missing zero-trade days and turnover; no options"
+                if key == "DCE"
+                else "source bounds do not prove continuous historical coverage",
+            }
+        )
+    return rows

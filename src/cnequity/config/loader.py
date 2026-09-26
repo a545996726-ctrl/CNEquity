@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -354,6 +355,8 @@ class Config:
     # without a cap. Set a cap from measured usage, not a guess: backfills of the
     # large reports legitimately need thousands.
     eastmoney_datacenter_daily_budget: int = 0
+    # Optional egress-wide cap across push2 and datacenter; 0 = observe only.
+    eastmoney_daily_budget: int = 0
     # Deno binary for the 同花顺 hexin-v token (adapters/ths/hexin.py); None
     # finds it on PATH or in the usual install locations.
     ths_js_runtime: str | None = None
@@ -443,6 +446,9 @@ class Config:
 
     def _validate_source_limits(self) -> None:
         """Reject invalid explicit source caps before a limiter is built."""
+        errors = _interval_errors(self)
+        if errors:
+            raise ValueError("; ".join(errors))
         for field_name, limits in (
             ("source_concurrency", self.source_concurrency),
             ("http_workers", self.http_workers),
@@ -540,6 +546,9 @@ class Config:
         return dataset in {
             "announcement_index",
             "financial_statement_items",
+            "share_structure",
+            "shareholder_counts",
+            "top_holders",
             "corporate_actions",
         } or (dataset in DATASETS and history_mode_for(DATASETS[dataset]) == "snapshot_only")
 
@@ -564,8 +573,9 @@ class Config:
     def tdx_rate_limit_spec(self) -> RateLimitSpec | None:
         if not self.tdx_enabled:
             return None
+        self._validate_source_limits()
         return RateLimitSpec(
-            str(self.meta_root / "rate_limits"),
+            str(self.rate_limit_root),
             "tdx_protocol",
             self.tdx_min_interval_ms / 1000.0,
             self.tdx_lock_timeout_sec,
@@ -576,9 +586,15 @@ class Config:
             # macOS/Windows, so the old fallback silently collapsed the whole
             # L0/L1 fan-out to one in-flight request on a default install.
             self.source_concurrency_for("tdx_protocol", self.tdx_daily_worker_count()),
-            str(self.meta_root / "rate_limits"),
+            str(self.rate_limit_root),
             self.tdx_lock_timeout_sec,
         )
+
+    @property
+    def rate_limit_root(self) -> Path:
+        """One local ledger directory for HTTP and wire traffic on this egress."""
+        value = os.environ.get("CNE_RATE_LIMIT_ROOT")
+        return _absolute(Path(value).expanduser()) if value else self.meta_root / "rate_limits"
 
     @property
     def manifest_path(self) -> Path:
@@ -697,6 +713,7 @@ def load_config(path: str | Path) -> Config:
     eastmoney_datacenter_breaker = True
     eastmoney_datacenter_breaker_strikes = 3
     eastmoney_datacenter_daily_budget = 0
+    eastmoney_daily_budget = 0
     # datacenter's own lane (source "eastmoney_dc"). It ran at 0.5 s / 4 in
     # flight for months without a busy reply; this halves the peak rate.
     datacenter_interval = 1.0
@@ -719,7 +736,7 @@ def load_config(path: str | Path) -> Config:
         if isinstance(val, dict):
             sources[name] = bool(val.get("enabled", True))
             if "min_interval_seconds" in val:
-                source_intervals[name] = float(val["min_interval_seconds"])
+                source_intervals[name] = val["min_interval_seconds"]
             # Source-local caps are convenient for operators because the
             # interval and the concurrency contract live beside each other.
             # ``max_concurrency`` is canonical; the shorter spellings are
@@ -744,7 +761,7 @@ def load_config(path: str | Path) -> Config:
             if name == "eastmoney" and val.get("push2_shared_snapshot") is not None:
                 eastmoney_push2_shared_snapshot = bool(val["push2_shared_snapshot"])
             if name == "eastmoney" and val.get("push2_min_interval_seconds") is not None:
-                push2_interval = float(val["push2_min_interval_seconds"])
+                push2_interval = val["push2_min_interval_seconds"]
             if name == "eastmoney" and val.get("push2_max_concurrency") is not None:
                 push2_concurrency = val["push2_max_concurrency"]
             if name == "eastmoney" and val.get("datacenter_breaker") is not None:
@@ -753,8 +770,10 @@ def load_config(path: str | Path) -> Config:
                 eastmoney_datacenter_breaker_strikes = int(val["datacenter_breaker_strikes"])
             if name == "eastmoney" and val.get("datacenter_daily_budget") is not None:
                 eastmoney_datacenter_daily_budget = int(val["datacenter_daily_budget"])
+            if name == "eastmoney" and val.get("daily_budget") is not None:
+                eastmoney_daily_budget = int(val["daily_budget"])
             if name == "eastmoney" and val.get("datacenter_min_interval_seconds") is not None:
-                datacenter_interval = float(val["datacenter_min_interval_seconds"])
+                datacenter_interval = val["datacenter_min_interval_seconds"]
             if name == "eastmoney" and val.get("datacenter_max_concurrency") is not None:
                 datacenter_concurrency = val["datacenter_max_concurrency"]
             if name == "ths" and val.get("js_runtime"):
@@ -795,6 +814,12 @@ def load_config(path: str | Path) -> Config:
     # have returned 401 after ~20 quick requests; the lane shares the `ths`
     # in-flight cap, which ths_pages keeps at 1.
     source_intervals.setdefault("ths_data", 3.0)
+    # Historical constituent files are also network requests. These lanes
+    # were absent from the example and previously ran without any spacing.
+    source_intervals.setdefault("sw", 1.0)
+    source_intervals.setdefault("cni", 1.0)
+    source_concurrency.setdefault("sw", 1)
+    source_concurrency.setdefault("cni", 1)
     # The scheduler's late stale-only pass sets this so it never touches push2.
     if os.environ.get("CNE_PUSH2_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}:
         eastmoney_push2_paused = True
@@ -937,6 +962,7 @@ def load_config(path: str | Path) -> Config:
         eastmoney_datacenter_breaker=eastmoney_datacenter_breaker,
         eastmoney_datacenter_breaker_strikes=eastmoney_datacenter_breaker_strikes,
         eastmoney_datacenter_daily_budget=eastmoney_datacenter_daily_budget,
+        eastmoney_daily_budget=eastmoney_daily_budget,
         ths_js_runtime=ths_js_runtime,
         eastmoney_timeout_sec=eastmoney_timeout_sec,
         baostock_batch_size=baostock_batch_size,
@@ -1019,13 +1045,31 @@ def load_config(path: str | Path) -> Config:
     return cfg
 
 
+def _interval_errors(cfg: Config) -> list[str]:
+    values = {
+        "tdx_protocol.min_interval_ms": cfg.tdx_min_interval_ms,
+        **{
+            f"sources.{key}.min_interval_seconds": value
+            for key, value in cfg.source_intervals.items()
+        },
+    }
+    return [
+        f"{key} must be a finite number >= 0"
+        for key, value in values.items()
+        if isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ]
+
+
 def validate_config(cfg: Config) -> list[str]:
     import sys
 
     import cnequity.steps  # noqa: F401 — register steps
     from cnequity.orchestrator.registry import STEP_REGISTRY
 
-    errors: list[str] = []
+    errors: list[str] = _interval_errors(cfg)
     if cfg.workers < 1:
         errors.append("orchestrator.workers must be >= 1")
     if cfg.tdx_daily_workers is not None and cfg.tdx_daily_workers < 1:

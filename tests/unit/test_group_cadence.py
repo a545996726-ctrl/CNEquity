@@ -146,3 +146,14 @@ def test_the_pipeline_reports_a_resting_group_as_skipped():
 
     script = (Path(__file__).parents[2] / "scripts" / "daily_pipeline.sh").read_text()
     assert '"skipped_not_scheduled"' in script
+
+
+def test_rolling_derivative_minutes_capture_every_session_even_in_weekly_group(tmp_path):
+    group = ScheduleGroup(
+        at="18:30", steps=["futures_bars", "futures_minute_bars", "compact"], cadence="weekly"
+    )
+    day = date(2026, 9, 17)
+    assert due_steps(group, day) == ["futures_minute_bars", "compact"]
+    assert (
+        freshness_anchor(_cfg(tmp_path, {"derivatives": group}), "futures_minute_bars", day) == day
+    )

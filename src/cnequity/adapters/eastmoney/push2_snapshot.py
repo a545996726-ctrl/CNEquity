@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from cnequity.domain.http_policy import record_cache_reuse
 from cnequity.file_lock import exclusive_lock
 
 if TYPE_CHECKING:
@@ -168,6 +169,7 @@ def shared_all_a_rows(
             and data.get("page_size") == page_size
             and reusable(datetime.fromisoformat(data["captured_at"]), now)
         ):
+            record_cache_reuse(config, "eastmoney_push2", "shared_snapshot")
             logger.info(
                 "push2 clist: reusing the shared full-market snapshot from %s (%d rows)",
                 data["captured_at"],

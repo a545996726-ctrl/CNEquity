@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 
 if TYPE_CHECKING:
@@ -143,9 +144,9 @@ class ThsOfficialClient:
             base_url=BASE_URL,
             timeout=httpx.Timeout(resolved_timeout, connect=15.0),
             headers={"X-api-key": api_key.strip()},
-            # Connect-level failures are worth a silent retry; a server that
-            # accepts and then drops is handled by the loop in `get`.
-            transport=transport if transport is not None else httpx.HTTPTransport(retries=2),
+            # Every attempt must pass shared admission. Transport-level
+            # retries would silently multiply the outer retry budget.
+            transport=transport if transport is not None else httpx.HTTPTransport(retries=0),
         )
 
     def __enter__(self) -> ThsOfficialClient:
@@ -207,6 +208,7 @@ class ThsOfficialClient:
             try:
                 with source_request(self._config, SOURCE):
                     response = self._http.get(path, params=_clean(params))
+                    record_http_response(self._config, SOURCE, response)
             except httpx.HTTPError as exc:
                 last_transport_error = exc
                 if attempt == _MAX_ATTEMPTS - 1:
@@ -219,7 +221,9 @@ class ThsOfficialClient:
                 # non-200 is infrastructure. 4xx other than 408/429 will not fix
                 # itself, and an HTML body means the caller used a docs-site path.
                 status = response.status_code
-                if status in (408, 429) or 500 <= status <= 599:
+                if status == 429:
+                    raise ThsOfficialRateLimited(f"{path}: HTTP 429", code=429, request_id=None)
+                if status == 408 or 500 <= status <= 599:
                     last_transport_error = httpx.HTTPStatusError(
                         f"HTTP {status}", request=response.request, response=response
                     )
@@ -242,9 +246,10 @@ class ThsOfficialClient:
 
             if not isinstance(payload, dict):
                 raise ThsOfficialError(f"{path}: response is not an object")
-            if payload.get("code") == CODE_RATE_LIMITED and attempt < _MAX_ATTEMPTS - 1:
-                time.sleep(2**attempt)
-                continue
+            if payload.get("code") == CODE_RATE_LIMITED:
+                # This same HTTP 200 response was already metered above; the
+                # synthetic 429 is solely for the shared refusal policy.
+                record_http_response(self._config, SOURCE, response, status=429, meter=False)
             return payload
 
         raise ThsOfficialError(f"{path}: transport failed — {last_transport_error}")

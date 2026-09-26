@@ -11,6 +11,7 @@ import httpx
 import polars as pl
 
 from cnequity.adapters.cninfo.fund_payment_notices import parse_fund_payment_pdf
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.steps.http_common import verify_raw_archive, write_fetched
 from cnequity.storage.raw_archive import RawPayloadArchive, begin_capture
@@ -23,6 +24,7 @@ _SQL_ID = "COMMON_PL_JJXX_JJGG_NEW_L"
 def _get(client: httpx.Client, url: str, *, config, params: dict | None = None):
     with source_request(config, "exchange"):
         response = client.get(url, params=params, headers={"Referer": _ROOT + "/"})
+        record_http_response(config, "exchange", response)
     response.raise_for_status()
     return response
 

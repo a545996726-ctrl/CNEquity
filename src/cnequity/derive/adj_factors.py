@@ -503,7 +503,15 @@ def _resolve_factors(
         # Sina request; source_request also preserves the cross-process QPS
         # reservation configured for this source.
         with source_request(config, source):
-            factors = fetch_adj_factor_series(symbol, adjust_type, client=client)
+            try:
+                factors = fetch_adj_factor_series(symbol, adjust_type, client=client)
+            except httpx.HTTPStatusError as exc:
+                from cnequity.domain.http_policy import record_http_response
+
+                # The Sina adapter already recorded this HTTP response at its
+                # wire boundary; this call only reinforces refusal handling.
+                record_http_response(config, source, exc.response, meter=False)
+                raise
         _save_cache(config, symbol, adjust_type, factors)
         return factors, source
     except SinaAdjFactorUnavailableError as exc:

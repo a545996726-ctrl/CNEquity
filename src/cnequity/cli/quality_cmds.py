@@ -19,6 +19,7 @@ from cnequity.cli._shared import (
     _cfg,
     _progress_logging,
     attach_log_file,
+    comma_values,
     config_option,
     ingest_scope_label,
     parse_date_option,
@@ -606,6 +607,9 @@ def _verify_mode(bars: bool, runs: bool, given: dict) -> str:
 @cli.command()
 @config_option
 @click.option(
+    "--derivatives", is_flag=True, help="只读验收衍生品研究窗口；需 --dataset、--start、--end。"
+)
+@click.option(
     "--bars",
     is_flag=True,
     help="改为检查「证券 × 交易日」，含窗口内一行都没有的证券。需要 --start。",
@@ -632,11 +636,11 @@ def _verify_mode(bars: bool, runs: bool, given: dict) -> str:
     default=None,
     help="只看这些缺口类型：empty,stale,interior,shallow。",
 )
-@click.option("--start", default=None, help="配合 --bars：覆盖窗口起点（含）。")
+@click.option("--start", default=None, help="配合 --bars/--derivatives：覆盖窗口起点（含）。")
 @click.option(
     "--end",
     default=None,
-    help="配合 --bars：窗口终点，默认上一个完整交易日。",
+    help="覆盖窗口终点；--bars 默认上一个完整交易日，--derivatives 必填。",
 )
 @click.option(
     "--days",
@@ -654,6 +658,7 @@ def verify(
     config_path: str,
     bars: bool,
     runs: bool,
+    derivatives: bool,
     only: str | None,
     repair: bool,
     kinds: str | None,
@@ -680,6 +685,23 @@ def verify(
     """
     from cnequity.quality.verify import verify_lake
 
+    if derivatives:
+        if bars or runs or repair or kinds or days or as_of or enforce:
+            raise click.UsageError("--derivatives 不支持其他模式、--repair、--kind 或运行证据参数")
+        if only not in {"futures_bars", "option_bars"} or not start or not end:
+            raise click.UsageError(
+                "--derivatives 需要 --dataset futures_bars|option_bars、--start、--end"
+            )
+        start_date = parse_date_option(start, "--start")
+        end_date = parse_date_option(end, "--end")
+        if start_date > end_date:
+            raise click.UsageError("--start 必须早于或等于 --end")
+        from cnequity.quality.derivative_window import derivative_window
+
+        report = derivative_window(_cfg(config_path), only, start_date, end_date)
+        click.echo(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        raise SystemExit(1 if report["state"] == "incomplete" else 2)
+
     mode = _verify_mode(
         bars,
         runs,
@@ -704,14 +726,17 @@ def verify(
         return
 
     anchor = _last_trading_day(cfg, shanghai_today())
-    names = [s.strip() for s in only.split(",") if s.strip()] if only else None
+    names = comma_values(only, "--dataset")
     if names:
         # `verify_lake` warns and skips an unknown name, which is right for a
         # library sweeping the whole registry and wrong for a name the caller
         # typed: a misspelt `--dataset` printed "覆盖完整" and exited 0, so a
         # typo read as proof the lake was fine.
         names = [_require_known_dataset(name) for name in names]
-    wanted = {s.strip() for s in kinds.split(",") if s.strip()} if kinds else None
+    kind_names = comma_values(kinds, "--kind")
+    wanted = set(kind_names) if kind_names else None
+    if wanted and wanted - {"empty", "stale", "interior", "shallow"}:
+        raise click.BadParameter("只支持 empty,stale,interior,shallow", param_hint="--kind")
 
     if names is None and getattr(cfg, "lake_profile", None) in {"demo", "sample"}:
         # A demo lake holds a handful of symbols and two or three datasets on
@@ -960,6 +985,17 @@ def status(
         for report in scopes:
             dataset = report["dataset"]
             scope_heading = report.get("heading", default_heading)
+            if report.get("missing_exchanges"):
+                click.echo(f"{dataset} 缺整所：{', '.join(report['missing_exchanges'])}", err=True)
+            if report.get("owed_dates"):
+                click.echo(
+                    f"{dataset} 待补交易日：{report['owed']}（例：{', '.join(report['owed_dates'][:5])}）",
+                    err=True,
+                )
+                if _gates_on_dataset(cfg, dataset, wanted_groups):
+                    scope_incomplete = True
+            if all_columns and report.get("coverage"):
+                click.echo(pl_mod.DataFrame(report["coverage"]))
             if report["state"] == "complete":
                 owed_note = f"，另有 {report['owed']} 只已记账待补" if report.get("owed") else ""
                 if report.get("unverifiable_exchanges"):
@@ -991,6 +1027,17 @@ def status(
                     "日期 fresh 仍不代表标的覆盖完整。",
                     err=True,
                 )
+        if scope and is_dataset_enabled("option_greeks", cfg):
+            from cnequity.derive.option_greeks import stale_sessions
+
+            stale_greeks = stale_sessions(cfg)
+            if stale_greeks:
+                click.echo(
+                    f"option_greeks：{len(stale_greeks)} 个交易日缺结果或依赖已变化；运行 cne derive option_greeks",
+                    err=True,
+                )
+                if _gates_on_dataset(cfg, "option_greeks", wanted_groups):
+                    scope_incomplete = True
         incomplete_init = Manifest(cfg.manifest_path).latest_incomplete_init_run(
             discharged_by_later_runs=True
         )
@@ -1243,6 +1290,16 @@ def source_policy(source: str | None, profile: str | None, redistribution: bool)
         raise SystemExit(1)
 
 
+@sources_grp.command("limits")
+@config_option
+def source_limits(config_path: str):
+    """离线查看共享冷却、出口预算、最近请求遥测和欠账续跑入口。"""
+    from cnequity.diagnostics.source_limits import build_source_limits
+
+    payload = build_source_limits(_cfg(config_path))
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 @sources_grp.command("probe")
 @config_option
 @click.option(
@@ -1251,7 +1308,17 @@ def source_policy(source: str | None, profile: str | None, redistribution: bool)
     show_default=True,
     help="这次探测是从哪儿跑的 —— 'cn'、'overseas'，或你自己用的任何标签。有几个源拒绝非大陆出口，所以没有这个标签的结果没法解读。",
 )
-@click.option("--only", default=None, help="要探测的 key，逗号分隔；默认全部。")
+@click.option(
+    "--only",
+    default=None,
+    help="要探测的 key，逗号分隔；高成本/已受挑战的端点仅在显式列出时探测。",
+)
+@click.option(
+    "--stale-only",
+    is_flag=True,
+    help="复用 12 小时内已校验的采集证据，只主动探测缺少新证据的端点。",
+)
+@click.option("--list", "list_only", is_flag=True, help="离线列出探测源名称，不需要配置。")
 @click.option(
     "--out",
     default=None,
@@ -1260,11 +1327,18 @@ def source_policy(source: str | None, profile: str | None, redistribution: bool)
         "也从那里读。"
     ),
 )
-def sources_probe(config_path: str, vantage: str, only: str | None, out: str | None):
+def sources_probe(
+    config_path: str,
+    vantage: str,
+    only: str | None,
+    out: str | None,
+    list_only: bool = False,
+    stale_only: bool = False,
+):
     """探测这个湖依赖的公开数据源。
 
     \b
-    每个源一个请求，串行且克制：这些正是日更 pipeline 用的主机，
+    逐源串行做最小探测（部分源需要分页或连接握手），共享采集的限流与冷却：
     一个把自己探到被限流封禁的健康检查，等于亲手制造它本要观测的故障。
 
     \b
@@ -1272,12 +1346,20 @@ def sources_probe(config_path: str, vantage: str, only: str | None, out: str | N
     探测被有意做成 CLI 动作 —— 面板保持只读，
     而一个不需要认证、却能主动连出十几家第三方的本地服务，不适合一直挂在那里听。
     """
-    from cnequity.diagnostics.source_health import STATUS_LABELS, ProbeStatus, run_probes
+    from cnequity.diagnostics.source_health import PROBES, STATUS_LABELS, ProbeStatus, run_probes
 
+    if list_only:
+        for probe in PROBES:
+            suffix = " [仅显式探测]" if probe.manual_only else ""
+            click.echo(f"{probe.key:<24} {probe.label}{suffix}")
+        return
     _progress_logging(quiet=True)
+    keys = comma_values(only, "--only")
     cfg = _cfg(config_path)
-    keys = [k.strip() for k in only.split(",") if k.strip()] if only else None
-    report = run_probes(cfg, vantage=vantage, only=keys)
+    try:
+        report = run_probes(cfg, vantage=vantage, only=keys, stale_only=stale_only)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
 
     for result in report.results:
         latency = f"{result.latency_ms:>6}ms" if result.latency_ms is not None else "     \u2014"
@@ -1321,7 +1403,7 @@ def sources_substitutes(config_path: str, vantage: str, probe: bool, as_json: bo
     """
     import json as json_mod
 
-    from cnequity.diagnostics.source_health import HealthReport, run_probes
+    from cnequity.diagnostics.source_health import HealthReport, run_probes, validate_vantage
     from cnequity.diagnostics.substitutes import (
         render_substitutions,
         substitution_report,
@@ -1329,6 +1411,10 @@ def sources_substitutes(config_path: str, vantage: str, probe: bool, as_json: bo
     )
 
     _progress_logging(quiet=True)
+    try:
+        validate_vantage(vantage)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--vantage") from None
     cfg = _cfg(config_path)
     if probe:
         report = run_probes(cfg, vantage=vantage)

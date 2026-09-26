@@ -101,17 +101,19 @@ def targets_for_vantage(
 
 
 def critical_probe_keys() -> frozenset[str]:
-    """Return probe keys that exercise at least one core dataset.
+    """Return routine probe keys that exercise at least one core dataset.
 
     Keep this derived from the source-health registry rather than copying a
-    second list of probes into the SLO code.  The registry is the contract for
-    what a probe actually tests, and using it here also means a newly-added
-    core probe cannot silently disappear from the SLO gate.
+    second list of probes into the SLO code. Manual-only endpoints cannot
+    supply regular active samples without creating avoidable upstream load;
+    they remain visible as advisory results and can use passive evidence.
     """
     from cnequity.diagnostics import source_health
 
     return frozenset(
-        probe.key for probe in source_health.PROBES if set(probe.powers) & CORE_DATASETS
+        probe.key
+        for probe in source_health.PROBES
+        if not probe.manual_only and set(probe.powers) & CORE_DATASETS
     )
 
 
@@ -128,6 +130,9 @@ class ProbeSLO:
     latest_generated_at: str | None
     fresh: bool
     passed: bool
+    evidence_kind: str = "active"
+    active_observations: int = 0
+    passive_observations: int = 0
 
 
 @dataclass(frozen=True)
@@ -225,10 +230,10 @@ def evaluate_source_slo(
     cutoff = current - timedelta(days=window_days)
     critical_keys = critical_probe_keys()
     # A point probe is not a new day of availability evidence. Keep only the
-    # latest observation per probe, vantage and UTC day so repeated manual
+    # latest observation per probe, vantage, kind and UTC day so repeated manual
     # retries (or two schedules on Monday) cannot manufacture the minimum
     # sample count within a few minutes.
-    daily: dict[tuple[str, str, date], tuple[datetime, object]] = {}
+    daily: dict[tuple[str, str, str, date], tuple[datetime, object]] = {}
     vantages: set[str] = set()
     for report in reports:
         generated = _parse_timestamp(report.generated_at)
@@ -241,18 +246,32 @@ def evaluate_source_slo(
         for result in report.results:
             if result.status == ProbeStatus.SKIPPED.value:
                 continue
-            identity = (result.key, report.vantage, generated.date())
+            kind = getattr(result, "sample_kind", "active")
+            identity = (result.key, report.vantage, kind, generated.date())
             previous = daily.get(identity)
             if previous is None or generated > previous[0]:
                 daily[identity] = (generated, result)
 
-    grouped: dict[tuple[str, str], list[tuple[datetime, object]]] = {}
-    for (key, vantage, _), sample in daily.items():
-        grouped.setdefault((key, vantage), []).append(sample)
+    grouped: dict[tuple[str, str], dict[str, list[tuple[datetime, object]]]] = {}
+    for (key, vantage, kind, _), sample in daily.items():
+        grouped.setdefault((key, vantage), {}).setdefault(kind, []).append(sample)
 
     results: list[ProbeSLO] = []
-    for (key, vantage), samples in sorted(grouped.items()):
-        samples.sort(key=lambda item: item[0])
+    for (key, vantage), by_kind in sorted(grouped.items()):
+        for samples in by_kind.values():
+            samples.sort(key=lambda item: item[0])
+        # Never pool an active probe and a production-ingest observation into
+        # one denominator. Prefer a sufficiently sampled active series; use a
+        # sufficiently sampled passive series when routine probes were saved.
+        active_samples = by_kind.get("active", [])
+        passive_samples = by_kind.get("passive", [])
+        if len(active_samples) >= minimum_observations:
+            basis = "active"
+        elif len(passive_samples) >= minimum_observations:
+            basis = "passive"
+        else:
+            basis = "active" if len(active_samples) >= len(passive_samples) else "passive"
+        samples = by_kind.get(basis, [])
         # Criticality belongs to the registry, not to a caller-controlled
         # ``powers`` field in an archived report.  Otherwise a forged or stale
         # payload could relabel a core probe as advisory and pass the gate.
@@ -285,6 +304,9 @@ def evaluate_source_slo(
                 latest_generated_at=latest_at.isoformat(),
                 fresh=fresh,
                 passed=passed,
+                evidence_kind=basis,
+                active_observations=len(active_samples),
+                passive_observations=len(passive_samples),
             )
         )
 
@@ -312,7 +334,7 @@ def evaluate_source_slo(
                     observations=0,
                     successes=0,
                     availability=None,
-                    target=core_target,
+                    target=targets_for_vantage(vantage, overrides=vantage_targets)[0],
                     latest_status=None,
                     latest_generated_at=None,
                     fresh=False,

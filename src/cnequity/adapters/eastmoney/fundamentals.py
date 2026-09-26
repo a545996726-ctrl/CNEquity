@@ -31,6 +31,7 @@ by daily runs keep the ordinary announcement-date semantics.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -386,6 +387,9 @@ def fetch_financial_statement_items(
     client: EastMoneyClient | None = None,
     config: Config | None = None,
     run_id: str | None = None,
+    on_unit: Callable[[str, str, list[dict]], None] | None = None,
+    skip_units: set[str] | None = None,
+    failures: list[tuple[str, str]] | None = None,
 ) -> pl.DataFrame:
     """Fetch financial statement items with PIT ``announce_date``.
 
@@ -407,7 +411,7 @@ def fetch_financial_statement_items(
     request_scope = f"{'backfill' if backfill else 'daily'}:{trade_date.isoformat()}"
     archive_source = "eastmoney_backfill" if backfill else "eastmoney"
     capture_nonce: str | None = None
-    if config is not None and hasattr(config, "meta_root"):
+    if on_unit is None and config is not None and hasattr(config, "meta_root"):
         should_archive = getattr(config, "should_archive_raw", None)
         if should_archive is None or should_archive("financial_statement_items"):
             if bool(getattr(config, "raw_archive_enabled", False)):
@@ -470,41 +474,92 @@ def fetch_financial_statement_items(
                 else ""
             )
             for period in _report_period_dates(trade_date, start=range_start, end=range_end):
-                announce_raw = _fetch_report(
-                    client,
-                    _ANNOUNCE_SOURCE,
-                    f"({_ANNOUNCE_SOURCE.report_date_field}='{period}'){scope_expr}",
-                    config=config,
-                    run_id=run_id,
-                    request_scope=request_scope,
-                    archive_source=archive_source,
-                    capture_nonce=capture_nonce,
+                period_units = {f"{period}|{report.name}" for report in _REPORTS}
+                if on_unit is not None and period_units <= (skip_units or set()):
+                    continue
+                announce_unit = f"{period}|{_ANNOUNCE_SOURCE.name}"
+                unit_scope = (
+                    f"backfill:{period}:{_ANNOUNCE_SOURCE.name}" if on_unit else request_scope
                 )
-                announce_raw = _rows_for_report_period(announce_raw, _ANNOUNCE_SOURCE, period)
-                announce_dates = _announce_date_map(announce_raw)
-                parsed, _ = _parse_rows(announce_raw, _ANNOUNCE_SOURCE, default_notice=ds)
+                unit_nonce = (
+                    begin_capture(
+                        config,
+                        "financial_statement_items",
+                        run_id,
+                        source=archive_source,
+                        request_scope=unit_scope,
+                    )
+                    if on_unit is not None
+                    and config is not None
+                    and config.should_archive_raw("financial_statement_items")
+                    else capture_nonce
+                )
+                try:
+                    announce_raw = _fetch_report(
+                        client,
+                        _ANNOUNCE_SOURCE,
+                        f"({_ANNOUNCE_SOURCE.report_date_field}='{period}'){scope_expr}",
+                        config=config,
+                        run_id=run_id,
+                        request_scope=unit_scope,
+                        archive_source=archive_source,
+                        capture_nonce=unit_nonce,
+                    )
+                    announce_raw = _rows_for_report_period(announce_raw, _ANNOUNCE_SOURCE, period)
+                    announce_dates = _announce_date_map(announce_raw)
+                    parsed, _ = _parse_rows(announce_raw, _ANNOUNCE_SOURCE, default_notice=ds)
+                except Exception as exc:
+                    if failures is None:
+                        raise
+                    failures.append((announce_unit, str(exc)))
+                    continue  # Other reports require LICO's PIT announcement dates.
+                if on_unit is not None and announce_unit not in (skip_units or set()):
+                    on_unit(announce_unit, unit_scope, parsed)
                 rows.extend(parsed)
 
                 for report in _REPORTS:
                     if report is _ANNOUNCE_SOURCE:
                         continue
-                    raw = _fetch_report(
-                        client,
-                        report,
-                        f"({report.report_date_field}='{period}'){scope_expr}",
-                        config=config,
-                        run_id=run_id,
-                        request_scope=request_scope,
-                        archive_source=archive_source,
-                        capture_nonce=capture_nonce,
+                    unit = f"{period}|{report.name}"
+                    if unit in (skip_units or set()):
+                        continue
+                    unit_scope = f"backfill:{period}:{report.name}" if on_unit else request_scope
+                    unit_nonce = (
+                        begin_capture(
+                            config,
+                            "financial_statement_items",
+                            run_id,
+                            source=archive_source,
+                            request_scope=unit_scope,
+                        )
+                        if on_unit is not None
+                        and config is not None
+                        and config.should_archive_raw("financial_statement_items")
+                        else capture_nonce
                     )
-                    raw = _rows_for_report_period(raw, report, period)
-                    parsed, fallbacks = _parse_rows(
-                        raw,
-                        report,
-                        default_notice=ds,
-                        announce_dates=announce_dates,
-                    )
+                    try:
+                        raw = _fetch_report(
+                            client,
+                            report,
+                            f"({report.report_date_field}='{period}'){scope_expr}",
+                            config=config,
+                            run_id=run_id,
+                            request_scope=unit_scope,
+                            archive_source=archive_source,
+                            capture_nonce=unit_nonce,
+                        )
+                        raw = _rows_for_report_period(raw, report, period)
+                        parsed, fallbacks = _parse_rows(
+                            raw,
+                            report,
+                            default_notice=ds,
+                            announce_dates=announce_dates,
+                        )
+                    except Exception as exc:
+                        if failures is None:
+                            raise
+                        failures.append((unit, str(exc)))
+                        continue
                     if fallbacks:
                         logger.info(
                             "%s %s: %d row(s) had no LICO announcement date; "
@@ -514,6 +569,8 @@ def fetch_financial_statement_items(
                             fallbacks,
                         )
                     rows.extend(parsed)
+                    if on_unit is not None:
+                        on_unit(unit, unit_scope, parsed)
     finally:
         if owns:
             client.close()

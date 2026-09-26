@@ -32,6 +32,7 @@ from datetime import date
 
 import polars as pl
 
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol
 
@@ -146,6 +147,7 @@ def _szse_listed(session, trade_date: date, config) -> list[dict]:
                 impersonate="chrome",
                 timeout=_TIMEOUT_SECONDS,
             )
+            record_http_response(config, _SOURCE, resp)
         resp.raise_for_status()
         tab = (resp.json() or [{}])[0] or {}
         rows.extend(tab.get("data") or [])
@@ -187,6 +189,7 @@ def fetch_szse_dragon_tiger(trade_date: date, *, config=None) -> pl.DataFrame:
                         impersonate="chrome",
                         timeout=_TIMEOUT_SECONDS,
                     )
+                    record_http_response(config, _SOURCE, detail)
                 detail.raise_for_status()
                 tabs = detail.json() or []
             except Exception as exc:  # noqa: BLE001
@@ -227,6 +230,7 @@ def fetch_sse_dragon_tiger(trade_date: date, *, config=None) -> pl.DataFrame:
                 impersonate="chrome",
                 timeout=_TIMEOUT_SECONDS,
             )
+            record_http_response(config, _SOURCE, resp)
         resp.raise_for_status()
         page_help = _sse_json(resp.text).get("pageHelp") or {}
         listed = page_help.get("data") or []
@@ -253,6 +257,7 @@ def fetch_sse_dragon_tiger(trade_date: date, *, config=None) -> pl.DataFrame:
                         impersonate="chrome",
                         timeout=_TIMEOUT_SECONDS,
                     )
+                    record_http_response(config, _SOURCE, detail)
                 detail.raise_for_status()
                 desks = (_sse_json(detail.text).get("pageHelp") or {}).get("data") or []
             except Exception as exc:  # noqa: BLE001

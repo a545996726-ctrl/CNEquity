@@ -19,6 +19,43 @@ DEFAULT_LOCK_TIMEOUT_SECONDS = 15.0
 logger = logging.getLogger(__name__)
 
 
+def _policy_day(now: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(now))
+
+
+def record_metered_attempt(state_dir: Path | str, source: str, family: str) -> None:
+    """Count an admitted wire scope once across processes before it starts.
+
+    The counter is deliberately separate from adapter ``metrics.requests``:
+    those metrics also include logical retries and may omit handshakes. This
+    ledger counts only scopes that passed local source policy and pacing. It
+    does not claim that every scope maps to exactly one HTTP packet.
+    """
+    root = Path(state_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    name = _safe_source_name(family)
+    path = root / f"meter-{name}.json"
+    with exclusive_lock(root / f"meter-{name}.lock"):
+        now = time.time()
+        day = _policy_day(now)
+        previous = _read_json(path)
+        aliases = previous.get("aliases") if previous.get("policy_day") == day else None
+        aliases = dict(aliases) if isinstance(aliases, dict) else {}
+        lane = str(source).strip().lower()
+        count = aliases.get(lane, 0)
+        aliases[lane] = (count if type(count) is int and count >= 0 else 0) + 1
+        _write_json(
+            path,
+            {
+                "version": 1,
+                "policy_day": day,
+                "family": family,
+                "total": sum(value for value in aliases.values() if type(value) is int),
+                "aliases": aliases,
+            },
+        )
+
+
 @dataclass(frozen=True)
 class RateLimitSpec:
     """Pickle-friendly rate limit parameters for worker processes."""
@@ -38,11 +75,10 @@ class RateLimitSpec:
 
 @dataclass
 class RateLimiter:
-    """Cross-process fixed-spacing limiter using reserved request time slots.
+    """Cross-process fixed-spacing limiter checked at request admission.
 
-    The file lock protects only the reservation transaction. Waiting for the
-    reserved slot happens after the lock is released, so one slow process does
-    not make every other process wait behind a sleeping lock holder.
+    The file lock protects only admission. Sleep outside the lock, then check
+    again: a queued caller must observe a cooldown set while it was asleep.
     """
 
     name: str
@@ -80,78 +116,58 @@ class RateLimiter:
             if not math.isfinite(previous_next) or previous_next < 0:
                 previous_next = 0.0
             deadline = max(previous_next, time.time() + seconds)
-            _write_json(
-                state_path,
-                {"last": previous_last, "next_allowed_at": deadline},
-            )
+            state.update(last=previous_last, next_allowed_at=deadline)
+            _write_json(state_path, state)
 
     def wait(self) -> None:
-        if self.min_interval <= 0:
+        if not math.isfinite(self.min_interval) or self.min_interval < 0:
+            raise ValueError(f"{self.name}: min_interval must be finite and >= 0")
+        state_path = self.state_dir / f"{self.name}.json"
+        if self.min_interval == 0 and not state_path.exists():
             return
-
         self.state_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.state_dir / f"{self.name}.lock"
-        state_path = self.state_dir / f"{self.name}.json"
 
-        lock_started = time.monotonic()
-        with exclusive_lock(lock_path, timeout=self.lock_timeout):
-            lock_wait = time.monotonic() - lock_started
-            previous_last = 0.0
-            next_allowed_at = 0.0
-            if state_path.exists():
+        while True:
+            with exclusive_lock(lock_path, timeout=self.lock_timeout):
+                state = _read_json(state_path)
                 try:
-                    state = json.loads(state_path.read_text(encoding="utf-8"))
                     previous_last = float(state.get("last", 0.0))
                     next_allowed_at = float(state.get("next_allowed_at", 0.0))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     previous_last = 0.0
                     next_allowed_at = 0.0
-
-            if not math.isfinite(previous_last) or previous_last < 0.0:
-                previous_last = 0.0
-            if not math.isfinite(next_allowed_at) or next_allowed_at < 0.0:
-                next_allowed_at = 0.0
-
-            # Migrate the old state format, where `last` was the timestamp of
-            # the previous request start. A missing/corrupt state is safe to
-            # treat as empty; the first request then gets the current slot.
-            if next_allowed_at <= 0.0 and previous_last > 0.0:
-                next_allowed_at = previous_last + self.min_interval
-
-            now = time.time()
-            slot = max(now, next_allowed_at)
-            reserved_next = slot + self.min_interval
-
-            fd, tmp_name = tempfile.mkstemp(
-                dir=state_path.parent,
-                prefix=f".{state_path.stem}-",
-                suffix=".tmp",
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(
-                        {"last": slot, "next_allowed_at": reserved_next},
-                        handle,
-                    )
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp_name, state_path)
-            except Exception:
+                if not math.isfinite(previous_last) or previous_last < 0:
+                    previous_last = 0.0
+                if not math.isfinite(next_allowed_at) or next_allowed_at < 0:
+                    next_allowed_at = 0.0
+                now = time.time()
                 try:
-                    os.unlink(tmp_name)
-                except OSError:
-                    pass
-                raise
-
-        sleep_for = max(0.0, slot - time.time())
-        if sleep_for:
-            time.sleep(sleep_for)
-        logger.debug(
-            "rate limit %s: lock_wait=%.3fs sleep=%.3fs",
-            self.name,
-            lock_wait,
-            sleep_for,
-        )
+                    prior_interval = float(state.get("min_interval", 0))
+                except (TypeError, ValueError):
+                    prior_interval = 0.0
+                if not math.isfinite(prior_interval) or prior_interval < 0:
+                    prior_interval = 0.0
+                day = _policy_day(now)
+                interval = max(
+                    self.min_interval,
+                    prior_interval if state.get("policy_day") == day else 0.0,
+                )
+                if previous_last > 0:
+                    next_allowed_at = max(next_allowed_at, previous_last + interval)
+                delay = max(0.0, next_allowed_at - now)
+                if delay == 0:
+                    _write_json(
+                        state_path,
+                        {
+                            "last": now,
+                            "next_allowed_at": now + interval,
+                            "min_interval": interval,
+                            "policy_day": day,
+                        },
+                    )
+                    return
+            time.sleep(delay)
 
 
 _CONCURRENCY_SCHEMA_VERSION = 1
@@ -293,9 +309,17 @@ class SourceConcurrencyLimiter:
                 )
         return clean
 
+    def _effective_limit(self, payload: Mapping[str, object], now: float) -> int:
+        try:
+            previous = max(1, int(payload.get("limit", self.limit)))
+        except (TypeError, ValueError):
+            previous = self.limit
+        if payload.get("policy_day") not in (None, _policy_day(now)):
+            return self.limit
+        return min(self.limit, previous)
+
     def acquire(self, *, timeout: float | None = None, metrics: dict | None = None) -> str:
         """Reserve one in-flight slot and return its opaque lease token."""
-        limit = max(1, int(self.limit))
         started = time.perf_counter()
         deadline = None if timeout is None else started + max(float(timeout), 0.0)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -311,6 +335,7 @@ class SourceConcurrencyLimiter:
             with exclusive_lock(self._lock_path, timeout=self.lock_timeout):
                 payload = _read_json(self._state_path)
                 leases = self._clean_leases(payload, now)
+                limit = self._effective_limit(payload, now)
                 if len(leases) < limit:
                     leases.append(lease)
                     _write_json(
@@ -318,6 +343,7 @@ class SourceConcurrencyLimiter:
                         {
                             "version": _CONCURRENCY_SCHEMA_VERSION,
                             "limit": limit,
+                            "policy_day": _policy_day(now),
                             "leases": leases,
                         },
                     )
@@ -340,6 +366,7 @@ class SourceConcurrencyLimiter:
                         {
                             "version": _CONCURRENCY_SCHEMA_VERSION,
                             "limit": limit,
+                            "policy_day": _policy_day(now),
                             "leases": leases,
                         },
                     )
@@ -355,14 +382,16 @@ class SourceConcurrencyLimiter:
         try:
             with exclusive_lock(self._lock_path, timeout=self.lock_timeout):
                 payload = _read_json(self._state_path)
-                leases = self._clean_leases(payload, time.time())
+                now = time.time()
+                leases = self._clean_leases(payload, now)
                 remaining = [lease for lease in leases if lease.get("token") != token]
                 if remaining != leases or not self._state_path.exists():
                     _write_json(
                         self._state_path,
                         {
                             "version": _CONCURRENCY_SCHEMA_VERSION,
-                            "limit": max(1, int(self.limit)),
+                            "limit": self._effective_limit(payload, now),
+                            "policy_day": _policy_day(now),
                             "leases": remaining,
                         },
                     )
@@ -501,6 +530,8 @@ def source_request_slot_spec(
     started = time.perf_counter()
     if spec is None or spec.concurrency_limit is None:
         try:
+            if spec is not None:
+                record_metered_attempt(spec.state_dir, spec.source, spec.source)
             yield
         except BaseException:
             _record_request_metrics(metrics, started, failed=True)
@@ -517,6 +548,7 @@ def source_request_slot_spec(
     )
     try:
         with limiter.slot(metrics=metrics, timeout=timeout):
+            record_metered_attempt(state_dir, spec.source, spec.source)
             yield
     except BaseException:
         _record_request_metrics(metrics, started, failed=True)

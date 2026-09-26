@@ -2,9 +2,9 @@
 
 SHFE publishes one JSON file per session for futures (back to at least
 2002-01-07) and one for options (from copper options' first session,
-2018-09-21). INE's products — crude oil and the rest — are carried in the same
-files, so one request covers both exchanges; rows are assigned to ``INE`` by
-product.
+2018-09-21). INE's 2018 futures use its own official daily file; the SHFE
+daily file does not contain the first INE session. From 2019, SHFE's file
+contains INE products too. Rows are assigned to ``INE`` by product.
 
 Each product block ends in a 「小计」 row, and the file in a 「总计」 row. Measured
 across 2002, 2010, 2019, 2025 and 2026 files, futures and options alike, the
@@ -58,8 +58,11 @@ logger = logging.getLogger(__name__)
 
 FIRST_SESSION = date(2002, 1, 7)
 FIRST_OPTION_SESSION = date(2018, 9, 21)
+INE_FIRST_SESSION = date(2018, 3, 26)
+INE_DIRECT_LAST_SESSION = date(2018, 12, 31)
 
 FUTURES_URL = "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx{ymd}.dat"
+INE_FUTURES_URL = "https://www.ine.cn/data/tradedata/future/dailydata/kx{ymd}.dat"
 OPTIONS_URL = "https://www.shfe.com.cn/data/tradedata/option/dailydata/kx{ymd}.dat"
 FUTURES_REFERENCE_URL = (
     "https://www.shfe.com.cn/data/busiparamdata/future/ContractBaseInfo{ymd}.dat"
@@ -68,7 +71,7 @@ OPTIONS_REFERENCE_URL = (
     "https://www.shfe.com.cn/data/busiparamdata/option/ContractBaseInfo{ymd}.dat"
 )
 
-#: Products listed on INE but published in SHFE's files.
+#: INE products; 2018 futures come from INE's own daily file.
 INE_PRODUCTS = frozenset({"sc", "lu", "nr", "bc", "ec"})
 
 
@@ -217,15 +220,33 @@ def parse_options(body: bytes, trade_date: date) -> pl.DataFrame:
     )
 
 
-def fetch_shfe_day(trade_date: date, *, config=None) -> ExchangeDay:
+def fetch_shfe_day(trade_date: date, *, config=None, kind: str | None = None) -> ExchangeDay:
     """SHFE and INE contracts for *trade_date*; options only once they listed."""
     if trade_date < FIRST_SESSION:
         raise FuturesDayUnavailable(f"SHFE files start {FIRST_SESSION.isoformat()}")
     ymd = trade_date.strftime("%Y%m%d")
-    futures = parse_futures(fetch_bytes(FUTURES_URL.format(ymd=ymd), config=config), trade_date)
+    futures = pl.DataFrame()
+    if kind != "options":
+        futures = parse_futures(
+            fetch_bytes(FUTURES_URL.format(ymd=ymd), config=config, as_of=trade_date), trade_date
+        )
+        if INE_FIRST_SESSION <= trade_date <= INE_DIRECT_LAST_SESSION:
+            ine = parse_futures(
+                fetch_bytes(INE_FUTURES_URL.format(ymd=ymd), config=config, as_of=trade_date),
+                trade_date,
+            )
+            if ine.is_empty() or set(ine["exchange"]) != {"INE"}:
+                raise FuturesPayloadError(
+                    f"INE {trade_date}: direct daily file has no INE contracts"
+                )
+            futures = pl.concat(
+                [futures.filter(pl.col("exchange") == "SHF"), ine], how="vertical_relaxed"
+            )
     options = pl.DataFrame()
-    if trade_date >= FIRST_OPTION_SESSION:
-        options = parse_options(fetch_bytes(OPTIONS_URL.format(ymd=ymd), config=config), trade_date)
+    if kind != "futures" and trade_date >= FIRST_OPTION_SESSION:
+        options = parse_options(
+            fetch_bytes(OPTIONS_URL.format(ymd=ymd), config=config, as_of=trade_date), trade_date
+        )
     return ExchangeDay("SHF", trade_date, futures=futures, options=options)
 
 
@@ -264,16 +285,18 @@ def parse_reference(body: bytes, trade_date: date, *, kind: str) -> pl.DataFrame
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 
 
-def fetch_shfe_reference(trade_date: date, *, config=None) -> pl.DataFrame:
+def fetch_shfe_reference(trade_date: date, *, config=None, kind: str | None = None) -> pl.DataFrame:
     ymd = trade_date.strftime("%Y%m%d")
-    frames = [
-        parse_reference(
-            fetch_bytes(FUTURES_REFERENCE_URL.format(ymd=ymd), config=config),
-            trade_date,
-            kind="future",
+    frames = []
+    if kind != "option":
+        frames.append(
+            parse_reference(
+                fetch_bytes(FUTURES_REFERENCE_URL.format(ymd=ymd), config=config),
+                trade_date,
+                kind="future",
+            )
         )
-    ]
-    if trade_date >= FIRST_OPTION_SESSION:
+    if kind != "future" and trade_date >= FIRST_OPTION_SESSION:
         frames.append(
             parse_reference(
                 fetch_bytes(OPTIONS_REFERENCE_URL.format(ymd=ymd), config=config),

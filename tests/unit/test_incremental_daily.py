@@ -37,6 +37,20 @@ def test_incremental_trade_dates_uses_watermark(tmp_path):
     assert dates == [date(2024, 6, 26), date(2024, 6, 27), date(2024, 6, 28)]
 
 
+def test_missing_day_survives_watermark_and_reconciliation_window(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    _seed_trading_calendar(cfg, date(2024, 6, 24), date(2024, 7, 15))
+    state = StateStore(cfg.meta_root)
+    state.set_date("margin_trading", date(2024, 7, 12))
+    state.record_missing_dates("margin_trading", [date(2024, 6, 26)], reason="timeout")
+
+    assert date(2024, 6, 26) in incremental_trade_dates(cfg, "margin_trading", date(2024, 7, 15))
+    assert (
+        StateStore(cfg.meta_root).get_payload("margin_trading")["missing_ranges"][0]["last_failure"]
+        == "timeout"
+    )
+
+
 def test_list_trading_dates_skips_weekends_without_calendar(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     dates = list_trading_dates(cfg, date(2024, 6, 28), date(2024, 6, 30))
@@ -696,6 +710,53 @@ def test_a_dataset_without_a_reconciliation_tail_keeps_failing_loud(tmp_path):
 
     with pytest.raises(RuntimeError, match="source refused the day"):
         fetch_incremental_daily(cfg, "margin_trading", date(2024, 6, 28), _fetch)
+
+
+def test_failed_incremental_day_keeps_prior_staging_and_retries_only_the_gap(tmp_path):
+    cfg = Config(data_root=tmp_path / "data", raw_archive_enabled=False)
+    _seed_trading_calendar(cfg, date(2024, 6, 24), date(2024, 6, 28))
+    StateStore(cfg.meta_root).set_date("market_breadth", date(2024, 6, 25))
+    calls = []
+
+    def fetch(day: date) -> pl.DataFrame:
+        calls.append(day)
+        if day == date(2024, 6, 27) and calls.count(day) == 1:
+            raise ConnectionError("temporary source failure")
+        return pl.DataFrame({"trade_date": [day], "metric_id": ["advance_ratio"], "value": [0.5]})
+
+    first = http_common.run_incremental_fetched(
+        cfg,
+        date(2024, 6, 28),
+        "retry-run",
+        "market_breadth",
+        fetch,
+        source="derived",
+    )
+    assert first["status"] == "degraded"
+    assert first["batch_settled"] is True
+    assert StateStore(cfg.meta_root).get_missing_dates("market_breadth") == {date(2024, 6, 27)}
+    paths = list((cfg.staging_root / "market_breadth" / "run_id=retry-run").glob("*.parquet"))
+    assert len(paths) == 2
+    assert {d for path in paths for d in pl.read_parquet(path)["trade_date"]} == {
+        date(2024, 6, 26),
+        date(2024, 6, 28),
+    }
+
+    http_common.run_incremental_fetched(
+        cfg,
+        date(2024, 6, 28),
+        "retry-run",
+        "market_breadth",
+        fetch,
+        source="derived",
+    )
+    assert calls == [date(2024, 6, 26), date(2024, 6, 27), date(2024, 6, 28), date(2024, 6, 27)]
+    state = StateStore(cfg.meta_root)
+    assert state.get_missing_dates("market_breadth") == {date(2024, 6, 27)}
+    state.commit_staged_request_days("market_breadth", "retry-run")
+    assert state.get_missing_dates("market_breadth") == set()
+    staged = pl.concat([pl.read_parquet(path) for path in paths[0].parent.glob("*.parquet")])
+    assert set(staged["trade_date"]) == {date(2024, 6, day) for day in (26, 27, 28)}
 
 
 def test_a_closed_day_with_no_disclosures_is_not_a_failed_fetch(tmp_path):

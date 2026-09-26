@@ -5,7 +5,11 @@ from __future__ import annotations
 import threading
 from datetime import date
 
+import pytest
+
 from cnequity.adapters.baostock._session import fetch_per_symbol
+from cnequity.config import Config
+from cnequity.domain.http_policy import SourceCoolingDown
 
 
 class _NoQueryBaostock:
@@ -21,6 +25,53 @@ class _NoQueryBaostock:
 
     def logout(self):
         self.logged_out = True
+
+
+def test_blacklisted_login_is_not_retried(tmp_path):
+    class Refused(_NoQueryBaostock):
+        def login(self):
+            self.logins += 1
+            return type("R", (), {"error_code": "10001011", "error_msg": "黑名单用户"})()
+
+    bs = Refused()
+    cfg = Config(data_root=tmp_path, source_intervals={"baostock": 0})
+    with pytest.raises(SourceCoolingDown):
+        fetch_per_symbol(
+            ["600000.SH"],
+            date(2020, 1, 1),
+            date(2020, 1, 2),
+            lambda *_: pytest.fail("query"),
+            bs=bs,
+            config=cfg,
+            sleep=lambda _: None,
+        )
+    assert bs.logins == 1
+
+
+def test_blacklisted_query_does_not_relogin_or_try_next_symbol(tmp_path):
+    from cnequity.adapters.baostock._session import check_result
+
+    bs = _NoQueryBaostock()
+    cfg = Config(data_root=tmp_path, source_intervals={"baostock": 0})
+    calls = []
+
+    def refused(_bs, symbol, _start, _end):
+        calls.append(symbol)
+        response = type("R", (), {"error_code": "10001011", "error_msg": "黑名单用户"})()
+        check_result(response, config=cfg)
+
+    with pytest.raises(SourceCoolingDown):
+        fetch_per_symbol(
+            ["600000.SH", "600001.SH"],
+            date(2020, 1, 1),
+            date(2020, 1, 2),
+            refused,
+            bs=bs,
+            config=cfg,
+            sleep=lambda _: None,
+        )
+    assert calls == ["600000.SH"]
+    assert bs.logins == 1
 
 
 def test_completes_normally_without_tripping_the_watchdog():

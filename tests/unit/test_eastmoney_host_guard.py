@@ -100,7 +100,7 @@ def test_a_dropped_connection_trips_the_breaker(tmp_path, monkeypatch):
     with pytest.raises(host_guard.Push2BreakerOpenError):
         client.get(_CLIST)
     assert len(sent) == 1
-    state = json.loads((cfg.meta_root / "state" / "eastmoney_guard.json").read_text())
+    state = json.loads((cfg.rate_limit_root / "eastmoney_guard.json").read_text())
     assert state["push2"]["breaker"]["reason"] == "RemoteProtocolError"
     client.close()
 
@@ -157,6 +157,66 @@ def test_budget_is_shared_across_clients(tmp_path, monkeypatch):
     second.get(_CLIST)
     with pytest.raises(host_guard.Push2BudgetExhaustedError):
         first.get(_CLIST)
+    first.close()
+    second.close()
+
+
+def test_vendor_budget_counts_push2_and_datacenter_together(tmp_path, monkeypatch):
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
+    cfg = _cfg(
+        tmp_path,
+        eastmoney_daily_budget=2,
+        eastmoney_push2_daily_budget=0,
+        eastmoney_datacenter_daily_budget=0,
+    )
+    client, sent = _client(cfg, _ok)
+    client.get(_CLIST)
+    client.get(_DATACENTER)
+    with pytest.raises(host_guard.EastMoneyHostBlockedError, match="shared daily budget"):
+        client.get(_DATACENTER)
+    assert len(sent) == 2
+    assert host_guard.status(cfg)["vendor"]["requests"] == 2
+    client.close()
+
+
+def test_budget_and_breaker_are_shared_across_lakes_on_one_egress(tmp_path, monkeypatch):
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setenv("CNE_RATE_LIMIT_ROOT", str(tmp_path / "egress"))
+    first_cfg = Config(data_root=tmp_path / "lake-a", eastmoney_push2_daily_budget=3)
+    second_cfg = Config(data_root=tmp_path / "lake-b", eastmoney_push2_daily_budget=2)
+    first, first_sent = _client(first_cfg, _ok)
+    second, second_sent = _client(second_cfg, _ok)
+    first.get(_CLIST)
+    second.get(_CLIST)
+    with pytest.raises(host_guard.Push2BudgetExhaustedError):
+        first.get(_CLIST)
+    assert len(first_sent) == len(second_sent) == 1
+
+    host_guard.trip(first_cfg, _CLIST, "HTTP 502")
+    with pytest.raises(host_guard.Push2BreakerOpenError):
+        second.get(_CLIST)
+    first.close()
+    second.close()
+
+
+def test_legacy_lake_ledgers_merge_once_without_exposing_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setenv("CNE_RATE_LIMIT_ROOT", str(tmp_path / "egress"))
+    a = Config(data_root=tmp_path / "a", eastmoney_push2_daily_budget=3)
+    b = Config(data_root=tmp_path / "b", eastmoney_push2_daily_budget=3)
+    for cfg in (a, b):
+        path = cfg.meta_root / "state" / "eastmoney_guard.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"day": "2026-09-28", "push2": {"requests": 1}}))
+    first, _ = _client(a, _ok)
+    first.get(_CLIST)
+    second, sent = _client(b, _ok)
+    with pytest.raises(host_guard.Push2BudgetExhaustedError):
+        second.get(_CLIST)
+    assert sent == []
+    state = host_guard.status(a)
+    assert state["push2"]["requests"] == 3
+    assert str(a.data_root) not in (a.rate_limit_root / "eastmoney_guard.json").read_text()
     first.close()
     second.close()
 
@@ -478,9 +538,11 @@ def _status(url, code):
 def test_datacenter_trips_after_three_refusals_in_a_row(tmp_path, monkeypatch):
     monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
     monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
-    client, sent = _client(_cfg(tmp_path), lambda url: _status(url, 403))
+    # Explicit 4xx refusals now enter shared cooldown after the first call;
+    # this older consecutive-strike gate still applies to server failures.
+    client, sent = _client(_cfg(tmp_path), lambda url: _status(url, 502))
     for _ in range(3):
-        assert client.get(_DATACENTER).status_code == 403
+        assert client.get(_DATACENTER).status_code == 502
     with pytest.raises(host_guard.DatacenterBreakerOpenError) as exc:
         client.get(_DATACENTER)
     assert is_transport_fail_fast(exc.value)
@@ -518,19 +580,20 @@ def test_a_slow_datacenter_report_is_not_a_refusal(tmp_path, monkeypatch):
     assert len(sent) == 5
 
 
-def test_datacenter_busy_through_every_backoff_trips_at_once(tmp_path, monkeypatch):
-    from cnequity.adapters.eastmoney.datacenter import EastMoneyDatacenterError, fetch_datacenter
+def test_datacenter_rate_limit_envelope_cools_after_one_attempt(tmp_path, monkeypatch):
+    from cnequity.adapters.eastmoney.datacenter import fetch_datacenter
+    from cnequity.domain.http_policy import SourceCoolingDown
 
     monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
     monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
     busy = {"success": False, "message": "请求过于频繁，请稍后再试", "result": None}
     client, sent = _client(_cfg(tmp_path), lambda url: _ok(url, busy))
-    with pytest.raises(EastMoneyDatacenterError, match="busy"):
+    with pytest.raises(SourceCoolingDown, match="请求过于频繁"):
         fetch_datacenter(client, "RPT_X", "A", max_retries=2, retry_backoff_seconds=0)
-    with pytest.raises(host_guard.DatacenterBreakerOpenError):
+    with pytest.raises(SourceCoolingDown):
         client.get(_DATACENTER)
     client.close()
-    assert len(sent) == 2
+    assert len(sent) == 1
 
 
 def test_datacenter_budget_counts_and_caps(tmp_path, monkeypatch):

@@ -1,23 +1,14 @@
-"""Completeness and consistency for the futures and option datasets (ADR-0013).
+"""Derivative coverage checks with explicit evidence limits.
 
-The equity cross-section proof compares a tip against active instruments. That
-cannot work here: contracts are not instruments, and a futures universe changes
-every month as contracts list and expire. What makes a proof possible is how
-the exchanges publish. Every file lists every live contract, traded or not, so
-**a contract in the previous session's file that has not reached its last
-trading day must be in this one.** That is an expectation derived from the
-data alone (ADR-0008 prefers those to peer comparisons), and it is judged per
-exchange, because each exchange publishes independently.
-
-The audit side asks the same question over history. Between an exchange's
-first and last observed session, every exchange session must have its rows. A
-dataset-level dense watermark cannot see a hole in one of several exchanges,
-and would pin the whole family at the first historical gap if it could.
+A prior-session contract remains expected until an authoritative reference
+ends its life. Missing rows cannot create their own expiry evidence. Calendar
+sessions and exchange boundaries are checked independently of dense watermarks;
+without a full live universe, no missing known keys means unverified, not full
+market completeness (ADR-0017).
 """
 
 from __future__ import annotations
 
-import re
 from datetime import date
 
 import polars as pl
@@ -46,7 +37,9 @@ DERIVATIVE_BAR_CONTRACTS = {
 
 
 def _scan(config: Config, dataset: str) -> pl.LazyFrame | None:
-    root = config.curated_root / dataset
+    from cnequity.storage.read_context import read_root
+
+    root = read_root(config, dataset)
     files = list(root.glob("**/*.parquet")) if root.exists() else []
     if not files:
         return None
@@ -61,28 +54,13 @@ def _last_trade_dates(config: Config, bars_dataset: str) -> dict[str, date]:
     if contracts is None:
         return {}
     frame = (
-        contracts.select("symbol", column)
+        contracts.filter(pl.col("dates_basis") == "exchange")
+        .select("symbol", column)
         .filter(pl.col(column).is_not_null())
         .unique(subset=["symbol"], keep="last")
         .collect()
     )
     return dict(frame.iter_rows())
-
-
-_SERIES = re.compile(r"^[A-Z]+(\d{2})(\d{2})")
-
-
-def _in_delivery(symbol: str, day: date) -> bool:
-    """Whether *symbol*'s delivery (or expiry) month has begun by *day*.
-
-    Used only where no reference file named the last trading day (DCE via
-    Sina). A contract inside its delivery month may stop trading on any day of
-    it, so the proof does not owe it; one before its delivery month is owed.
-    """
-    match = _SERIES.match(symbol)
-    if match is None:
-        return False
-    return (2000 + int(match.group(1)), int(match.group(2))) <= (day.year, day.month)
 
 
 def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
@@ -95,7 +73,13 @@ def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
         return None
     bars = _scan(config, dataset)
     if bars is None:
-        return None
+        return {
+            "dataset": dataset,
+            "heading": HEADING,
+            "state": "unverified",
+            "date": None,
+            "message": f"{dataset} 尚无数据，无法核验覆盖",
+        }
     from cnequity.adapters.futures_exchange import members
     from cnequity.adapters.futures_exchange.registry import expected_exchanges
 
@@ -104,12 +88,12 @@ def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
         tip = bars.select(pl.col("trade_date").max()).collect().item()
         if tip is None:
             return None
-        previous = (
-            bars.filter(pl.col("trade_date") < tip)
-            .select(pl.col("trade_date").max())
-            .collect()
-            .item()
-        )
+        from datetime import timedelta
+
+        from cnequity.query.calendar import list_trading_dates
+
+        sessions = list_trading_dates(config, tip - timedelta(days=40), tip)
+        previous = sessions[-2] if len(sessions) >= 2 else None
         if previous is None:
             return {
                 "dataset": dataset,
@@ -125,23 +109,43 @@ def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
             .collect()
         )
         ends = _last_trade_dates(config, dataset)
+        reference_live: dict[str, set[str]] = {}
+        reference_root = config.meta_root / "derivatives" / "references"
+        for path in reference_root.glob(f"*/{tip}*.parquet"):
+            ref = pl.read_parquet(path)
+            if {"kind", "list_date", "last_trade_date", "symbol"} <= set(ref.columns):
+                live = ref.filter(
+                    (pl.col("kind") == ("future" if kind == "futures" else "option"))
+                    & (pl.col("list_date") <= tip)
+                    & (pl.col("last_trade_date") >= tip)
+                )
+                reference_live.setdefault(path.parent.name, set()).update(live["symbol"].to_list())
         before = pairs.filter(pl.col("trade_date") == previous)
         observed = set(pairs.filter(pl.col("trade_date") == tip)["symbol"].to_list())
         expected: set[str] = set()
         per_exchange: dict[str, list[int]] = {}
         unverifiable: list[str] = []
+        missing_exchanges: list[str] = []
         for exchange in expected_exchanges(config, kind, tip):
             if exchange in VENDOR_ROUTED and getattr(config, "futures_dce_route", "sina") == "sina":
                 # Sina drops sessions without a trade, so a contract missing
                 # from the tip may simply not have traded: not provable.
                 unverifiable.append(exchange)
                 continue
+            tip_rows = pairs.filter(
+                (pl.col("trade_date") == tip) & pl.col("exchange").is_in(list(members(exchange)))
+            )
+            if tip_rows.is_empty():
+                missing_exchanges.append(exchange)
             rows = before.filter(pl.col("exchange").is_in(list(members(exchange))))
+            if rows.is_empty():
+                unverifiable.append(exchange)
             live = {
                 symbol
                 for symbol in rows["symbol"].to_list()
-                if (ends[symbol] >= tip if symbol in ends else not _in_delivery(symbol, tip))
+                if symbol not in ends or ends[symbol] >= tip
             }
+            live |= reference_live.get(exchange, set())
             expected |= live
             per_exchange[exchange] = [len(live & observed), len(live)]
     except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
@@ -152,7 +156,7 @@ def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
             "date": tip if "tip" in locals() else None,
             "message": f"读取衍生品截面证据失败：{exc}",
         }
-    if not expected:
+    if not expected and not missing_exchanges:
         return {
             "dataset": dataset,
             "heading": HEADING,
@@ -160,48 +164,90 @@ def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
             "date": tip,
             "message": f"{previous} 没有任何可证明的交易所合约，无法推出 {tip} 应有的合约",
         }
+    from cnequity.storage.derivative_evidence import owed_sessions
+
+    owed = owed_sessions(config, dataset, tip)
     missing = sorted(expected - observed)
     covered = len(expected) - len(missing)
     return {
         "dataset": dataset,
         "heading": HEADING,
-        "state": "complete" if not missing else "incomplete",
+        "state": "incomplete" if missing or missing_exchanges else "unverified",
         "date": tip,
         "covered": covered,
         "expected": len(expected),
-        "ratio": covered / len(expected),
+        "ratio": covered / len(expected) if expected else 0.0,
         "missing": missing,
-        "owed": 0,
+        "owed": len(owed),
+        "owed_dates": [d.isoformat() for d in owed],
         "noun": "个在市合约",
         "unverifiable_exchanges": unverifiable,
+        "missing_exchanges": missing_exchanges,
+        "message": "前一交易日合约覆盖检查；缺少完整当日在市清单，不能证明新上市合约齐全",
         "exchanges": per_exchange,
+        "coverage": bars.group_by(["exchange", "product"])
+        .agg(
+            pl.col("trade_date").min().alias("first"),
+            pl.col("trade_date").max().alias("last"),
+            pl.col("trade_date").n_unique().alias("sessions"),
+            pl.col("symbol").n_unique().alias("contracts"),
+        )
+        .collect()
+        .sort("exchange", "product")
+        .to_dicts(),
     }
 
 
-def exchange_session_gaps(config: Config, dataset: str) -> dict[str, list[date]]:
+def exchange_session_gaps(
+    config: Config, dataset: str, *, start: date | None = None, end: date | None = None
+) -> dict[str, list[date]]:
     """Sessions with no rows for an exchange, inside that exchange's own span.
 
     Sessions the exchange never published (``UNPUBLISHED_FUTURES_SESSIONS``)
     are not gaps: nothing can fill them.
     """
+    if dataset not in DERIVATIVE_BAR_CONTRACTS:
+        raise ValueError(f"Unsupported derivative bars dataset: {dataset}")
+    if start and end and start > end:
+        raise ValueError("start must not exceed end")
     bars = _scan(config, dataset)
-    if bars is None:
-        return {}
+    from cnequity.adapters.futures_exchange import members
+    from cnequity.adapters.futures_exchange.registry import enabled_exchanges, reader
     from cnequity.domain.derivatives import UNPUBLISHED_FUTURES_SESSIONS
     from cnequity.query.calendar import list_trading_dates
 
-    present = bars.select("exchange", "trade_date").unique().collect()
+    present = (
+        bars.select("exchange", "trade_date").unique().collect()
+        if bars is not None
+        else pl.DataFrame(schema={"exchange": pl.String, "trade_date": pl.Date})
+    )
+    if present.is_empty() and (start is None or end is None):
+        return {}
+    start = start or present["trade_date"].min()
+    end = end or present["trade_date"].max()
+    kind = "futures" if dataset == "futures_bars" else "options"
     gaps: dict[str, list[date]] = {}
-    for exchange, group in present.group_by("exchange"):
-        name = str(exchange[0] if isinstance(exchange, tuple) else exchange)
-        days = set(group["trade_date"].to_list())
-        excused = UNPUBLISHED_FUTURES_SESSIONS.get(name, frozenset())
-        if dataset != "futures_bars":
-            excused = frozenset()
-        sessions = list_trading_dates(config, min(days), max(days))
-        missing = [d for d in sessions if d not in days and d not in excused]
-        if missing:
-            gaps[name] = missing
+    for publisher in enabled_exchanges(config):
+        floor = reader(config, publisher).first_session(kind)
+        if floor is None:
+            continue
+        for name in members(publisher):
+            days = set(present.filter(pl.col("exchange") == name)["trade_date"].to_list())
+            # INE's publisher predates INE itself. Until a dated exchange
+            # universe is available, its leading boundary remains unverified.
+            member_floor = min(days) if name == "INE" and days else floor
+            if name == "INE" and not days:
+                continue
+            excused = (
+                UNPUBLISHED_FUTURES_SESSIONS.get(name, frozenset())
+                if dataset == "futures_bars"
+                else frozenset()
+            )
+            sessions = list_trading_dates(config, max(start, floor, member_floor), end)
+            missing = [d for d in sessions if d not in days and d not in excused]
+            if missing:
+                gaps[name] = missing
+
     return gaps
 
 
@@ -276,7 +322,9 @@ def spec_findings(config: Config, dataset: str = "futures_bars") -> list[dict]:
         sample = group.row(0, named=True)
         contract = parse(sample["exchange_code"], exchange, sample["trade_date"])
         series = contract if kind == "future" else contract.series
-        spec = product_spec(exchange, product, kind, delivery=series.delivery_month)
+        spec = product_spec(
+            exchange, product, kind, on=group["trade_date"].min(), delivery=series.delivery_month
+        )
         if spec is None:
             continue
         prices = pl.concat([group[c] for c in ("open", "high", "low", "close")]).drop_nulls()
@@ -334,7 +382,7 @@ def derivative_findings(config: Config) -> list[dict]:
                     "severity": "warning",
                     "check": "futures_exchange_session_gap",
                     "message": (
-                        f"{dataset}: {exchange} 在自身区间内缺 {len(missing)} 个交易日"
+                        f"{dataset}: {exchange} 在数据集研究区间内缺 {len(missing)} 个交易日"
                         f"（例：{', '.join(d.isoformat() for d in missing[:5])}）；"
                         f"`cne backfill {dataset} --start {missing[0].isoformat()} "
                         f"--end {missing[-1].isoformat()}` 只重取缺口所在的交易日"
@@ -344,9 +392,28 @@ def derivative_findings(config: Config) -> list[dict]:
                     "sample_dates": [d.isoformat() for d in missing[:8]],
                 }
             )
-    for dataset in DERIVATIVE_BAR_CONTRACTS:
+    for dataset, (table, _) in DERIVATIVE_BAR_CONTRACTS.items():
         if is_dataset_enabled(dataset, config):
             findings.extend(spec_findings(config, dataset))
+            bars, contracts = _scan(config, dataset), _scan(config, table)
+            if bars is not None:
+                symbols = set(bars.select("symbol").unique().collect()["symbol"].to_list())
+                known = (
+                    set(contracts.select("symbol").unique().collect()["symbol"].to_list())
+                    if contracts is not None
+                    else set()
+                )
+                missing = sorted(symbols - known)
+                if missing:
+                    findings.append(
+                        {
+                            "dataset": table,
+                            "severity": "warning",
+                            "check": "derivative_contracts_missing",
+                            "message": f"{table}: 行情中 {len(missing)} 个合约缺少元数据；重建合约表",
+                            "sample": missing[:10],
+                        }
+                    )
     if is_dataset_enabled("futures_contracts", config) or is_dataset_enabled(
         "option_contracts", config
     ):

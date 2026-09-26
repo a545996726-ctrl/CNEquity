@@ -102,6 +102,22 @@ def test_fetch_datacenter_raises_when_empty_mid_pagination_persists():
         fetch_datacenter(client, "RPT_TEST", "COL", max_retries=2, retry_backoff_seconds=0)
 
 
+def test_valid_page_callback_keeps_earlier_rows_when_later_page_fails():
+    first = {"success": True, "result": {"pages": 2, "count": 750, "data": [{"x": 1}] * 500}}
+    client = FakeClient([first, RuntimeError("page 2 timed out")])
+    observed = []
+    with pytest.raises(EastMoneyDatacenterError, match="page 2 failed"):
+        fetch_datacenter(
+            client,
+            "RPT_TEST",
+            "COL",
+            max_retries=1,
+            retry_backoff_seconds=0,
+            on_valid_page=lambda batch: observed.extend(batch),
+        )
+    assert len(observed) == 500
+
+
 def test_fetch_datacenter_raises_on_short_non_final_page():
     page1 = {"success": True, "result": {"pages": 3, "count": 1200, "data": [{"x": 1}] * 500}}
     page2 = {"success": True, "result": {"pages": 3, "count": 1200, "data": [{"x": 2}] * 100}}

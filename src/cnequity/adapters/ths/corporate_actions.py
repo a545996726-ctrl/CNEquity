@@ -20,6 +20,11 @@ import httpx
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.http_policy import (
+    SourceCoolingDown,
+    record_business_refusal,
+    record_http_response,
+)
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
 from cnequity.storage.raw_archive import RawArchiveError, RawPayloadArchive, begin_capture
@@ -283,6 +288,9 @@ def _fetch_page(
                     timeout=timeout,
                     follow_redirects=True,
                 )
+                record_http_response(config, "ths_bonus", response)
+        except SourceCoolingDown:
+            raise
         except Exception as exc:  # noqa: BLE001 — retry and report symbol failure
             last_exc = exc
         else:
@@ -313,6 +321,8 @@ def _fetch_page(
                     raise ThsCorporateActionsError(f"{url} -> HTTP 200 without response content")
                 return wire.decode("gb18030", errors="ignore")
             if response.status_code in (401, 403):
+                if response.status_code == 401:
+                    record_business_refusal(config, "ths_bonus", kind="public_token_gate")
                 raise ThsCorporateActionsError(
                     f"{url} -> HTTP {response.status_code} (token-gated endpoint)"
                 )

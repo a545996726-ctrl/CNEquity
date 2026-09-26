@@ -231,23 +231,33 @@ def parse_options(body: bytes, trade_date: date) -> pl.DataFrame:
                 "series_implied_vol": None,
             }
         )
-    return (
-        pl.DataFrame(drop_placeholders(rows), infer_schema_length=None) if rows else pl.DataFrame()
-    )
+    # The option expiry file can publish a zero-settlement row with no trades
+    # or remaining position. It is still an exchange observation (and can
+    # carry the day's closing position change or exercises).
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
-def fetch_czce_day(trade_date: date, *, config=None) -> ExchangeDay:
+def fetch_czce_day(trade_date: date, *, config=None, kind: str | None = None) -> ExchangeDay:
     if trade_date < FIRST_SESSION:
         raise FuturesDayUnavailable(f"CZCE files start {FIRST_SESSION.isoformat()}")
     template = FUTURES_URL if trade_date >= DFS_SINCE else ARCHIVE_URL
-    futures = parse_futures(
-        fetch_bytes(_urls(template, trade_date), config=config, follow_redirects=True),
-        trade_date,
-    )
+    futures = pl.DataFrame()
+    if kind != "options":
+        futures = parse_futures(
+            fetch_bytes(
+                _urls(template, trade_date), config=config, as_of=trade_date, follow_redirects=True
+            ),
+            trade_date,
+        )
     options = pl.DataFrame()
-    if trade_date >= FIRST_OPTION_SESSION:
+    if kind != "futures" and trade_date >= FIRST_OPTION_SESSION:
         options = parse_options(
-            fetch_bytes(_urls(OPTIONS_URL, trade_date), config=config, follow_redirects=True),
+            fetch_bytes(
+                _urls(OPTIONS_URL, trade_date),
+                config=config,
+                as_of=trade_date,
+                follow_redirects=True,
+            ),
             trade_date,
         )
     return ExchangeDay(EXCHANGE, trade_date, futures=futures, options=options)
@@ -291,14 +301,16 @@ def parse_reference(body: bytes, trade_date: date, *, kind: str) -> pl.DataFrame
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 
 
-def fetch_czce_reference(trade_date: date, *, config=None) -> pl.DataFrame:
+def fetch_czce_reference(trade_date: date, *, config=None, kind: str | None = None) -> pl.DataFrame:
     frames = []
-    for template, kind in (
+    for template, reference_kind in (
         (FUTURES_REFERENCE_URL, "future"),
         (OPTIONS_REFERENCE_URL, "option"),
     ):
+        if kind is not None and reference_kind != kind:
+            continue
         body = fetch_bytes(_urls(template, trade_date), config=config, follow_redirects=True)
-        frame = parse_reference(body, trade_date, kind=kind)
+        frame = parse_reference(body, trade_date, kind=reference_kind)
         if not frame.is_empty():
             frames.append(frame)
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()

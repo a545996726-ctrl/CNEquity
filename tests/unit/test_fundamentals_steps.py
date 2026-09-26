@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import httpx
 import polars as pl
 import pytest
 
@@ -56,7 +57,7 @@ def test_financial_statement_items_backfill_surfaces_missing_periods(cfg, monkey
 def test_financial_statement_items_writes_staging(cfg, monkeypatch):
     seen = {}
 
-    def fake_fetch(trade_date, backfill=False, config=None, run_id=None):
+    def fake_fetch(trade_date, backfill=False, config=None, run_id=None, **kwargs):
         seen["backfill"] = backfill
         return pl.DataFrame(
             {
@@ -80,6 +81,46 @@ def test_financial_statement_items_writes_staging(cfg, monkeypatch):
     files = list(cfg.staging_root.glob("financial_statement_items/**/*.parquet"))
     assert files
     assert pl.read_parquet(files[0])["source"].unique().to_list() == ["eastmoney_backfill"]
+
+
+def test_financial_report_failure_keeps_valid_unit_for_same_run_retry(cfg, monkeypatch):
+    cfg._backfill = True
+    cfg._backfill_start = date(2024, 1, 1)
+    cfg._backfill_end = date(2024, 3, 31)
+    unit = "2024-03-31|RPT_LICO_FN_CPD"
+    calls = []
+
+    def fake_fetch(_day, *, on_unit, skip_units, failures, **_kwargs):
+        calls.append(set(skip_units))
+        if unit not in skip_units:
+            on_unit(
+                unit,
+                "backfill:2024-03-31:RPT_LICO_FN_CPD",
+                [
+                    {
+                        "symbol": "600519.SH",
+                        "report_period": "2024Q1",
+                        "statement_type": "income",
+                        "item_code": "revenue",
+                        "item_value": 1.0,
+                        "announce_date": date(2024, 4, 20),
+                    }
+                ],
+            )
+        failures.append(("2024-03-31|RPT_DMSK_FN_BALANCE", "temporary failure"))
+        return pl.DataFrame()
+
+    monkeypatch.setattr(fund, "fetch_financial_statement_items", fake_fetch)
+    first = fund.step_financial_statement_items(cfg, date(2024, 6, 28), "run-retry", {})
+    assert first["status"] == "degraded"
+    assert first["batch_settled"] is True
+    assert first["rows_written"] == 1
+    assert len(list(cfg.staging_root.glob("financial_statement_items/**/*.parquet"))) == 1
+
+    second = fund.step_financial_statement_items(cfg, date(2024, 6, 28), "run-retry", {})
+    assert calls == [set(), {unit}]
+    assert second["rows_written"] == 1
+    assert len(list(cfg.staging_root.glob("financial_statement_items/**/*.parquet"))) == 1
 
 
 def test_financial_statement_items_backfill_surfaces_partial_report_families(cfg, monkeypatch):
@@ -466,3 +507,251 @@ def test_shareholder_backfill_rows_are_marked_reconstructed(cfg, monkeypatch):
 
     assert result["rows_written"] == 1
     assert seen == ["eastmoney_backfill"]
+
+
+def test_share_structure_later_window_failure_keeps_earlier_valid_year(cfg, monkeypatch):
+    from cnequity.storage.state import StateStore
+
+    cfg._backfill = True
+    cfg._backfill_start = date(2023, 1, 1)
+    cfg._backfill_end = date(2024, 12, 31)
+
+    def fetch(start, end, **_kwargs):
+        if start.year == 2024:
+            raise fund.EastMoneyDatacenterError("source unavailable")
+        return pl.DataFrame({"change_date": [start], "symbol": ["600519.SH"]})
+
+    def write(config, run_id, dataset, frame, *, batch_id, **_kwargs):
+        path = config.staging_root / dataset / f"run_id={run_id}" / f"part-{batch_id}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(path)
+        return {"rows_read": frame.height, "rows_written": frame.height}
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.shareholders.fetch_share_structure", fetch)
+    monkeypatch.setattr(fund, "write_fetched", write)
+    result = fund.step_share_structure(cfg, date(2024, 12, 31), "run-years", {})
+    assert result["status"] == "degraded"
+    assert result["batch_settled"] is True
+    assert result["rows_written"] == 1
+    assert result["missing_units"] == 1
+    assert StateStore(cfg.meta_root).get_payload("share_structure")["missing_units"]
+
+
+def test_shareholder_programming_error_is_not_a_retryable_source_gap(cfg):
+    from cnequity.storage.state import StateStore
+
+    def fetch(_start, _end, **_kwargs):
+        raise TypeError("invalid adapter argument")
+
+    with pytest.raises(TypeError, match="invalid adapter argument"):
+        fund._run_shareholder_step(
+            cfg,
+            date(2024, 12, 31),
+            "run-invalid-adapter",
+            "share_structure",
+            fetch,
+            daily_by="notice_date",
+            daily_lookback_days=30,
+        )
+    assert not StateStore(cfg.meta_root).get_payload("share_structure").get("missing_units")
+
+
+def test_top_holders_quarter_slices_resume_without_reasking_completed_windows(cfg, monkeypatch):
+    cfg._backfill = True
+    cfg._backfill_start = date(2024, 1, 1)
+    cfg._backfill_end = date(2024, 12, 31)
+    calls = []
+
+    def fetch(start, end, **_kwargs):
+        calls.append((start, end))
+        return pl.DataFrame({"record_date": [start], "symbol": ["600519.SH"]})
+
+    def write(config, run_id, dataset, frame, *, batch_id, **_kwargs):
+        path = config.staging_root / dataset / f"run_id={run_id}" / f"part-{batch_id}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(path)
+        return {"rows_read": frame.height, "rows_written": frame.height}
+
+    monkeypatch.setattr(fund, "write_fetched", write)
+    first = fund._run_shareholder_step(
+        cfg,
+        date(2024, 12, 31),
+        "run-quarter",
+        "top_holders",
+        fetch,
+        daily_by="record_date",
+        daily_lookback_days=240,
+    )
+    second = fund._run_shareholder_step(
+        cfg,
+        date(2024, 12, 31),
+        "run-quarter",
+        "top_holders",
+        fetch,
+        daily_by="record_date",
+        daily_lookback_days=240,
+    )
+    assert len(calls) == 4
+    assert first["rows_written"] == second["rows_written"] == 4
+
+
+def test_top_holders_failure_keeps_complete_windows_and_retries_only_missing(cfg, monkeypatch):
+    from cnequity.storage.state import StateStore
+
+    cfg._backfill = True
+    cfg._backfill_start = date(2024, 1, 1)
+    cfg._backfill_end = date(2024, 12, 31)
+    calls = []
+    fail_once = {"value": True}
+
+    def fetch(start, end, **_kwargs):
+        calls.append((start, end))
+        if start.month == 7 and fail_once["value"]:
+            fail_once["value"] = False
+            raise fund.EastMoneyDatacenterError("page 30 timed out")
+        return pl.DataFrame({"record_date": [start], "symbol": ["600519.SH"]})
+
+    def write(config, run_id, dataset, frame, *, batch_id, **_kwargs):
+        path = config.staging_root / dataset / f"run_id={run_id}" / f"part-{batch_id}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(path)
+        return {"rows_read": frame.height, "rows_written": frame.height}
+
+    monkeypatch.setattr(fund, "write_fetched", write)
+    args = (
+        cfg,
+        date(2024, 12, 31),
+        "run-windows",
+        "top_holders",
+        fetch,
+    )
+    kwargs = {"daily_by": "record_date", "daily_lookback_days": 240}
+    first = fund._run_shareholder_step(*args, **kwargs)
+    assert first["status"] == "degraded"
+    assert first["batch_settled"] is True
+    assert first["rows_written"] == 2
+    assert first["missing_units"] == 2
+    assert [start.month for start, _ in calls] == [1, 4, 7]
+
+    second = fund._run_shareholder_step(*args, **kwargs)
+    assert second["rows_written"] == 4
+    assert "missing_units" not in second
+    assert [start.month for start, _ in calls[3:]] == [7, 10]
+    state = StateStore(cfg.meta_root)
+    state.commit_staged_units("top_holders", "run-windows")
+    assert not state.get_payload("top_holders").get("missing_units")
+
+
+def test_top_holders_partial_page_rows_publish_without_claiming_window_complete(cfg, monkeypatch):
+    cfg._backfill = True
+    cfg._backfill_start = date(2024, 1, 1)
+    cfg._backfill_end = date(2024, 3, 31)
+    calls = []
+
+    def fetch(start, end, **kwargs):
+        calls.append((start, end))
+        if len(calls) == 1:
+            progress = kwargs["progress"]
+            progress.failed_report = "RPT_F10_EH_FREEHOLDERS"
+            progress.failure = "page 2 timed out"
+        return pl.DataFrame({"record_date": [start], "symbol": ["600519.SH"]})
+
+    def write(config, run_id, dataset, frame, *, batch_id, **_kwargs):
+        path = config.staging_root / dataset / f"run_id={run_id}" / f"part-{batch_id}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(path)
+        return {"rows_read": frame.height, "rows_written": frame.height}
+
+    monkeypatch.setattr(fund, "write_fetched", write)
+    args = (cfg, date(2024, 3, 31), "run-page-partial", "top_holders", fetch)
+    kwargs = {"daily_by": "record_date", "daily_lookback_days": 240}
+    first = fund._run_shareholder_step(*args, **kwargs)
+    assert first["status"] == "degraded"
+    assert first["batch_settled"] is True
+    assert first["rows_written"] == 1
+    files = list((cfg.staging_root / "top_holders").rglob("*.parquet"))
+    assert len(files) == 1 and files[0].name.startswith("part-partial-window-")
+
+    second = fund._run_shareholder_step(*args, **kwargs)
+    assert len(calls) == 2
+    assert second["rows_written"] == 1
+    files = list((cfg.staging_root / "top_holders").rglob("*.parquet"))
+    assert len(files) == 2
+    assert any(path.name.startswith("part-window-") for path in files)
+
+
+def test_top_holders_real_archive_partial_page_reaches_curated_with_gap(tmp_path, monkeypatch):
+    from cnequity.adapters.eastmoney import shareholders as sh
+    from cnequity.query.reader import load
+    from cnequity.steps.finalize import step_compact
+    from cnequity.storage.state import StateStore
+
+    config = Config(data_root=tmp_path / "isolated-lake", raw_archive_enabled=True)
+    config._backfill = True
+    config._backfill_start = date(2024, 1, 1)
+    config._backfill_end = date(2024, 3, 31)
+    row = {
+        "SECUCODE": "600519.SH",
+        "END_DATE": "2024-03-31",
+        "HOLDER_NAME": "holder A",
+        "HOLD_NUM": 100,
+        "FREE_HOLDNUM_RATIO": 1.0,
+        "HOLDER_RANK": 1,
+        "IS_HOLDORG": "0",
+        "NOTICE_DATE": "2024-04-30",
+    }
+
+    class PageThenTimeout:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+            self.config = kwargs.get("config")
+
+        def get(self, url):
+            self.calls += 1
+            if self.calls > 1:
+                raise httpx.ReadTimeout("page 2 timed out")
+            return httpx.Response(
+                200,
+                json={"success": True, "result": {"pages": 2, "count": 501, "data": [row] * 500}},
+                request=httpx.Request("GET", url),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(sh, "EastMoneyClient", PageThenTimeout)
+    monkeypatch.setattr(sh, "_SWEEP_RETRIES", 1)
+    result = fund.step_top_holders(config, date(2024, 3, 31), "partial-wire", {})
+    assert result["status"] == "degraded"
+    assert result["batch_settled"] is True
+    assert result["rows_written"] == 1
+    assert StateStore(config.meta_root).get_payload("top_holders")["missing_units"]
+
+    step_compact(config, date(2024, 3, 31), "partial-wire", {})
+    published = load("top_holders", config=config, as_of=date(2024, 5, 1), pit_mode="best_effort")
+    assert published.height == 1
+    assert published["holder_scope"].to_list() == ["float"]
+    assert StateStore(config.meta_root).get_payload("top_holders")["missing_units"]
+
+    class CompleteWindow:
+        def __init__(self, *args, **kwargs):
+            self.config = kwargs.get("config")
+
+        def get(self, url):
+            complete = dict(row, HOLD_NUM_RATIO=2.0)
+            return httpx.Response(
+                200,
+                json={"success": True, "result": {"pages": 1, "count": 1, "data": [complete]}},
+                request=httpx.Request("GET", url),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(sh, "EastMoneyClient", CompleteWindow)
+    repaired = fund.step_top_holders(config, date(2024, 3, 31), "partial-wire", {})
+    assert repaired["rows_written"] == 2
+    step_compact(config, date(2024, 3, 31), "partial-wire", {})
+    published = load("top_holders", config=config, as_of=date(2024, 5, 1), pit_mode="best_effort")
+    assert set(published["holder_scope"].to_list()) == {"float", "total"}
+    assert not StateStore(config.meta_root).get_payload("top_holders").get("missing_units")

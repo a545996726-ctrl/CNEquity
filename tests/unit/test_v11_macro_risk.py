@@ -79,7 +79,9 @@ def _no_social_financing(monkeypatch):
     """Keep tests hermetic — 社融 is a live MOFCOM call."""
     from cnequity.adapters.macro import indicators as macro_indicators
 
-    monkeypatch.setattr(macro_indicators, "_social_financing_rows", lambda _td, config=None: [])
+    monkeypatch.setattr(
+        macro_indicators, "_social_financing_rows", lambda _td, config=None, **_kwargs: []
+    )
 
 
 def test_macro_indicators_parses_treasury_and_shibor(monkeypatch):
@@ -220,7 +222,7 @@ def test_a_rate_not_yet_published_on_the_run_day_does_not_hold_the_run(monkeypat
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
-        lambda d, config=None: pl.DataFrame(
+        lambda d, config=None, **kwargs: pl.DataFrame(
             {
                 "indicator_id": ["shibor_3m"],
                 "obs_date": [d],
@@ -351,7 +353,7 @@ def test_social_financing_comes_from_pboc(monkeypatch):
     monkeypatch.setattr(
         macro_indicators,
         "_social_financing_rows",
-        lambda td, config=None: [
+        lambda td, config=None, **_kwargs: [
             {
                 "indicator_id": "social_financing",
                 "obs_date": date(2024, 5, 31),
@@ -370,13 +372,34 @@ def test_social_financing_comes_from_pboc(monkeypatch):
     assert row["source"][0] == "pboc"
 
 
+def test_macro_adapter_preserves_other_series_when_pboc_fails(monkeypatch):
+    from cnequity.adapters.macro import indicators
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("2023 workbook unavailable")
+
+    monkeypatch.setattr(indicators, "_social_financing_rows", fail)
+    failures = []
+    completed = set()
+    frame = indicators.fetch_macro_indicators(
+        date(2024, 6, 28),
+        client=FakeDatacenterClient(_EM_MONTHLY_BATCHES),  # type: ignore[arg-type]
+        failures=failures,
+        completed_units=completed,
+    )
+
+    assert not frame.is_empty()
+    assert failures == [("pboc:social_financing", "2023 workbook unavailable")]
+    assert "eastmoney:pmi_manufacturing" in completed
+
+
 def test_canonical_social_financing_fetch_is_strict(monkeypatch):
     from cnequity.adapters.macro import indicators as macro_indicators
     from cnequity.adapters.pboc import social_financing
 
     seen: dict[str, bool] = {}
 
-    def _fail(*, config=None, start_year=2015, strict=False):
+    def _fail(*, config=None, start_year=2015, strict=False, **_kwargs):
         seen["strict"] = strict
         raise RuntimeError("partial PBOC series")
 
@@ -384,6 +407,63 @@ def test_canonical_social_financing_fetch_is_strict(monkeypatch):
     with pytest.raises(RuntimeError, match="partial PBOC series"):
         macro_indicators._social_financing_rows(date(2024, 6, 28))
     assert seen == {"strict": True}
+
+
+def test_pboc_year_failure_retains_other_year_rows_and_records_specific_gap(monkeypatch):
+    from cnequity.adapters.macro import indicators
+    from cnequity.adapters.pboc import social_financing
+
+    def partial(*, failures_by_year, completed_years, **_kwargs):
+        failures_by_year[2025] = "workbook timeout"
+        completed_years.add(2026)
+        return [{"obs_date": date(2026, 1, 31), "value": 100.0}]
+
+    monkeypatch.setattr(social_financing, "fetch_social_financing", partial)
+    failures = []
+    completed = set()
+    rows = indicators._social_financing_rows(
+        date(2026, 9, 27), failures=failures, completed_units=completed
+    )
+    assert len(rows) == 1 and rows[0]["value"] == 100.0
+    assert failures == [("pboc:social_financing:2025", "workbook timeout")]
+    assert "pboc:social_financing:2026" in completed
+    assert "pboc:social_financing" not in completed
+
+
+def test_pboc_failure_keeps_eastmoney_rows_and_a_durable_unit_gap(tmp_path, monkeypatch):
+    from cnequity.steps import macro_risk
+    from cnequity.steps.finalize import step_compact
+    from cnequity.storage.state import StateStore
+
+    cfg = Config(data_root=tmp_path / "data", raw_archive_enabled=False)
+    day = date(2024, 6, 28)
+    monkeypatch.setattr(macro_risk, "_recent_daily_rates", lambda *a, **k: (pl.DataFrame(), {}))
+
+    def partial(day, *, config=None, failures=None, completed_units=None):
+        failures.append(("pboc:social_financing", "2023 workbook unavailable"))
+        completed_units.add("eastmoney:shibor_3m")
+        return pl.DataFrame(
+            {
+                "indicator_id": ["shibor_3m"],
+                "obs_date": [day],
+                "value": [1.9],
+                "frequency": ["daily"],
+                "source": ["eastmoney"],
+            }
+        )
+
+    monkeypatch.setattr(macro_risk, "fetch_macro_indicators", partial)
+    result = macro_risk.step_macro_indicators(cfg, day, "macro-partial", {})
+    assert result["status"] == "degraded"
+    assert result["batch_settled"] is True
+    state = StateStore(cfg.meta_root)
+    assert "pboc:social_financing" in state.get_payload("macro_indicators")["missing_units"]
+    assert list((cfg.staging_root / "macro_indicators").rglob("*.parquet"))
+
+    step_compact(cfg, day, "macro-partial", {})
+    payload = state.get_payload("macro_indicators")
+    assert payload["coverage_status"] == "incomplete"
+    assert "pboc:social_financing" in payload["missing_units"]
 
 
 @pytest.mark.parametrize("enabled", [False])

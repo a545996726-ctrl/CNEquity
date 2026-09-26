@@ -173,3 +173,43 @@ def test_rewriting_an_earlier_window_keeps_the_watermark(tmp_path):
     summary = derive_option_greeks(config, start=date(2026, 9, 23), end=date(2026, 9, 23))
     assert summary["sessions"] == 1
     assert StateStore(config.meta_root).get_date("option_greeks") == DAY
+
+
+def test_contracts_rates_and_model_changes_invalidate_even_with_preserved_mtime(
+    tmp_path, monkeypatch
+):
+    from cnequity.derive import option_greeks as module
+
+    cfg = _lake(tmp_path)
+    derive_option_greeks(cfg)
+    contract = next((cfg.curated_root / "option_contracts").glob("*.parquet"))
+    before = contract.stat()
+    pl.read_parquet(contract).with_columns(pl.lit(DAY).alias("expiry_date")).write_parquet(contract)
+    os.utime(contract, (before.st_atime, before.st_mtime))
+    assert stale_sessions(cfg) == [date(2026, 9, 23), DAY]
+    derive_option_greeks(cfg, start=DAY, end=DAY)
+    assert stale_sessions(cfg) == [date(2026, 9, 23)]
+    derive_option_greeks(cfg)
+    rates = cfg.curated_root / "macro_indicators"
+    rates.mkdir()
+    pl.DataFrame({"indicator_id": ["shibor_3m"], "obs_date": [DAY], "value": [1.5]}).write_parquet(
+        rates / "rates.parquet"
+    )
+    assert stale_sessions(cfg) == [date(2026, 9, 23), DAY]
+    derive_option_greeks(cfg)
+    original = module._dependency_identity
+    monkeypatch.setattr(
+        module, "_dependency_identity", lambda config: {**original(config), "model": "changed"}
+    )
+    assert stale_sessions(cfg) == [date(2026, 9, 23), DAY]
+
+
+def test_unknown_style_and_observed_expiry_never_produce_priced_greeks():
+    options = _options([["M2612C3100.DCE", DAY, "DCE", "M2612.DCE", "C", 3100.0, 50.0]])
+    futures = pl.DataFrame({"symbol": ["M2612.DCE"], "trade_date": [DAY], "settle": [3000.0]})
+    contracts = _contracts(["M2612C3100.DCE"], "unknown")
+    result = compute_option_greeks(options, contracts=contracts, futures=futures)
+    assert result["status"].item() == "no_exercise_style"
+    contracts = contracts.with_columns(pl.lit("observed").alias("dates_basis"))
+    result = compute_option_greeks(options, contracts=contracts, futures=futures)
+    assert result["status"].item() == "no_expiry"

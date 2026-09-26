@@ -162,11 +162,11 @@ def _sse_payload(rows, *, day=20260828, time=162906):
     return {"date": day, "time": time, "list": rows}
 
 
-# code, open, high, low, last, volume, amount — the order `SSE_SELECT` asks for.
+# code, name, open, high, low, last, volume, amount — shared status/quote request.
 _SSE_ROWS = [
-    ["600000", 9.01, 9.04, 8.95, 9.00, 58786810, 528817735],
-    ["688267", 18.23, 19.56, 18.23, 19.26, 2852200, 54524888],
-    ["900902", 0.5, 0.5, 0.5, 0.5, 1000, 500],
+    ["600000", "浦发银行", 9.01, 9.04, 8.95, 9.00, 58786810, 528817735],
+    ["688267", "中触媒", 18.23, 19.56, 18.23, 19.26, 2852200, 54524888],
+    ["900902", "市北B股", 0.5, 0.5, 0.5, 0.5, 1000, 500],
 ]
 
 

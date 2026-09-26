@@ -23,6 +23,7 @@ from datetime import date
 
 import polars as pl
 
+from cnequity.adapters.bse.daily_quotes import BseMarketDataError
 from cnequity.adapters.bse.trading_status import board_names
 
 
@@ -33,7 +34,9 @@ def fetch_bse_instruments(trade_date: date, *, client=None, config=None) -> pl.D
     they stay null and the compact's sticky coalesce keeps whatever an earlier
     source established.
     """
-    listed, _complete = board_names(trade_date, client=client, config=config)
+    listed, complete = board_names(trade_date, client=client, config=config)
+    if listed and not complete:
+        raise BseMarketDataError("BSE instrument board is incomplete; cannot publish roster")
     symbols = sorted(listed)
     return pl.DataFrame(
         {

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from types import SimpleNamespace
 
+import httpx
 import pandas as pd
 import polars as pl
 import pytest
 
 from cnequity.adapters.sw import industry_history as sw
+from cnequity.config import Config
 
 
 def test_exchange_and_code_to_symbol():
@@ -69,6 +73,44 @@ def test_fetch_sw_industry_intervals(monkeypatch):
         sw.fetch_sw_industry_intervals(
             client=SimpleNamespace(get=lambda *a, **k: Resp(), close=lambda: None)
         )
+
+
+def test_sw_history_reuses_valid_bytes_and_refreshes_damaged_cache(tmp_path, monkeypatch):
+    config = Config(data_root=tmp_path / "lake", source_intervals={"sw": 0})
+    calls = []
+
+    class Session:
+        def get(self, url, **_kwargs):
+            calls.append(url)
+            return httpx.Response(200, content=b"xls-bytes", request=httpx.Request("GET", url))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sw, "sw_client", Session)
+    monkeypatch.setattr(
+        pd,
+        "read_excel",
+        lambda *_a, **_k: pd.DataFrame(
+            [{"股票代码": "600519", "计入日期": "2021-01-01", "行业代码": "801780"}]
+        ),
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: sw.fetch_sw_industry_intervals(config=config), range(2)))
+    assert [frame.height for frame in results] == [1, 1]
+    assert len(calls) == 1
+
+    from cnequity.domain.rate_limit import _read_json
+
+    assert _read_json(config.rate_limit_root / "reuse-sw.json")["hits"] == 1
+    path = next((config.meta_root / "source_cache" / "sw").glob("*.json"))
+    # The hash protects the source bytes; a corrupt cache must trigger one
+    # fresh download rather than serving a manufactured classification.
+    item = json.loads(path.read_text())
+    item["sha256"] = "0" * 64
+    path.write_text(json.dumps(item))
+    assert sw.fetch_sw_industry_intervals(config=config).height == 1
+    assert len(calls) == 2
 
 
 def test_expand_sw_industry_as_of():

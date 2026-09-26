@@ -111,6 +111,38 @@ def evaluate_publication(
                 candidate_errors=candidate_errors,
                 new_errors=introduced,
             )
+            blocked_datasets: set[str] = set()
+            if mode == "block" and introduced:
+                # Attribute a new finding by removing each candidate in turn.
+                # This also catches cross-dataset checks: if either side's
+                # removal resolves the finding, both sides are held together.
+                full_counts = Counter(_identity(item) for item in candidate_errors)
+                for name, source in candidates.items():
+                    layer = (
+                        view.derived_root
+                        if DATASETS[name].layer == "derived"
+                        else view.curated_root
+                    )
+                    target = layer / name
+                    shutil.rmtree(target)
+                    original = read_root(config, name)
+                    if original.is_dir():
+                        shutil.copytree(original, target, copy_function=_link_read_only)
+                    try:
+                        without = Counter(_identity(item) for item in _errors(view, day))
+                    finally:
+                        if target.exists():
+                            shutil.rmtree(target)
+                        shutil.copytree(source, target, copy_function=_link_read_only)
+                    if any(
+                        without[_identity(item)] < full_counts[_identity(item)]
+                        for item in introduced
+                    ):
+                        blocked_datasets.add(name)
+                if not blocked_datasets:
+                    # A check with no attributable input is unsafe to publish.
+                    blocked_datasets.update(candidates)
+            report["blocked_datasets"] = sorted(blocked_datasets)
     except Exception as exc:
         # In block mode an audit that could not inspect the candidate is not a
         # successful publication check. Preserve the reason for a safe retry.
@@ -122,7 +154,8 @@ def evaluate_publication(
                 "message": str(exc),
             }
         ]
-    report["blocked"] = mode == "block" and bool(report["new_errors"])
+        report["blocked_datasets"] = sorted(candidates) if mode == "block" else []
+    report["blocked"] = bool(report.get("blocked_datasets"))
     path = config.meta_root / "quality" / "publication" / f"{run_id}.json"
     write_json_atomic(path, report, indent=2, default=str)
     report["report_path"] = str(path)

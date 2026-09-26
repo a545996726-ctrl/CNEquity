@@ -26,6 +26,7 @@ import math
 import re
 from datetime import date
 
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ def _get(url: str, *, config=None) -> str:
     # NBS slot, while another worker can proceed once that call returns.
     with source_request(config, "nbs"):
         resp = cr.get(url, impersonate="chrome", timeout=_TIMEOUT_SECONDS)
+        record_http_response(config, "nbs", resp)
     resp.raise_for_status()
     resp.encoding = "utf-8"
     return resp.text

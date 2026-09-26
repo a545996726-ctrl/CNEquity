@@ -239,3 +239,13 @@ def test_revision_store_rejects_user_meta_symlink_but_allows_macos_var_alias(tmp
         assert store.meta_root == alias_root / "meta"
     finally:
         shutil.rmtree(alias_root, ignore_errors=True)
+
+
+def test_revision_queries_do_not_initialize_an_empty_lake(tmp_path):
+    from cnequity.storage.revisions import committed_revision, resolve_committed_root
+
+    lake = tmp_path / "absent_lake"
+    logical = lake / "curated" / "futures_bars"
+    assert resolve_committed_root(logical) == logical
+    assert committed_revision(logical) is None
+    assert not lake.exists()

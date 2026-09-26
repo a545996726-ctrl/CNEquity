@@ -1,16 +1,9 @@
-"""Futures and option datasets from the exchanges' own daily files (ADR-0013).
+"""Independent exchange/day/kind capture with validated receipts and debt.
 
-Several exchanges feed one dataset, and they are independent failure domains.
-A session is therefore written with whichever exchanges published it; each one
-that did not becomes an audit finding, and the three-session reconciliation
-tail comes back for it on the next runs. Only a session none of them answered
-fails the step — that is an outage, not a straggler.
-
-Backfill walks one session at a time (``walk_day_backfill``): every file is
-one day, and a range fetch would meet the run-day date guard in
-``fetch_incremental_daily``. A session counts as done only when every exchange
-that was trading that day has rows for it, so a rerun fills the exchange that
-failed instead of skipping the whole date.
+Partial exchanges publish with degraded findings. Downloaded content is not a
+completion claim until the receipt matches committed rows. Old failures remain
+in durable debt beyond the three-session reconciliation tail. Contract builders
+consume their own run's validated staging plus canonical bars (ADR-0017).
 """
 
 from __future__ import annotations
@@ -70,7 +63,7 @@ def _missing_finding(dataset: str, day: date, exchange: str, error: str, severit
         "check": "futures_exchange_missing",
         "message": (
             f"{dataset}: {exchange} did not publish {day.isoformat()} ({error}); the other "
-            "exchanges were written and the reconciliation tail retries this one"
+            "exchanges were written and the persistent debt ledger retries this one"
         ),
         "exchange": exchange,
         "trade_date": day.isoformat(),
@@ -78,7 +71,7 @@ def _missing_finding(dataset: str, day: date, exchange: str, error: str, severit
 
 
 def _quarantine(
-    frame: pl.DataFrame, dataset: str, exchange: str, day: date, findings: list[dict]
+    frame: pl.DataFrame, dataset: str, exchange: str, day: date, findings: list[dict], config=None
 ) -> pl.DataFrame:
     """Drop rows that cannot be true, keep the rest of the exchange's session.
 
@@ -92,6 +85,18 @@ def _quarantine(
     bad = frame.filter(predicate)
     if bad.is_empty():
         return frame
+    if config is not None:
+        from cnequity.storage.atomic import write_parquet_atomic
+
+        write_parquet_atomic(
+            config.meta_root
+            / "derivatives"
+            / "quarantine"
+            / dataset
+            / day.isoformat()
+            / f"{exchange}.parquet",
+            bad,
+        )
     findings.append(
         {
             "dataset": dataset,
@@ -126,13 +131,35 @@ def fetch_session(
     raise_when_empty: bool = True,
 ) -> pl.DataFrame:
     """Every expected exchange's *kind* rows for *day*, tolerating stragglers."""
+    from cnequity.domain.schemas import validate_dataframe, with_provenance
+    from cnequity.storage.derivative_evidence import record_session
+
     dataset = _BARS_DATASET[kind]
     exchanges = expected_exchanges(config, kind, day)
     frames: list[pl.DataFrame] = []
     failures: list[tuple[str, str]] = []
     for exchange in exchanges:
+        # A captured Sina historical session is reused by routine reconciliation.
+        # Explicit --refresh is the correction path; zero-trade coverage is
+        # still unverified and never promoted to a market completeness proof.
+        if (
+            exchange == "DCE"
+            and config.futures_dce_route == "sina"
+            and not getattr(config, "_derivatives_refresh", False)
+        ):
+            from cnequity.domain.market_time import shanghai_today
+            from cnequity.storage.derivative_evidence import session_matches
+
+            old = _scan_bars(config, dataset) if day < shanghai_today() else None
+            if old is not None:
+                captured = old.filter(
+                    (pl.col("trade_date") == day) & (pl.col("exchange") == "DCE")
+                ).collect()
+                if session_matches(config, dataset, day, exchange, captured):
+                    frames.append(captured)
+                    continue
         try:
-            result = reader(config, exchange).fetch_day(day, config=config)
+            result = reader(config, exchange).fetch(day, kind=kind, config=config)
         except FuturesSourceBlocked as exc:
             failures.append((exchange, f"blocked: {exc}"))
             continue
@@ -146,8 +173,25 @@ def fetch_session(
         if frame.is_empty():
             failures.append((exchange, "file listed no contracts of this kind"))
             continue
-        frames.append(_quarantine(frame, dataset, exchange, day, findings))
+        accepted = _quarantine(frame, dataset, exchange, day, findings, config)
+        if accepted.is_empty():
+            failures.append((exchange, "all rows rejected"))
+            continue
+        accepted = validate_dataframe(
+            with_provenance(accepted, source=SOURCE, data_version="v1"), dataset
+        )
+        record_session(
+            config,
+            dataset,
+            day,
+            exchange,
+            accepted,
+            error="rows quarantined" if accepted.height != frame.height else None,
+            original_rows=frame.height,
+        )
+        frames.append(accepted)
     for exchange, error in failures:
+        record_session(config, dataset, day, exchange, None, error=error)
         logger.warning("%s: %s %s — %s", dataset, exchange, day.isoformat(), error)
         findings.append(
             _missing_finding(dataset, day, exchange, error, "warning" if frames else "error")
@@ -170,18 +214,38 @@ def fetch_session(
 
 def _completed_sessions(config: Config, kind: Kind, days: list[date]) -> set[date]:
     """Sessions where every exchange expected that day already has rows."""
-    root = config.curated_root / _BARS_DATASET[kind]
+    from cnequity.storage.read_context import read_root
+
+    root = read_root(config, _BARS_DATASET[kind])
     files = list(root.glob("**/*.parquet")) if root.exists() else []
     if not files:
         return set()
+    from cnequity.query.canonical import dedupe_lazy_by_primary_key
     from cnequity.query.parquet_scan import scan_parquet_files
+    from cnequity.storage.derivative_evidence import session_matches
 
-    publisher = {member: key for key in READERS for member in members(key)}
-    present: dict[date, set[str]] = {}
-    pairs = scan_parquet_files(files).select("trade_date", "exchange").unique().collect()
-    for trade_date, exchange in pairs.iter_rows():
-        present.setdefault(trade_date, set()).add(publisher.get(exchange, exchange))
-    return {d for d in days if set(expected_exchanges(config, kind, d)) <= present.get(d, set())}
+    if getattr(config, "_derivatives_refresh", False):
+        return set()
+    frame = dedupe_lazy_by_primary_key(
+        scan_parquet_files(files).filter(pl.col("trade_date").is_in(days)), _BARS_DATASET[kind]
+    ).collect()
+    return {
+        day
+        for day in days
+        if all(
+            session_matches(
+                config,
+                _BARS_DATASET[kind],
+                day,
+                exchange,
+                frame.filter(
+                    (pl.col("trade_date") == day)
+                    & pl.col("exchange").is_in(list(members(exchange)))
+                ),
+            )
+            for exchange in expected_exchanges(config, kind, day)
+        )
+    }
 
 
 def _disabled(dataset: str) -> dict:
@@ -207,6 +271,12 @@ def _run_bars(config: Config, trade_date: date, run_id: str, kind: Kind) -> dict
     dataset = _BARS_DATASET[kind]
     if not is_dataset_enabled(dataset, config):
         return _disabled(dataset)
+    if getattr(config, "_derivative_http_run", None) != getattr(
+        config, "_derivative_batch", run_id
+    ):
+        config._derivative_http_run = getattr(config, "_derivative_batch", run_id)
+        config._derivative_refreshed_requests = set()
+        config._derivative_blocked_hosts = set()
     findings: list[dict] = []
     if getattr(config, "_backfill", False):
         floor = earliest_session(config, kind)
@@ -226,6 +296,16 @@ def _run_bars(config: Config, trade_date: date, run_id: str, kind: Kind) -> dict
             existing_dates_fn=lambda days: _completed_sessions(config, kind, days),
         )
         return _with_findings(result, findings)
+    from cnequity.storage.derivative_evidence import owed_sessions
+
+    recovered = 0
+    for owed in owed_sessions(config, dataset, trade_date)[:3]:
+        frame = fetch_session(config, owed, kind, findings=findings, raise_when_empty=False)
+        if not frame.is_empty():
+            recovery = write_fetched(
+                config, run_id, dataset, frame, source=SOURCE, batch_id=f"owed-{owed}"
+            )
+            recovered += recovery.get("rows_written", 0)
     result = run_incremental_fetched(
         config,
         trade_date,
@@ -234,6 +314,7 @@ def _run_bars(config: Config, trade_date: date, run_id: str, kind: Kind) -> dict
         lambda d: fetch_session(config, d, kind, findings=findings),
         source=SOURCE,
     )
+    result["rows_written"] = result.get("rows_written", 0) + recovered
     return _with_findings(result, findings)
 
 
@@ -249,33 +330,70 @@ def step_option_bars(config: Config, trade_date: date, run_id: str, context: dic
     return _run_bars(config, trade_date, run_id, "options")
 
 
-def _scan_bars(config: Config, dataset: str) -> pl.LazyFrame | None:
-    root = config.curated_root / dataset
+def _scan_bars(config: Config, dataset: str, run_id: str | None = None) -> pl.LazyFrame | None:
+    from cnequity.storage.read_context import read_root
+
+    root = read_root(config, dataset)
     files = list(root.glob("**/*.parquet")) if root.exists() else []
+    if run_id is not None:
+        from cnequity.storage.parquet import StagingWriter
+
+        files.extend(StagingWriter(config.staging_root).list_run_files(dataset, run_id))
     if not files:
         return None
+    from cnequity.query.canonical import dedupe_lazy_by_primary_key
     from cnequity.query.parquet_scan import scan_parquet_files
 
-    return scan_parquet_files(files)
+    return dedupe_lazy_by_primary_key(scan_parquet_files(files), dataset)
 
 
 def _reference(config: Config, bars: pl.LazyFrame, findings: list[dict], dataset: str):
-    """Each exchange's reference file for the latest session it has bars for."""
+    """Latest references normally; explicit backfill windows replay observed sessions."""
     publisher = {member: key for key in READERS for member in members(key)}
-    latest = (
+    selected = (
         bars.with_columns(pl.col("exchange").replace_strict(publisher, default=pl.col("exchange")))
-        .group_by("exchange")
-        .agg(pl.col("trade_date").max())
-        .collect()
+        .select("exchange", "trade_date")
+        .unique()
     )
+    start = getattr(config, "_backfill_start", None)
+    end = getattr(config, "_backfill_end", None)
+    if start is not None or end is not None:
+        if start is not None:
+            selected = selected.filter(pl.col("trade_date") >= start)
+        if end is not None:
+            selected = selected.filter(pl.col("trade_date") <= end)
+    else:
+        selected = selected.group_by("exchange").agg(pl.col("trade_date").max())
+    latest = selected.collect().sort("exchange", "trade_date")
+    blocked = set()
     frames: list[pl.DataFrame] = []
     for exchange, day in latest.iter_rows():
+        if exchange in blocked or exchange not in enabled_exchanges(config):
+            continue
         known = READERS.get(exchange)
         if known is None or reader(config, exchange).fetch_reference is None:
             continue
+        active = reader(config, exchange)
+        if (start is not None or end is not None) and not active.reference_history:
+            blocked.add(exchange)
+            findings.append(
+                {
+                    "dataset": dataset,
+                    "severity": "warning",
+                    "check": "futures_reference_history_unsupported",
+                    "message": f"{exchange}: reference endpoint is a current snapshot; historical replay skipped",
+                }
+            )
+            continue
         try:
-            frame = reader(config, exchange).fetch_reference(day, config=config)
+            reference_kind = "option" if dataset == "option_contracts" else "future"
+            kwargs = {"kind": reference_kind} if active.separate_kinds else {}
+            frame = active.fetch_reference(day, config=config, **kwargs)
         except Exception as exc:  # noqa: BLE001 — observed dates still stand
+            from cnequity.adapters.futures_exchange.common import FuturesSourceBlocked
+
+            if isinstance(exc, FuturesSourceBlocked):
+                blocked.add(exchange)
             findings.append(
                 {
                     "dataset": dataset,
@@ -289,8 +407,29 @@ def _reference(config: Config, bars: pl.LazyFrame, findings: list[dict], dataset
             )
             continue
         if not frame.is_empty():
+            from cnequity.storage.atomic import write_parquet_atomic
+
+            reference_day = frame["as_of"].max() if "as_of" in frame.columns else day
+            write_parquet_atomic(
+                config.meta_root
+                / "derivatives"
+                / "references"
+                / exchange
+                / f"{reference_day}-{reference_kind}.parquet",
+                frame,
+            )
             frames.append(frame)
-    return pl.concat(frames, how="diagonal_relaxed") if frames else None
+    archived = sorted((config.meta_root / "derivatives" / "references").glob("*/*.parquet"))
+    if archived:
+        from cnequity.query.parquet_scan import scan_parquet_files
+
+        history = scan_parquet_files(archived).collect()
+        frames.insert(0, history)
+    if not frames:
+        return None
+    history = pl.concat(frames, how="diagonal_relaxed")
+    # Replaying an old file must not override a newer archived correction.
+    return history.sort("as_of", nulls_last=False) if "as_of" in history.columns else history
 
 
 def _run_contracts(config: Config, run_id: str, dataset: str) -> dict:
@@ -302,13 +441,28 @@ def _run_contracts(config: Config, run_id: str, dataset: str) -> dict:
     if not is_dataset_enabled(dataset, config):
         return _disabled(dataset)
     kind = "option" if dataset == "option_contracts" else "future"
-    bars = _scan_bars(config, "option_bars" if kind == "option" else "futures_bars")
+    bars = _scan_bars(config, "option_bars" if kind == "option" else "futures_bars", run_id)
     if bars is None:
         return {"rows_read": 0, "rows_written": 0, "note": "no bars observed yet"}
     findings: list[dict] = []
     reference = _reference(config, bars, findings, dataset)
     if reference is not None:
         reference = reference.filter(pl.col("kind") == kind)
+    # Preserve authoritative historical dates when current reference files no
+    # longer list expired contracts. Never carry forward inferred expiry dates.
+    existing = _scan_bars(config, dataset)
+    if existing is not None:
+        end_column = "expiry_date" if kind == "option" else "last_trade_date"
+        old = (
+            existing.filter(pl.col("dates_basis") == "exchange")
+            .select("symbol", "list_date", pl.col(end_column).alias("last_trade_date"))
+            .collect()
+        )
+        if not old.is_empty():
+            reference = pl.concat(
+                [old, reference.select(old.columns)] if reference is not None else [old],
+                how="diagonal_relaxed",
+            )
     build = build_option_contracts if kind == "option" else build_futures_contracts
     frame = build(bars, reference)
     if frame.is_empty():
@@ -337,19 +491,27 @@ def minute_scope(config: Config) -> list[str]:
     if products:
         bars = _scan_bars(config, "futures_bars")
         if bars is not None:
-            latest = bars.select(pl.col("trade_date").max()).collect().item()
-            day = bars.filter(pl.col("trade_date") == latest).collect()
             for product_symbol in products:
                 product, _, exchange = product_symbol.partition(".")
+                history = bars.filter(
+                    (pl.col("product") == product) & (pl.col("exchange") == exchange)
+                )
+                latest = history.select(pl.col("trade_date").max()).collect().item()
                 held = (
-                    day.filter((pl.col("product") == product) & (pl.col("exchange") == exchange))
+                    history.filter(pl.col("trade_date") == latest)
+                    .collect()
                     .sort("open_interest", descending=True)
                     .head(2)["symbol"]
                     .to_list()
                 )
                 chosen.extend(held)
     unique = list(dict.fromkeys(chosen))
-    return unique[: int(getattr(config, "futures_minute_max_contracts", 100))]
+    limit = int(getattr(config, "futures_minute_max_contracts", 100))
+    if len(unique) > limit:
+        raise ValueError(
+            f"minute watchlist has {len(unique)} contracts, exceeds max_contracts={limit}; narrow the scope explicitly"
+        )
+    return unique
 
 
 @register_step("futures_minute_bars", group="derivatives")
@@ -393,7 +555,7 @@ def step_futures_minute_bars(config: Config, trade_date: date, run_id: str, cont
         if failures and len(failures) == len(symbols):
             raise RuntimeError(f"{dataset}: no contract returned bars ({failures})")
         return _with_findings({"rows_read": 0, "rows_written": 0}, findings)
-    frame = _quarantine(frame, dataset, "SINA", trade_date, findings)
+    frame = _quarantine(frame, dataset, "SINA", trade_date, findings, config)
     result = write_fetched(config, run_id, dataset, frame, source="sina")
     result["contracts"] = len(symbols)
     return _with_findings(result, findings)

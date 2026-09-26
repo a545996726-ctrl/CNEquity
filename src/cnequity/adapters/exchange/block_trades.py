@@ -24,6 +24,7 @@ from datetime import date
 
 import polars as pl
 
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol
 
@@ -107,6 +108,7 @@ def fetch_szse_block_trades(trade_date: date, *, config=None) -> pl.DataFrame:
                     impersonate="chrome",
                     timeout=_TIMEOUT_SECONDS,
                 )
+                record_http_response(config, _SOURCE, resp)
             resp.raise_for_status()
             payload = resp.json() or []
             if not payload:
@@ -158,6 +160,7 @@ def fetch_sse_block_trades(trade_date: date, *, config=None) -> pl.DataFrame:
                 impersonate="chrome",
                 timeout=_TIMEOUT_SECONDS,
             )
+            record_http_response(config, _SOURCE, resp)
         resp.raise_for_status()
         text = resp.text
         payload = json.loads(text[text.find("(") + 1 : text.rfind(")")])

@@ -171,5 +171,16 @@ def test_doctor_exit_code_follows_report_errors(
         ),
     )
     runner = CliRunner()
-    result = runner.invoke(cli, ["doctor", "--config", str(tmp_path / "nope.toml"), *flag])
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(cli, ["doctor", *flag])
     assert result.exit_code == expected_exit
+
+
+@pytest.mark.parametrize("content", [None, "[invalid"])
+def test_explicit_missing_or_malformed_config_is_an_error(tmp_path, content):
+    path = tmp_path / "config.toml"
+    if content is not None:
+        path.write_text(content)
+    result = CliRunner().invoke(cli, ["doctor", "--config", str(path), "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False

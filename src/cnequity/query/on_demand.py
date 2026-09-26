@@ -67,8 +67,15 @@ class OnDemandService:
         return {} if request == defaults else request
 
     def fetch(self, dataset: str, symbol: str, **kwargs) -> dict:
+        if not self.config.on_demand_enabled:
+            raise ValueError("on-demand is disabled by [on_demand].enabled")
         if dataset not in self.config.on_demand_datasets and self.config.on_demand_datasets:
             raise ValueError(f"Dataset {dataset} not enabled for on-demand")
+        if dataset not in _IMPLEMENTED:
+            raise NotImplementedError(
+                f"on-demand dataset {dataset!r} is not implemented "
+                f"(implemented: {', '.join(sorted(_IMPLEMENTED))})."
+            )
 
         path = self._cache_path(dataset, symbol, **kwargs)
         if path.exists() and not kwargs.get("refresh"):
@@ -128,11 +135,14 @@ class OnDemandService:
         return payload
 
     def _fetch_research_reports(self, symbol: str) -> dict:
+        if not self.config.sources.get("eastmoney", True):
+            raise RuntimeError("research_reports: eastmoney source disabled in config")
         code = symbol.split(".")[0]
         url = f"https://reportapi.eastmoney.com/report/list?code={code}&pageSize=10"
         try:
             with EastMoneyClient(config=self.config) as client:
                 resp = client.get(url)
+                resp.raise_for_status()
                 data = resp.json()
                 return {"symbol": symbol, "items": data, "source": "eastmoney"}
         except Exception as exc:

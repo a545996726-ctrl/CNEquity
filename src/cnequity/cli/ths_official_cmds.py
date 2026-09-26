@@ -26,6 +26,7 @@ from cnequity.cli._root import cli, moved_hints
 from cnequity.cli._shared import (
     _cfg,
     attach_log_file,
+    comma_values,
     config_option,
     parse_date_option,
 )
@@ -124,16 +125,10 @@ def _staged_run(cfg, job_name: str, prefix: str, metadata: dict, *, record: bool
 @click.option("--days", default=45, show_default=True, help="K 线窗口，按自然日算。")
 @click.option("--sample", default=400, show_default=True, help="K 线抽样多少只证券。")
 def ths_snapshot(config_path: str, what: str, days: int, sample: int):
-    """Capture peer data for the arbitration checks. Never writes curated rows.
+    """抓取对手源快照供审计仲裁，不覆盖 curated 数据。
 
-    The checks in `cne audit` are silent until this has run at least once:
-    `adj_factor_arbitration` and `daily_bars_arbitration` both read the
-    snapshot store, and neither invents an opinion it has not been given.
-
-    Corporate actions come from one full-history dump — 66,105 rows in a single
-    download, and the only route that carries 配股. Bars are sampled because the
-    point is to arbitrate the days two incumbents already disagree on, not to
-    mirror the market.
+    公司行动优先下载全历史文件，日线按 --sample 抽样。
+    这些操作会访问配置的 keyed API；没有快照时，相应仲裁检查保持静默。
     """
     from datetime import timedelta
 
@@ -238,7 +233,7 @@ def ths_backfill(
         return
 
     attach_log_file(cfg, "ths-official-backfill")
-    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()] if symbols_str else None
+    symbols = comma_values(symbols_str, "--symbols")
     with _staged_run(
         cfg,
         "ths_official_backfill",
@@ -356,20 +351,13 @@ def ths_repair_bars(
 )
 @click.option("--workers", default=4, show_default=True)
 def ths_resource_sectors(config_path: str, start: str, end: str | None, apply: bool, workers: int):
-    """把 sector_bars 从爬取切到有授权的接口。
+    """通过 keyed API 核对并显式替换板块行情来源。
 
-    \b
-    sector_bars 是这个湖里唯一完全没有第二来源的数据集：303,559 行全部来自对同花顺公开页面的
-    无认证爬取。少见的是，这里不需要先解决准确性问题 —— 在 2,547 个可比交易日上实测，
-    收盘、成交量和成交额都在 10bps 以内一致，差异中位数为零。同样的数字，有授权的通道。
+    默认也会联网抓取并报告，只有 --apply 才写 staging；写入还需要
+    [sources.ths_official] backfill = true。覆盖范围取决于源能力，
+    不会承诺替换本湖所有历史，也不会删除源没有返回的旧行。
 
-    \b
-    这是切换而不是路由，所以必须加 `--apply`，并且需要 `[sources.ths_official] backfill = true`。
-    服务起点在 2022-01-04，意味着 12.3% 的行仍留在爬取来源上；那几年 2018 年只有 2 个板块、
-    2019 年 39 个，而今天是 432 个。
-
-    \b
-    它只写 staging —— 跑完之后执行 `cne run compact --run-id <id>`。
+    写入后执行 cne run compact --run-id <id> 发布。
     """
     from cnequity.steps.rotation import resource_sector_bars_ths_official
 

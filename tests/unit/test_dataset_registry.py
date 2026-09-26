@@ -55,6 +55,8 @@ def test_legacy_tables_match_registry():
     assert set(PARTITION_COLS) == set(curated_dataset_names())
     assert WATERMARK_SKIP == {
         "financial_statement_items",
+        # Compatibility projection of news_headlines; no independent tip.
+        "flash_news_wire",
         "institutional_holdings",
         "earnings_disclosure_schedule",
         # The rolling calendar contains future event dates, so event_date is

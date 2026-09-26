@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 from datetime import date
 
 import httpx
@@ -41,6 +40,7 @@ from cnequity.adapters.futures_exchange.common import (
     ExchangeDay,
     FuturesDayUnavailable,
     drop_placeholders,
+    fetch_bytes,
     parse_number,
     parse_price,
 )
@@ -49,7 +49,6 @@ from cnequity.domain.derivatives import (
     parse_future_code,
     single_sided_count,
 )
-from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
 
@@ -145,25 +144,30 @@ def _history_rows(code: str, payload: list[dict]) -> dict[date, dict]:
 
 
 class SinaDceHistory:
-    """Per-contract Sina histories, each fetched at most once per process."""
+    """Per-contract histories backed by a bounded persistent response cache."""
 
     def __init__(self) -> None:
-        self._rows: dict[str, dict[date, dict] | None] = {}
-        self._lock = threading.Lock()
+        pass
 
     def contract(self, code: str, *, config=None, client: httpx.Client) -> dict[date, dict]:
-        with self._lock:
-            if code in self._rows:
-                return self._rows[code] or {}
-        with source_request(config, SOURCE):
-            resp = client.get(HISTORY_URL, params={"symbol": code})
-        resp.raise_for_status()
-        match = _ARRAY.search(resp.content.decode("gbk", "replace"))
+        # Both positive and negative results expire. Persistent exact-wire
+        # cache survives CLI restarts; old delivery months have a longer TTL.
+        from cnequity.domain.market_time import shanghai_today
+
+        today = shanghai_today()
+        delivery = date(2000 + int(code[-4:-2]), int(code[-2:]), 1)
+        ttl = 30 * 86400 if (today - delivery).days > 62 else 3600
+        body = fetch_bytes(
+            HISTORY_URL,
+            params={"symbol": code},
+            config=config,
+            source=SOURCE,
+            ttl=ttl,
+            client=client,
+        )
+        match = _ARRAY.search(body.decode("gbk", "replace"))
         payload = json.loads(match.group(0)) if match else None
-        rows = _history_rows(code, payload) if payload else None
-        with self._lock:
-            self._rows[code] = rows
-        return rows or {}
+        return _history_rows(code, payload) if payload else {}
 
 
 _HISTORY = SinaDceHistory()
@@ -236,10 +240,10 @@ def fetch_quotes(trade_date: date, *, config=None, client: httpx.Client) -> pl.D
     parts: list[str] = []
     for start in range(0, len(codes), _QUOTE_BATCH):
         batch = ",".join(f"nf_{code}" for code in codes[start : start + _QUOTE_BATCH])
-        with source_request(config, SOURCE):
-            resp = client.get(QUOTE_URL.format(codes=batch))
-        resp.raise_for_status()
-        parts.append(resp.content.decode("gbk", "replace"))
+        body = fetch_bytes(
+            QUOTE_URL.format(codes=batch), config=config, source=SOURCE, ttl=60, client=client
+        )
+        parts.append(body.decode("gbk", "replace"))
     return parse_quotes("\n".join(parts), trade_date)
 
 
@@ -254,7 +258,14 @@ def fetch_dce_day(trade_date: date, *, config=None) -> ExchangeDay:
         frame = pl.DataFrame()
         # The quote only ever carries the latest session; asking it for an old
         # day in a backfill would cost three requests to learn nothing.
-        if (shanghai_today() - trade_date).days <= _QUOTE_RECENT_DAYS:
+        from datetime import timedelta
+
+        from cnequity.query.calendar import list_trading_dates
+
+        today = shanghai_today()
+        sessions = list_trading_dates(config, today - timedelta(days=21), today) if config else []
+        latest = sessions[-1] if sessions else today
+        if trade_date == latest:
             frame = fetch_quotes(trade_date, config=config, client=client)
         if frame.is_empty():
             rows = []

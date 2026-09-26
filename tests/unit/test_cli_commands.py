@@ -1393,7 +1393,7 @@ def test_delisted_backfill(cfg_path, monkeypatch):
         def run_step(self, name, trade_date, run_id):
             return {"rows_written": 4}
 
-    monkeypatch.setattr("cnequity.cli.delisted_cmds.JobEngine", FakeEngine)
+    monkeypatch.setattr("cnequity.cli.backfill_cmds.JobEngine", FakeEngine)
     monkeypatch.setattr(
         "cnequity.steps.delisted.backfill_delisted_bars",
         lambda cfg, run_id, since: {"rows_read": 8, "rows_written": 8, "symbols": 2},
@@ -1403,6 +1403,93 @@ def test_delisted_backfill(cfg_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "bf-1" in result.output
+    assert "请改用" in result.output
+
+
+def test_delisted_profile_plan_is_offline(cfg_path, monkeypatch):
+    monkeypatch.setattr(
+        "cnequity.cli.backfill_cmds._run_delisted_profile",
+        lambda *_args: pytest.fail("plan must not run a fetch"),
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "backfill",
+            "daily_bars",
+            "--profile",
+            "delisted",
+            "--start",
+            "2020-01-01",
+            "--plan",
+            "--config",
+            cfg_path,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert '"profile": "delisted"' in result.output
+
+
+def test_delisted_profile_runs_shared_backfill_path(cfg_path, monkeypatch):
+    calls = []
+
+    def fake_run(cfg, since):
+        calls.append(since)
+        return {"run_id": "bf-1", "status": "success", "rows_written": 8}
+
+    monkeypatch.setattr("cnequity.cli.backfill_cmds._run_delisted_profile", fake_run)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "backfill",
+            "daily_bars",
+            "--profile",
+            "delisted",
+            "--start",
+            "2020-01-01",
+            "--config",
+            cfg_path,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [date(2020, 1, 1)]
+    assert '"run_id": "bf-1"' in result.output
+
+
+def test_shfe_annual_plan_is_offline_and_requires_partial_fields(cfg_path, tmp_path, monkeypatch):
+    archive = tmp_path / "annual.zip"
+    archive.write_bytes(b"local-plan-only")
+    monkeypatch.setattr(
+        "cnequity.cli.backfill_cmds._run_shfe_annual_archive",
+        lambda *_args, **_kwargs: pytest.fail("plan must not import"),
+    )
+    base = [
+        "backfill",
+        "futures_bars",
+        "--shfe-annual-archive",
+        str(archive),
+        "--archive-year",
+        "2026",
+        "--config",
+        cfg_path,
+    ]
+    rejected = CliRunner().invoke(cli, [*base, "--plan"])
+    assert rejected.exit_code != 0
+    assert "--accept-partial-fields" in rejected.output
+    planned = CliRunner().invoke(cli, [*base, "--accept-partial-fields", "--plan"])
+    assert planned.exit_code == 0, planned.output
+    assert '"network_requests": 0' in planned.output
+    naive = CliRunner().invoke(
+        cli,
+        [
+            *base,
+            "--accept-partial-fields",
+            "--archive-downloaded-at",
+            "2026-09-27T09:00:00",
+            "--plan",
+        ],
+    )
+    assert naive.exit_code != 0
+    assert "必须带时区" in naive.output
 
 
 def test_backfill_snapshot_dataset_rejected(cfg_path):

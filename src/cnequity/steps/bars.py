@@ -1249,7 +1249,15 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
     # serving. On a tip-only window that answers for almost every SH/SZ symbol
     # in two requests, leaving the per-symbol sweep only the remainder; on the
     # deep window it is a cheap head start that the sweep then reconciles.
-    exchange_tip = _fetch_tip_via_exchange(config, fetch_tdx_symbols, end, run_id)
+    # A scoped historical repair would download two whole-board publisher
+    # snapshots just to save one tip row per symbol. Small explicit tip repairs
+    # have the same poor tradeoff; their TDX pages are already bounded.
+    scoped_history = explicit_scope is not None and start < end
+    exchange_tip = (
+        {"rows_read": 0, "rows_written": 0, "covered": set()}
+        if explicit_scope is not None and (scoped_history or len(fetch_tdx_symbols) <= 4)
+        else _fetch_tip_via_exchange(config, fetch_tdx_symbols, end, run_id)
+    )
     if start >= end and exchange_tip["covered"]:
         fetch_tdx_symbols = [s for s in fetch_tdx_symbols if s not in exchange_tip["covered"]]
     # SZSE's report is audit-only (see above), so SZ — and any SH the SSE board
@@ -1280,7 +1288,13 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         # The Beijing board's tip comes from the exchange's own paginated
         # snapshot; Sina stays the per-symbol backstop for whatever that misses
         # and for the (short) history window behind it.
-        bse = _fetch_bj_tip_via_bse(config, fetch_fallback_symbols, end, run_id)
+        # The BSE tip endpoint pages through the whole board (roughly 30
+        # requests). A one-name backfill should not incur that sweep.
+        bse = (
+            {"rows_read": 0, "rows_written": 0, "covered": set()}
+            if explicit_scope is not None and (scoped_history or len(fetch_fallback_symbols) <= 4)
+            else _fetch_bj_tip_via_bse(config, fetch_fallback_symbols, end, run_id)
+        )
         fallback_start = _bj_history_start(config, start, end)
         # The history behind the tip comes from TDX in one call per symbol;
         # Sina is left the tip BSE missed and the symbols TDX did not answer.

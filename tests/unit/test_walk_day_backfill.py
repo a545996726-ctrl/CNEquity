@@ -232,6 +232,41 @@ def test_flushes_already_fetched_days_before_reraising(tmp_path):
     assert set(df["trade_date"].to_list()) == {date(2026, 6, d) for d in (1, 2, 3, 4)}
 
 
+def test_same_run_retry_keeps_earlier_successful_chunks(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    cfg._backfill_start = date(2026, 6, 1)
+    cfg._backfill_end = date(2026, 6, 5)
+    calls: list[date] = []
+
+    def first(d: date) -> pl.DataFrame:
+        if d == date(2026, 6, 4):
+            raise ConnectionError("first interruption")
+        return pl.DataFrame([_fake_row(d, "trade_date")])
+
+    with pytest.raises(ConnectionError):
+        walk_day_backfill(
+            cfg, date(2026, 6, 5), "same-run", "market_breadth", first, source="derived"
+        )
+
+    def second(d: date) -> pl.DataFrame:
+        calls.append(d)
+        if d == date(2026, 6, 5):
+            raise ConnectionError("second interruption")
+        return pl.DataFrame([_fake_row(d, "trade_date")])
+
+    with pytest.raises(ConnectionError):
+        walk_day_backfill(
+            cfg, date(2026, 6, 5), "same-run", "market_breadth", second, source="derived"
+        )
+
+    assert calls == [date(2026, 6, 4), date(2026, 6, 5)]
+    staged = list((cfg.staging_root / "market_breadth").glob("**/*.parquet"))
+    assert len(staged) == 2
+    assert {d for path in staged for d in pl.read_parquet(path)["trade_date"].to_list()} == {
+        date(2026, 6, d) for d in (1, 2, 3, 4)
+    }
+
+
 def test_start_falls_back_to_the_floor_argument(tmp_path):
     """No --start given: use the caller's floor, not the generic BACKFILL_START."""
     cfg = Config(data_root=tmp_path / "data")

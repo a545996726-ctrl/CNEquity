@@ -28,6 +28,11 @@ import polars as pl
 
 from cnequity.adapters.eastmoney.corporate_actions_migration import _code_mapping
 from cnequity.config import Config
+from cnequity.domain.http_policy import (
+    SourceCoolingDown,
+    record_business_refusal,
+    record_http_response,
+)
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
 from cnequity.domain.trading_status import STATUS_NORMAL
@@ -65,10 +70,11 @@ def _post_json(
     Tushare errors in a successful HTTP response (for example insufficient
     points or an invalid token) are deliberately left to the endpoint parser;
     retrying those only delays a deterministic failure.  A timeout, malformed
-    JSON response, HTTP 408/429, or HTTP 5xx is different: retrying the same
+    JSON response, HTTP 408, or HTTP 5xx is different: retrying the same
     request can recover without forcing the caller to replay the whole symbol
     batch.  Exhaustion still raises so the caller records the symbol/day as
-    unresolved rather than manufacturing a normal row.
+    unresolved rather than manufacturing a normal row. A rate-limit refusal
+    stops the source, including when it appears in a 200 business envelope.
     """
     attempts = max(1, int(config.max_retries)) if config is not None else 1
     backoff = float(config.retry_backoff_seconds) if config is not None else 0.0
@@ -77,11 +83,23 @@ def _post_json(
         try:
             with source_request(config, "tushare"):
                 response = client.post(TUSHARE_API_URL, json=payload)
+                record_http_response(config, "tushare", response)
                 response.raise_for_status()
-                return response.json()
+                body = response.json()
+                if isinstance(body, dict) and body.get("code") not in (0, "0"):
+                    message = str(body.get("msg") or body.get("message") or "").lower()
+                    if any(
+                        marker in message
+                        for marker in ("频繁", "限流", "每分钟", "rate limit", "too many requests")
+                    ):
+                        record_business_refusal(config, "tushare", kind="business_rate_limit")
+                        raise SourceCoolingDown("tushare: provider rate-limit response")
+                return body
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else None
-            if status not in {408, 429} and not (status is not None and 500 <= status <= 599):
+            if status == 429:
+                raise SourceCoolingDown("tushare: HTTP 429 rate-limit response") from exc
+            if status != 408 and not (status is not None and 500 <= status <= 599):
                 raise
             last_error = exc
         except (httpx.RequestError, ValueError) as exc:
@@ -350,11 +368,13 @@ def fetch_st_history(
                         symbol for symbol, dates in pre_direct_dates.items() if trade_date in dates
                     }
                     pre_failed.update(required - found)
+            except SourceCoolingDown:
+                return _empty(), symbols
             except Exception as exc:  # noqa: BLE001 — no incomplete day becomes normal
                 logger.warning("tushare bak_basic: failed for %s: %s", trade_date, exc)
                 pre_failed.update(pre_direct_symbols)
 
-        for symbol in symbols:
+        for index, symbol in enumerate(symbols):
             traded_dates = dates_by_symbol.get(symbol, [])
             if symbol in pre_floor_symbols:
                 failed.append(symbol)
@@ -412,6 +432,9 @@ def fetch_st_history(
                     }
                     for trade_date in traded_dates
                 )
+            except SourceCoolingDown:
+                failed.extend(symbols[index:])
+                break
             except Exception as exc:  # noqa: BLE001 — retry the symbol, not a false normal set
                 failed.append(symbol)
                 logger.warning("tushare ST history: failed for %s: %s", symbol, exc)

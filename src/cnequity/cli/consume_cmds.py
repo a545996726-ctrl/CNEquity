@@ -1,7 +1,7 @@
 """Reading the lake: `query`, `serve`, `mcp`.
 
-Three front ends over the same data — SQL, a read-only dashboard, and an agent
-protocol — none of which may write.
+SQL and services read the lake; explicit on-demand queries may fetch and cache
+remote data, and MCP live mode is separately opt-in.
 """
 
 from __future__ import annotations
@@ -90,8 +90,13 @@ def query(
     if dataset and symbol:
         svc = OnDemandService(cfg)
         fetch_kwargs = {"refresh": True} if refresh else {}
-        data = svc.fetch(dataset, symbol, **fetch_kwargs)
+        try:
+            data = svc.fetch(dataset, symbol, **fetch_kwargs)
+        except (ValueError, NotImplementedError, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from None
         click.echo(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+        if data.get("error"):
+            raise SystemExit(1)
         return
     db_path = ensure_duckdb_views(cfg)
     import duckdb

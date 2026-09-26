@@ -28,7 +28,7 @@ from datetime import date
 
 import polars as pl
 
-from cnequity.adapters.baostock._session import fetch_per_symbol, to_baostock_symbol
+from cnequity.adapters.baostock._session import check_result, fetch_per_symbol, to_baostock_symbol
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -46,13 +46,16 @@ class BaostockAdjFactorUnavailableError(RuntimeError):
 
 def _closes(bs, symbol: str, start: date, end: date, flag: str, *, config) -> dict[date, float]:
     with source_request(config, SOURCE):
-        rs = bs.query_history_k_data_plus(
-            to_baostock_symbol(symbol),
-            _FIELDS,
-            start_date=start.isoformat(),
-            end_date=end.isoformat(),
-            frequency="d",
-            adjustflag=flag,
+        rs = check_result(
+            bs.query_history_k_data_plus(
+                to_baostock_symbol(symbol),
+                _FIELDS,
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+                frequency="d",
+                adjustflag=flag,
+            ),
+            config=config,
         )
     if rs.error_code != "0":
         return {}

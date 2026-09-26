@@ -15,6 +15,7 @@ import httpx
 import polars as pl
 
 from cnequity.adapters.sw.industry_history import exchange_from_code
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol
 
@@ -98,6 +99,7 @@ def fetch_cni_index_adjustments(
                 params={"indexcode": _index_code(index_symbol)},
                 headers=_HEADERS,
             )
+            record_http_response(config, "cni", resp)
         resp.raise_for_status()
         if not resp.content:
             raise CniAdjustmentPayloadError(f"CNI adjustment response for {index_symbol} is empty")

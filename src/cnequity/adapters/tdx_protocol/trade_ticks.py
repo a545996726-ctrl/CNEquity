@@ -160,9 +160,9 @@ def fetch_trade_ticks(
     raw_rows: list[dict] = []
     start = 0
     for _page in range(MAX_SESSION_PAGES):
-        wait_spec(rate_limit)
         try:
             with source_request_slot_spec(rate_limit):
+                wait_spec(rate_limit)
                 page = client.ticks_history(
                     code, trade_date, market=market, start=start, offset=MAX_TICK_PAGE
                 )

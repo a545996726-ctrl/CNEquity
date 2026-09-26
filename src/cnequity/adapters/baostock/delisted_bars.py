@@ -28,7 +28,8 @@ import logging
 import math
 from datetime import date
 
-from cnequity.adapters.baostock._session import fetch_per_symbol, import_baostock
+from cnequity.adapters.baostock._session import check_result, fetch_per_symbol, import_baostock
+from cnequity.adapters.baostock.wide_history import query_history
 from cnequity.adapters.numeric import finite_int64
 from cnequity.domain.rate_limit import source_request
 
@@ -81,7 +82,7 @@ def roster_on(day: date, *, bs=None, login: bool = True, config=None) -> set[str
         _login(bs, config=config)
     try:
         with source_request(config, "baostock"):
-            rs = bs.query_all_stock(day=day.isoformat())
+            rs = check_result(bs.query_all_stock(day=day.isoformat()), config=config)
         if getattr(rs, "error_code", "0") != "0":
             message = getattr(rs, "error_msg", "") or "unknown error"
             raise RuntimeError(
@@ -109,15 +110,16 @@ def roster_on(day: date, *, bs=None, login: bool = True, config=None) -> set[str
 def _fetch_one(bs, symbol: str, start: date, end: date, *, config=None) -> list[dict] | None:
     from cnequity.adapters.baostock._session import to_baostock_symbol
 
-    with source_request(config, "baostock"):
-        rs = bs.query_history_k_data_plus(
-            to_baostock_symbol(symbol),
-            _FIELDS,
-            start_date=start.isoformat(),
-            end_date=end.isoformat(),
-            frequency="d",
-            adjustflag="3",  # unadjusted; hfq is derived from Sina factors
-        )
+    rs = query_history(
+        bs,
+        to_baostock_symbol(symbol),
+        _FIELDS,
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        frequency="d",
+        adjustflag="3",
+        config=config,
+    )
     if rs.error_code != "0":
         return None  # retryable — the session driver relogins and retries
     rows: list[dict] = []

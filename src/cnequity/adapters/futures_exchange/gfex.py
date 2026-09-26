@@ -152,17 +152,20 @@ def _post(trade_date: date, trade_type: int, *, config=None) -> bytes:
     return fetch_bytes(
         QUOTES_URL,
         config=config,
+        as_of=trade_date,
         method="POST",
         data={"trade_date": trade_date.strftime("%Y%m%d"), "trade_type": str(trade_type)},
     )
 
 
-def fetch_gfex_day(trade_date: date, *, config=None) -> ExchangeDay:
+def fetch_gfex_day(trade_date: date, *, config=None, kind: str | None = None) -> ExchangeDay:
     if trade_date < FIRST_SESSION:
         raise FuturesDayUnavailable(f"GFEX opened {FIRST_SESSION.isoformat()}")
-    futures = parse_futures(_post(trade_date, 0, config=config), trade_date)
+    futures = pl.DataFrame()
+    if kind != "options":
+        futures = parse_futures(_post(trade_date, 0, config=config), trade_date)
     options = pl.DataFrame()
-    if trade_date >= FIRST_OPTION_SESSION:
+    if kind != "futures" and trade_date >= FIRST_OPTION_SESSION:
         options = parse_options(_post(trade_date, 1, config=config), trade_date)
     return ExchangeDay(EXCHANGE, trade_date, futures=futures, options=options)
 
@@ -195,7 +198,7 @@ def parse_reference(body: bytes, trade_date: date, *, kind: str) -> pl.DataFrame
 
 
 def fetch_gfex_reference(
-    trade_date: date, *, config=None, products: list[str] | None = None
+    trade_date: date, *, config=None, products: list[str] | None = None, kind: str | None = None
 ) -> pl.DataFrame:
     """Contract information for each product seen in that session's quotes."""
     if products is None:
@@ -203,14 +206,20 @@ def fetch_gfex_reference(
         products = sorted({p.lower() for p in futures["product"].to_list()})
     frames = []
     for product in products:
-        for trade_type, kind in ((0, "future"), (1, "option")):
+        for trade_type, reference_kind in ((0, "future"), (1, "option")):
+            if kind is not None and reference_kind != kind:
+                continue
             body = fetch_bytes(
                 CONTRACTS_URL,
                 config=config,
                 method="POST",
                 data={"variety": product, "trade_type": str(trade_type)},
             )
-            frame = parse_reference(body, trade_date, kind=kind)
+            # This endpoint has no date parameter: it is today's snapshot,
+            # even when products were selected from historical quotes.
+            from cnequity.domain.market_time import shanghai_today
+
+            frame = parse_reference(body, shanghai_today(), kind=reference_kind)
             if not frame.is_empty():
                 frames.append(frame)
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()

@@ -33,15 +33,13 @@ and drop out of the shared universe the check compares over.
 
 from __future__ import annotations
 
-import io
 import logging
-import warnings
 from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
 
-from cnequity.domain.rate_limit import source_request
+from cnequity.adapters.exchange.board_snapshot import sse_snapshot, szse_report
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol, is_etf_symbol
 
 logger = logging.getLogger(__name__)
@@ -69,7 +67,7 @@ _EMPTY_QUOTES = pl.DataFrame(
 # SSE's own quote host. One request covers 主板 (60x), 科创板 (688/689) and B
 # shares (900); the B shares are dropped by `is_all_a_symbol`. The field order
 # of each row follows `select`, so the two must be edited together.
-SSE_SELECT = ("code", "open", "high", "low", "last", "volume", "amount")
+SSE_SELECT = ("code", "name", "open", "high", "low", "last", "volume", "amount")
 SSE_URL = (
     "http://yunhq.sse.com.cn:32041/v1/sh1/list/exchange/equity"
     f"?select={','.join(SSE_SELECT)}&begin=0&end=6000"
@@ -168,12 +166,7 @@ def fetch_sse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
     numbers under the requested label.
     """
     try:
-        with source_request(config, _SOURCE):
-            resp = _client().get(
-                SSE_URL, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
-            )
-        resp.raise_for_status()
-        payload = resp.json()
+        payload = sse_snapshot(trade_date, config=config, client_factory=_client)
     except Exception as exc:
         logger.warning("SSE daily quotes unavailable: %s", exc)
         return _EMPTY_QUOTES.clone()
@@ -210,7 +203,7 @@ def fetch_sse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
         if len(code) != 6 or not code.isdigit() or not _keep_symbol(code, "SH"):
             continue
         try:
-            values = [float(v) for v in item[1 : len(SSE_SELECT)]]
+            values = [float(v) for v in item[2 : len(SSE_SELECT)]]
         except (TypeError, ValueError):
             continue
         open_, high, low, close, volume, amount = values
@@ -242,24 +235,7 @@ def fetch_sse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
 def fetch_szse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
     """Official SZ closes for *trade_date*, or empty when it is not on offer."""
     try:
-        import pandas as pd
-
-        with source_request(config, _SOURCE):
-            resp = _client().get(
-                SZSE_URL.format(day=trade_date.isoformat()),
-                headers=_SZSE_HEADERS,
-                impersonate="chrome",
-                timeout=_TIMEOUT_SECONDS,
-            )
-        resp.raise_for_status()
-        if not resp.content:
-            logger.info("SZSE published no daily quote report for %s", trade_date)
-            return _EMPTY_QUOTES.clone()
-        with warnings.catch_warnings():
-            # As in st_lists: the export ships without a default style and
-            # openpyxl says so on every read.
-            warnings.filterwarnings("ignore", message="Workbook contains no default style")
-            pdf = pd.read_excel(io.BytesIO(resp.content), dtype=str)
+        pdf = szse_report(trade_date, config=config, client_factory=_client)
     except Exception as exc:
         logger.warning("SZSE daily quotes unavailable: %s", exc)
         return _EMPTY_QUOTES.clone()

@@ -757,6 +757,8 @@ def load(
     as_of_d = _parse_date(as_of)
 
     dependencies = {dataset}
+    if dataset == "flash_news_wire":
+        dependencies.add("news_headlines")
     if adjust and dataset in ADJUSTABLE_DATASETS:
         dependencies.add("adj_factors")
     if effective_universe:
@@ -808,17 +810,37 @@ def load(
         ]
         return df.sort(sort_cols) if sort_cols else df
 
-    df = _read_dataset(
-        cfg,
-        dataset,
-        start=start_d,
-        end=end_d,
-        symbols=symbols,
-        universe=effective_universe,
-        strict_universe=effective_strict_universe,
-        revision=_revision_for_dataset(revision_selection, dataset),
-        read_context=read_context,
-    )
+    if dataset == "flash_news_wire":
+        from cnequity.adapters.eastmoney.news_wire import flash_rows_from_news
+
+        frames: list[pl.DataFrame] = []
+        if dataset_has_parquet(read_context.roots["news_headlines"]):
+            headlines = _read_dataset(
+                cfg, "news_headlines", start=start_d, end=end_d, read_context=read_context
+            )
+            if not headlines.is_empty():
+                frames.append(flash_rows_from_news(headlines))
+        if dataset_has_parquet(read_context.roots[dataset]):
+            frames.append(
+                _read_dataset(cfg, dataset, start=start_d, end=end_d, read_context=read_context)
+            )
+        if not frames:
+            raise ReaderError(
+                "flash_news_wire has no legacy revision or news_headlines canonical data"
+            )
+        df = dedupe_by_primary_key(pl.concat(frames, how="diagonal_relaxed"), dataset)
+    else:
+        df = _read_dataset(
+            cfg,
+            dataset,
+            start=start_d,
+            end=end_d,
+            symbols=symbols,
+            universe=effective_universe,
+            strict_universe=effective_strict_universe,
+            revision=_revision_for_dataset(revision_selection, dataset),
+            read_context=read_context,
+        )
     if resolved_profile is not None and dataset == "daily_bars":
         _require_profile_delisting_evidence(cfg, df, resolved_profile, read_context)
 

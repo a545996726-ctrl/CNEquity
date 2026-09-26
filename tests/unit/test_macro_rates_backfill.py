@@ -194,7 +194,7 @@ def test_backfill_writes_the_window_history_and_the_run_day_rows(cfg, monkeypatc
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
-        lambda day, config=None: pl.DataFrame(
+        lambda day, config=None, **kwargs: pl.DataFrame(
             [
                 *_rate_rows("shibor_3m", [day], value=1.43),
                 {
@@ -237,7 +237,7 @@ def test_backfill_defaults_to_the_lake_start_and_stops_at_the_run_day(cfg, monke
     monkeypatch.setattr(macro_risk, "fetch_daily_rates_range", _range)
     monkeypatch.setattr(macro_risk, "list_trading_dates", lambda _cfg, _s, _e: [run_day])
     monkeypatch.setattr(
-        macro_risk, "fetch_macro_indicators", lambda day, config=None: pl.DataFrame()
+        macro_risk, "fetch_macro_indicators", lambda day, config=None, **kwargs: pl.DataFrame()
     )
     _backfill(cfg, None, date(2026, 12, 31))
 
@@ -261,7 +261,7 @@ def test_backfill_reports_sessions_a_series_misses_but_not_before_it_began(cfg, 
     )
     monkeypatch.setattr(macro_risk, "list_trading_dates", lambda _cfg, _s, _e: sessions)
     monkeypatch.setattr(
-        macro_risk, "fetch_macro_indicators", lambda day, config=None: pl.DataFrame()
+        macro_risk, "fetch_macro_indicators", lambda day, config=None, **kwargs: pl.DataFrame()
     )
     _backfill(cfg, date(2006, 9, 1), date(2006, 10, 10))
 
@@ -282,7 +282,7 @@ def test_backfill_with_a_window_after_the_run_day_fetches_no_history(cfg, monkey
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
-        lambda day, config=None: pl.DataFrame(_rate_rows("shibor_3m", [day])),
+        lambda day, config=None, **kwargs: pl.DataFrame(_rate_rows("shibor_3m", [day])),
     )
     _backfill(cfg, date(2026, 10, 1), None)
 
@@ -311,7 +311,7 @@ def test_daily_run_reads_only_a_short_recent_window(cfg, monkeypatch):
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
-        lambda d, config=None: pl.DataFrame(
+        lambda d, config=None, **kwargs: pl.DataFrame(
             [*_rate_rows("shibor_3m", [d]), *_rate_rows("cnbond_yield_10y", [d])]
         ),
     )

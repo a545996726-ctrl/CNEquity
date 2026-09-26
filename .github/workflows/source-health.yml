@@ -2,8 +2,9 @@ name: Source health
 
 on:
   schedule:
-    # Daily after the mainland close for critical paths, plus a weekly full
-    # sweep. The report is
+    # Daily after the mainland close for critical paths, plus a weekly sweep
+    # of routine endpoints. Manual-only probes are deliberately skipped.
+    # The report is
     # a vantage point, not a universal SLA; mainland users should run `cne
     # sources --vantage cn` in their own scheduler as well.
     - cron: "17 10 * * 1-5"
@@ -59,7 +60,7 @@ jobs:
             cne sources probe \
               --config "$HEALTH_ROOT/cnequity.toml" \
               --vantage github-actions \
-              --only tdx_protocol,sina,eastmoney_push2,eastmoney_push2his,cninfo \
+              --only tdx_protocol,bse,sina,eastmoney_push2,eastmoney_push2his,cninfo \
               | tee "$HEALTH_ROOT/source-health.txt"
           fi
           cne sources slo --config "$HEALTH_ROOT/cnequity.toml" \

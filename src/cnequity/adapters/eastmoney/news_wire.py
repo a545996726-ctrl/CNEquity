@@ -59,20 +59,22 @@ def flash_rows_from_news(base: pl.DataFrame, trade_date: date | None = None) -> 
         pub_date = row.get("publish_date") or trade_date
         pub_time = str(row.get("publish_time") or "00:00:00")
         published_at = f"{pub_date}T{pub_time}"
-        rows.append(
-            {
-                "wire_id": f"{wire_source}:{news_id}",
-                "wire_source": wire_source,
-                "item_hash": _item_hash(title, wire_source, published_at),
-                "publish_date": pub_date,
-                "publish_time": pub_time,
-                "title": title,
-                "summary": row.get("summary"),
-                "related_symbols": row.get("related_symbols"),
-                "importance": None,
-                "channel": row.get("channel") or "fast_news",
-            }
-        )
+        item = {
+            "wire_id": f"{wire_source}:{news_id}",
+            "wire_source": wire_source,
+            "item_hash": _item_hash(title, wire_source, published_at),
+            "publish_date": pub_date,
+            "publish_time": pub_time,
+            "title": title,
+            "summary": row.get("summary"),
+            "related_symbols": row.get("related_symbols"),
+            "importance": None,
+            "channel": row.get("channel") or "fast_news",
+        }
+        for column in ("source", "data_version", "fetched_at"):
+            if column in row:
+                item[column] = row[column]
+        rows.append(item)
     if not rows:
         return pl.DataFrame()
     return frame_from_rows(rows, "flash_news_wire").unique(

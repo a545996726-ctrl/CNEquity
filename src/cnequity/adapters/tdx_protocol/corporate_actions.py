@@ -204,7 +204,6 @@ def fetch_xdxr_for_symbol(
     archive_run_id: str | None = None,
     request_scope: str | None = None,
 ) -> pl.DataFrame:
-    wait_spec(rate_limit)
     code, _, exch = symbol.partition(".")
     # ``quotes.xdxr()`` falls back to ``market_for_stock()`` when market is
     # omitted, and that heuristic only distinguishes SH/SZ — it has no notion
@@ -217,6 +216,7 @@ def fetch_xdxr_for_symbol(
     market = 1 if exch == "SH" else (0 if exch == "SZ" else 2)
     try:
         with source_request_slot_spec(rate_limit):
+            wait_spec(rate_limit)
             raw = client.xdxr(symbol=code, market=market)
     except Exception as exc:
         logger.debug("TDX xdxr failed for %s: %s", symbol, exc)

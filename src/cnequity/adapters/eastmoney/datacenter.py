@@ -11,6 +11,7 @@ from urllib.parse import quote
 from cnequity.adapters.eastmoney.common import DATACENTER_BASE
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient
 from cnequity.adapters.eastmoney.raw import archive_response
+from cnequity.domain.http_policy import SourceCoolingDown, record_business_refusal
 from cnequity.storage.raw_archive import RawArchiveError, RawPayloadArchive
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ def fetch_datacenter(
     max_retries: int = 3,
     retry_backoff_seconds: float = 5.0,
     stop_after: Callable[[list[dict]], bool] | None = None,
+    on_valid_page: Callable[[list[dict]], None] | None = None,
     keyset_column: str | None = None,
     trust_page_size: bool = False,
     allow_count_overrun: bool = False,
@@ -293,6 +295,15 @@ def fetch_datacenter(
                 if payload.get("success") is False:
                     message = str(payload.get("message") or "")
                     if _is_busy(message):
+                        if "请求过于频繁" in message:
+                            record_business_refusal(
+                                getattr(client, "config", None),
+                                "eastmoney_dc",
+                                kind="rate_limited",
+                            )
+                            raise SourceCoolingDown(
+                                "EastMoney datacenter 报告请求过于频繁；共享冷却已开启"
+                            )
                         raise _ServerBusy(f"{message} on page {page}")
                     if (
                         message in _EMPTY_RESULT_MESSAGES
@@ -302,7 +313,7 @@ def fetch_datacenter(
                         raise _TransientEmptyPage(f"empty response on page {page}/{expected_pages}")
                 last_exc = None
                 break
-            except RawArchiveError:
+            except (RawArchiveError, SourceCoolingDown):
                 # Missing exact response bytes are an archive-policy failure,
                 # not a transient source error.  Do not retry and eventually
                 # hide the concrete integrity failure behind a pagination
@@ -438,6 +449,12 @@ def fetch_datacenter(
                 shard_rows,
                 unique_rows,
             )
+        if on_valid_page is not None and batch:
+            # A page that passed row-shape, ordering and count guards is an
+            # independently observed set of positive facts. Callers may
+            # preserve it even if a later page fails. It is not a receipt for
+            # the completeness of the enclosing dynamic report.
+            on_valid_page(batch)
         if stop_after is not None and stop_after(batch):
             stopped_early = True
             break
@@ -490,6 +507,7 @@ def fetch_datacenter(
                     retry_backoff_seconds=retry_backoff_seconds,
                     trust_page_size=trust_page_size,
                     allow_count_overrun=allow_count_overrun,
+                    on_valid_page=on_valid_page,
                     archive=archive,
                     archive_dataset=archive_dataset,
                     archive_run_id=archive_run_id,

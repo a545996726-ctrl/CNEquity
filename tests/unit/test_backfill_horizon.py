@@ -360,6 +360,29 @@ def test_symbols_flag_scopes_daily_bar_repairs(tmp_path, monkeypatch):
     assert cfg._backfill_symbols == ["600519.SH"]
 
 
+def test_margin_source_override_is_one_run_only_and_dataset_scoped(monkeypatch):
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+
+    cfg = SimpleNamespace(margin_trading_source="eastmoney")
+    monkeypatch.setattr(backfill_cmds, "_cfg", lambda _p: cfg)
+    monkeypatch.setattr(
+        backfill_cmds,
+        "_backfill_once",
+        lambda config, dataset: {"status": "success", "rows_written": 0},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, _backfill_argv("margin_trading", "--margin-source", "exchange"))
+    assert result.exit_code == 0, result.output
+    assert cfg.margin_trading_source == "exchange"
+
+    invalid = runner.invoke(cli, _backfill_argv("daily_bars", "--margin-source", "exchange"))
+    assert invalid.exit_code != 0
+    assert "只适用于 margin_trading" in invalid.output
+
+
 def test_bse_tip_repair_requires_one_session_and_symbols(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

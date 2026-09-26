@@ -94,3 +94,56 @@ def test_roll_yield_is_positive_in_backwardation():
     bars = _bars({"CU2605.SHF": [(110, 90)] * 5, "CU2606.SHF": [(100, 10)] * 5})
     main = _main(compute_futures_continuous(bars))
     assert (main["roll_yield"] > 0).all()
+
+
+def test_second_is_absent_when_main_rolls_to_last_available_month():
+    bars = _bars(
+        {
+            "CU2605.SHF": [(100, 90), (100, 90), (100, 10), (100, 10), (100, 10)],
+            "CU2606.SHF": [(110, 10), (110, 10), (110, 99), (110, 99), (110, 99)],
+        }
+    )
+    frame = compute_futures_continuous(bars)
+    assert frame.filter((pl.col("trade_date") == D[3]) & (pl.col("series") == "second")).is_empty()
+    assert frame.filter(pl.col("trade_date") == D[3])["contract_symbol"].to_list() == ["CU2606.SHF"]
+
+
+def test_missing_main_does_not_allow_rollback_and_missing_roll_price_invalidates_factors():
+    bars = _bars({"CU2605.SHF": [(100, 90)] * 5, "CU2606.SHF": [(110, 99)] * 5})
+    bars = bars.filter(~((pl.col("symbol") == "CU2606.SHF") & (pl.col("trade_date") == D[2])))
+    main = _main(compute_futures_continuous(bars))
+    assert main.filter(pl.col("trade_date") == D[3]).is_empty()
+    assert set(main["contract_symbol"]) == {"CU2606.SHF"}
+    farther = _bars({"CU2607.SHF": [(120, 1), (120, 1), (120, 200), (120, 200), (120, 200)]})
+    main = _main(compute_futures_continuous(pl.concat([bars, farther])))
+    row = main.filter(pl.col("trade_date") == D[3]).row(0, named=True)
+    assert row["contract_symbol"] == "CU2607.SHF"
+    assert row["adj_ratio"] is None and row["adj_diff"] is None
+
+
+def test_missing_trading_session_is_not_used_as_yesterdays_close():
+    bars = _bars({"CU2605.SHF": [(100, 90)] * 5})
+    bars = bars.filter(pl.col("trade_date") != D[2])
+    main = _main(compute_futures_continuous(bars))
+    assert D[3] not in main["trade_date"]
+    assert main.filter(pl.col("trade_date") == D[4])["adj_ratio"].item() is None
+
+
+def test_observed_futures_session_missing_from_shared_calendar_keeps_next_day():
+    bars = _bars({"CU2605.SHF": [(100, 90)] * 5})
+    calendar = [D[0], D[1], D[3], D[4]]
+    main = _main(compute_futures_continuous(bars, sessions=calendar))
+    assert D[2] in main["trade_date"]
+    assert D[3] in main["trade_date"]
+
+
+def test_other_exchange_special_session_does_not_hide_a_gap():
+    shf = _bars({"CU2605.SHF": [(100, 90)] * 5}).filter(pl.col("trade_date") != D[2])
+    dce = _bars({"CU2605.SHF": [(100, 90)] * 5}).with_columns(
+        pl.lit("DCE").alias("exchange"),
+        pl.lit("M").alias("product"),
+        pl.lit("M2605.DCE").alias("symbol"),
+    )
+    bars = pl.concat([shf, dce])
+    main = _main(compute_futures_continuous(bars, sessions=D))
+    assert main.filter((pl.col("symbol") == "CU.SHF") & (pl.col("trade_date") == D[3])).is_empty()

@@ -127,3 +127,28 @@ def test_research_reports_error_path_skips_cache(tmp_path, monkeypatch):
 
     with pytest.raises(NotImplementedError, match="mystery"):
         svc._fetch_remote("mystery", "600519.SH")
+
+
+def test_disabled_on_demand_never_fetches(tmp_path, monkeypatch):
+    svc = OnDemandService(Config(data_root=tmp_path, on_demand_enabled=False))
+    monkeypatch.setattr(svc, "_fetch_remote", lambda *a, **k: pytest.fail("remote fetch"))
+    with pytest.raises(ValueError, match="disabled"):
+        svc.fetch("stock_news", "600519.SH", refresh=True)
+
+
+def test_disabled_research_report_source_never_fetches(tmp_path, monkeypatch):
+    svc = OnDemandService(Config(data_root=tmp_path, sources={"eastmoney": False}))
+    monkeypatch.setattr(
+        "cnequity.query.on_demand.EastMoneyClient", lambda **k: pytest.fail("remote client")
+    )
+    with pytest.raises(RuntimeError, match="source disabled"):
+        svc.fetch("research_reports", "600519.SH")
+
+
+def test_dataset_path_is_validated_before_cache_access(tmp_path):
+    svc = OnDemandService(Config(data_root=tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "600519_SH.json").write_text('{"private": true}')
+    with pytest.raises(NotImplementedError):
+        svc.fetch(str(outside), "600519.SH")

@@ -66,7 +66,7 @@ def board_names(trade_date: date, *, client=None, config=None) -> tuple[dict[str
     endpoint is a snapshot of the latest session, and keeping it would
     manufacture a point-in-time fact the exchange never published.
     """
-    raw, total = read_board(client=client, config=config)
+    raw, total = read_board(client=client, config=config, expected_date=trade_date)
     listed: dict[str, str] = {}
     for item in raw:
         code = str(item.get("hqzqdm") or "").strip().zfill(6)

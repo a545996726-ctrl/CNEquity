@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+import uuid
+from datetime import date, timedelta
 
 import polars as pl
 
+from cnequity.adapters.eastmoney.datacenter import EastMoneyDatacenterError
 from cnequity.adapters.eastmoney.fundamentals import fetch_financial_statement_items
 from cnequity.adapters.eastmoney.shareholders import CHANGE_DATE, NOTICE_DATE
 from cnequity.adapters.eastmoney.valuation import fetch_valuation_metrics
 from cnequity.config import Config
+from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.symbols import is_all_a_symbol, parse_symbol
 from cnequity.orchestrator.registry import register_step
 from cnequity.progress import sweep_progress
 from cnequity.query.canonical import dedupe_lazy_by_primary_key
 from cnequity.steps.common import instrument_metadata, load_bar_universe, load_symbols
 from cnequity.steps.http_common import run_incremental_fetched, verify_raw_archive, write_fetched
+from cnequity.storage import StagingWriter
+from cnequity.storage.state import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,27 @@ _VALUATION_BACKFILL_START = date(2016, 1, 1)
 # Checkpoint every N symbols so a mid-sweep kill still keeps prior chunks in
 # curated (resume via ``_symbols_needing_backfill`` / float_mv fill ratio).
 _VALUATION_BACKFILL_CHUNK = 50
+_REPORT_STATEMENT_TYPES = {
+    "RPT_LICO_FN_CPD": {"income", "indicator"},
+    "RPT_DMSK_FN_BALANCE": {"balance"},
+    "RPT_DMSK_FN_INCOME": {"income"},
+    "RPT_DMSK_FN_CASHFLOW": {"cashflow"},
+}
+
+
+def _valid_financial_unit(frame: pl.DataFrame, period: str, report: str) -> bool:
+    try:
+        day = date.fromisoformat(period)
+        quarter = f"{day.year}Q{(day.month - 1) // 3 + 1}"
+        return bool(
+            not frame.is_empty()
+            and {"report_period", "statement_type", "symbol"}.issubset(frame.columns)
+            and set(frame.get_column("report_period").to_list()) == {quarter}
+            and set(frame.get_column("statement_type").to_list()) <= _REPORT_STATEMENT_TYPES[report]
+            and frame.get_column("symbol").null_count() == 0
+        )
+    except (ValueError, KeyError):
+        return False
 
 
 def _validate_valuation_history_batch(
@@ -594,12 +620,94 @@ def step_financial_statement_items(
     backfill = getattr(config, "_backfill", False)
     archive_source = "eastmoney_backfill" if backfill else "eastmoney"
     archive_scope = f"{'backfill' if backfill else 'daily'}:{trade_date.isoformat()}"
-    df = fetch_financial_statement_items(
-        trade_date,
-        backfill=backfill,
-        config=config,
-        run_id=run_id,
+    state = StateStore(config.meta_root)
+    unit_prefix = "fsi-"
+    staged_files = StagingWriter(config.staging_root).list_run_files(
+        "financial_statement_items", run_id
     )
+    staged_units = set(
+        state.get_payload("financial_statement_items").get("staged_units", {}).get(run_id, [])
+    )
+    # A state entry alone is not enough after a staging file was removed or
+    # corrupted. Only the report-period units still backed by a readable file
+    # can be skipped on retry.
+    recoverable_units: set[str] = set()
+    for unit in staged_units:
+        if "|" not in unit:
+            continue
+        period, report = unit.split("|", 1)
+        prefix = f"part-{unit_prefix}{period}-{report}-"
+        for path in staged_files:
+            if not path.name.startswith(prefix):
+                continue
+            try:
+                recovered = pl.read_parquet(path)
+                if _valid_financial_unit(recovered, period, report):
+                    recoverable_units.add(unit)
+                    break
+            except (OSError, pl.exceptions.PolarsError):
+                continue
+    failures: list[tuple[str, str]] = []
+    unit_stage_used = bool(backfill and recoverable_units)
+
+    def _stage_unit(unit: str, scope: str, rows: list[dict]) -> None:
+        nonlocal unit_stage_used
+        unit_stage_used = True
+        if not rows:
+            return
+        period, report = unit.split("|", 1)
+        frame = pl.DataFrame(rows).unique(
+            subset=["symbol", "report_period", "statement_type", "item_code", "announce_date"],
+            keep="last",
+        )
+        if not _valid_financial_unit(frame, period, report):
+            raise RuntimeError(f"financial_statement_items: invalid report unit {unit}")
+        evidence = (
+            verify_raw_archive(
+                config,
+                "financial_statement_items",
+                run_id,
+                source=archive_source,
+                request_scope=scope,
+            )
+            if config.should_archive_raw("financial_statement_items")
+            else None
+        )
+        write_fetched(
+            config,
+            run_id,
+            "financial_statement_items",
+            frame,
+            source=archive_source,
+            batch_id=f"{unit_prefix}{period}-{report}-{uuid.uuid4().hex}",
+            raw_archive_evidence=evidence,
+        )
+        state.mark_staged_units("financial_statement_items", run_id, [unit])
+
+    if backfill:
+        df = fetch_financial_statement_items(
+            trade_date,
+            backfill=True,
+            config=config,
+            run_id=run_id,
+            on_unit=_stage_unit,
+            skip_units=recoverable_units,
+            failures=failures,
+        )
+        if failures:
+            state.record_missing_units("financial_statement_items", failures)
+        if unit_stage_used:
+            frames = [
+                pl.read_parquet(path)
+                for path in StagingWriter(config.staging_root).list_run_files(
+                    "financial_statement_items", run_id
+                )
+            ]
+            df = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+    else:
+        df = fetch_financial_statement_items(
+            trade_date, backfill=False, config=config, run_id=run_id
+        )
     missing_periods: set[str] = set()
     missing_statement_types: dict[str, list[str]] = {}
     # Completeness is a whole-market claim: "every period the market reported
@@ -668,6 +776,8 @@ def step_financial_statement_items(
         result: dict
         if df.is_empty():
             result = {"rows_read": 0, "rows_written": 0}
+        elif unit_stage_used:
+            result = {"rows_read": df.height, "rows_written": df.height}
         else:
             result = write_fetched(
                 config,
@@ -687,7 +797,9 @@ def step_financial_statement_items(
                     else None
                 ),
             )
-        result["status"] = "warning"
+        result["status"] = "degraded" if unit_stage_used and not df.is_empty() else "warning"
+        if result["status"] == "degraded":
+            result["batch_settled"] = True
         if missing_periods:
             result["missing_periods"] = len(missing_periods)
         if missing_statement_types:
@@ -696,6 +808,12 @@ def step_financial_statement_items(
         return result
     if df.is_empty():
         return {"rows_read": 0, "rows_written": 0}
+    if unit_stage_used:
+        result = {"rows_read": df.height, "rows_written": df.height}
+        if failures:
+            result["status"] = "degraded"
+            result["batch_settled"] = True
+        return result
     return write_fetched(
         config,
         run_id,
@@ -740,8 +858,23 @@ DAILY_LOOKBACK_DAYS = 30
 TOP_HOLDERS_DAILY_LOOKBACK_DAYS = 240
 
 
+def _quarter_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Stable, bounded report-date slices for large paged shareholder sweeps."""
+    windows: list[tuple[date, date]] = []
+    for year in range(start.year, end.year + 1):
+        for month in (1, 4, 7, 10):
+            lower = date(year, month, 1)
+            upper = (
+                date(year + 1, 1, 1) - timedelta(days=1)
+                if month == 10
+                else date(year, month + 3, 1) - timedelta(days=1)
+            )
+            if max(start, lower) <= min(end, upper):
+                windows.append((max(start, lower), min(end, upper)))
+    return windows
+
+
 def _year_windows(start: date, end: date) -> list[tuple[date, date]]:
-    """One calendar year per window, so a killed backfill costs one year."""
     return [
         (max(start, date(y, 1, 1)), min(end, date(y, 12, 31)))
         for y in range(start.year, end.year + 1)
@@ -758,13 +891,7 @@ def _run_shareholder_step(
     daily_by: str,
     daily_lookback_days: int,
 ) -> dict:
-    """Walk date windows, writing each as it lands.
-
-    Backfill windows on the record date so it writes exactly the partitions it
-    names. Daily windows on *daily_by* — the announcement date where the report
-    has one, because a change effective weeks ago can be disclosed today and a
-    record-date window would never see it.
-    """
+    """Persist complete date windows as they arrive and keep later failures scoped."""
     from datetime import timedelta
 
     if not config.sources.get("eastmoney", True):
@@ -773,7 +900,9 @@ def _run_shareholder_step(
     if getattr(config, "_backfill", False):
         start = getattr(config, "_backfill_start", None) or HISTORY_START
         end = getattr(config, "_backfill_end", None) or trade_date
-        windows = _year_windows(start, end)
+        windows = (
+            _quarter_windows(start, end) if dataset == "top_holders" else _year_windows(start, end)
+        )
         by = CHANGE_DATE
     else:
         windows = [(trade_date - timedelta(days=daily_lookback_days), trade_date)]
@@ -782,19 +911,87 @@ def _run_shareholder_step(
     rows_read = 0
     rows_written = 0
     empty_windows: list[tuple[date, date]] = []
-    # A backfill here is one window per year over ~25 years, each a paginated
-    # sweep of its own: silent, and long enough to look stopped.
+    failures: list[tuple[str, str]] = []
+    stopped = False
+    state = StateStore(config.meta_root)
     report = sweep_progress(logger, f"{dataset} windows", len(windows), every=1, unit="windows")
+    staged = StagingWriter(config.staging_root).list_run_files(dataset, run_id)
     for index, (win_start, win_end) in enumerate(windows, start=1):
-        # Write per window rather than concatenating the walk: a full
-        # top_holders backfill is ~110k rows a quarter across ~25 years, and
-        # holding all of it costs both memory and everything fetched so far if
-        # the run is killed. Unique batch id — write_simple's default batch-0
-        # would overwrite the window before it.
-        part = fetch_fn(win_start, win_end, by=by, config=config)
+        unit = f"{by}:{win_start.isoformat()}:{win_end.isoformat()}"
+        if stopped:
+            failures.append((unit, "earlier shareholder window failed"))
+            report(index)
+            continue
+        # A failed paginated window has no completed batch file. Its archived
+        # pages remain evidence, but cannot be spliced into a later dynamic
+        # source snapshot and called complete.
+        prefix = f"part-window-{win_start.isoformat()}-{win_end.isoformat()}-"
+        previous = next((path for path in staged if path.name.startswith(prefix)), None)
+        if previous is not None:
+            try:
+                recovered = pl.read_parquet(previous)
+                window_column = (
+                    "record_date"
+                    if dataset == "top_holders"
+                    else "announce_date"
+                    if by == NOTICE_DATE
+                    else "count_date"
+                    if dataset == "shareholder_counts"
+                    else "change_date"
+                )
+                if (
+                    not recovered.is_empty()
+                    and window_column in recovered.columns
+                    and recovered.filter(
+                        pl.col(window_column).is_null()
+                        | (pl.col(window_column) < win_start)
+                        | (pl.col(window_column) > win_end)
+                    ).is_empty()
+                ):
+                    rows_read += recovered.height
+                    rows_written += recovered.height
+                    state.mark_staged_units(dataset, run_id, [unit])
+                    report(index)
+                    continue
+            except (OSError, pl.exceptions.PolarsError):
+                pass
+        source = "eastmoney_backfill" if getattr(config, "_backfill", False) else "eastmoney"
+        capture = None
+        if config.should_archive_raw(dataset):
+            from cnequity.adapters.eastmoney.shareholders import ShareholderCapture
+            from cnequity.storage.raw_archive import begin_capture
+
+            capture = ShareholderCapture(
+                dataset=dataset,
+                run_id=run_id,
+                source=source,
+                request_scope=unit,
+                nonce=begin_capture(config, dataset, run_id, source=source, request_scope=unit),
+            )
+        from cnequity.adapters.eastmoney.shareholders import ShareholderProgress
+
+        progress = ShareholderProgress()
+        kwargs = {"archive_context": capture} if capture is not None else {}
+        kwargs["progress"] = progress
+        try:
+            part = fetch_fn(win_start, win_end, by=by, config=config, **kwargs)
+        except (EastMoneyDatacenterError, SourceCoolingDown) as exc:
+            failures.append((unit, str(exc)))
+            stopped = True
+            logger.warning(
+                "%s window %s failed; completed windows remain staged: %s", dataset, unit, exc
+            )
+            report(index)
+            continue
         report(index)
+        incomplete = progress.failed_report is not None
+        if incomplete:
+            failures.append((unit, progress.failure or f"{progress.failed_report} incomplete"))
+            stopped = True
         if part.is_empty():
-            if getattr(config, "_backfill", False):
+            if not incomplete:
+                state.clear_missing_units(dataset, [unit])
+            if not incomplete and getattr(config, "_backfill", False):
                 empty_windows.append((win_start, win_end))
             continue
         chunk = write_fetched(
@@ -804,35 +1001,71 @@ def _run_shareholder_step(
             part,
             # Historical shareholder endpoints expose the source's current
             # reconstructed snapshot for an old record/disclosure window.
-            # Preserve that fact at row level so strict PIT reads can reject
-            # it even after the data has been copied to another lake without
-            # the registry metadata beside it.
-            source=("eastmoney_backfill" if getattr(config, "_backfill", False) else "eastmoney"),
-            batch_id=f"batch-{win_start.isoformat()}",
+            source=source,
+            batch_id=(
+                f"{'partial-' if incomplete else ''}window-"
+                f"{win_start.isoformat()}-{win_end.isoformat()}-{uuid.uuid4().hex}"
+            ),
+            raw_archive_evidence=(
+                verify_raw_archive(
+                    config,
+                    dataset,
+                    run_id,
+                    source=source,
+                    request_scope=capture.request_scope,
+                )
+                if capture is not None
+                else None
+            ),
         )
+        if not incomplete:
+            state.mark_staged_units(dataset, run_id, [unit])
         rows_read += int(chunk.get("rows_read", 0))
         rows_written += int(chunk.get("rows_written", 0))
+
+    if failures:
+        state.record_missing_units(dataset, failures)
     result: dict = {"rows_read": rows_read, "rows_written": rows_written, "windows": len(windows)}
+    findings: list[dict] = []
+    if failures:
+        result["status"] = "degraded"
+        result["missing_units"] = len(failures)
+        findings.append(
+            {
+                "dataset": dataset,
+                "severity": "warning",
+                "check": "shareholder_missing_windows",
+                "message": (
+                    f"{dataset}: {len(failures)} retryable window(s) incomplete; "
+                    "validated earlier windows remain available"
+                ),
+                "missing_units": [unit for unit, _ in failures],
+            }
+        )
     if empty_windows:
-        result["status"] = "warning"
+        if not failures:
+            result["status"] = "warning"
         result["empty_windows"] = len(empty_windows)
-        result["context_updates"] = {
-            "audit_findings": [
-                {
-                    "dataset": dataset,
-                    "severity": "warning",
-                    "check": "backfill_empty_windows",
-                    "message": (
-                        f"{dataset}: {len(empty_windows)} requested backfill window(s) "
-                        "returned no rows"
-                    ),
-                    "empty_windows": [
-                        {"start": start.isoformat(), "end": end.isoformat()}
-                        for start, end in empty_windows
-                    ],
-                }
-            ]
-        }
+        findings.append(
+            {
+                "dataset": dataset,
+                "severity": "warning",
+                "check": "backfill_empty_windows",
+                "message": (
+                    f"{dataset}: {len(empty_windows)} requested backfill window(s) returned no rows"
+                ),
+                "empty_windows": [
+                    {"start": start.isoformat(), "end": end.isoformat()}
+                    for start, end in empty_windows
+                ],
+            }
+        )
+    if findings:
+        result["context_updates"] = {"audit_findings": findings}
+    if rows_written > 0 and (failures or (dataset == "top_holders" and empty_windows)):
+        # Positive facts from complete windows can publish while the
+        # outstanding window stays incomplete in the persistent ledger.
+        result["batch_settled"] = True
     return result
 
 

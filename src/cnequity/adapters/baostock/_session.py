@@ -15,6 +15,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from datetime import date
 
+from cnequity.domain.http_policy import SourceCoolingDown, record_business_refusal
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
 from cnequity.storage.raw_archive import RawArchiveError
@@ -28,13 +29,10 @@ _LOGIN_RETRIES = 5
 _LOGIN_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 20.0, 30.0)
 _DEFAULT_MIN_INTERVAL = 1.0
 _DEFAULT_BATCH_SIZE = 20
-# Official free-API limits: ≤50k requests/day, no concurrent connections;
-# exceeding either blacklists the IP (error_code=10001011).
-# Measured 2026-07: the free tier also blocks ("黑名单用户") after roughly 43
-# queries in a session, with a ~40 minute cooldown — the binding constraint is
-# cumulative volume, not request spacing. Batch 50 / rest 45s was what got
-# blocked; batch 20 / rest 120s carried 1,658 symbols of valuation and 244 of
-# delisted bars without a single block.
+# The SDK reports an IP blacklist with error_code=10001011 / "黑名单用户".
+# Pacing alone cannot control cumulative volume, so long sweeps rest between
+# batches and an explicit refusal starts a shared cooldown. These values are
+# conservative client defaults, not a published quota or a ban-proof rate.
 _DEFAULT_BATCH_REST = 120.0
 # Watchdog: baostock can trickle bytes forever at ~0 CPU; kill past this.
 _PER_SYMBOL_DEADLINE_SECONDS = 45.0
@@ -42,6 +40,27 @@ _PER_SYMBOL_DEADLINE_SECONDS = 45.0
 _SOCKET_TIMEOUT_SECONDS = 30.0
 _LOGIN_DEADLINE_SECONDS = 30.0
 _LOGOUT_DEADLINE_SECONDS = 10.0
+_BLACKLIST_COOLDOWN_SECONDS = 40 * 60
+
+
+def check_result(result, *, config=None):
+    """Stop every BaoStock path on the SDK's explicit IP-blacklist response.
+
+    The free TCP API reports this in its result object, not an HTTP status.
+    Without a shared circuit the session driver treats it as a retryable empty
+    query, logs in again, and the next dataset repeats the refused requests.
+    """
+    code = str(getattr(result, "error_code", "0") or "0").strip()
+    message = str(getattr(result, "error_msg", "") or "")
+    if code == "10001011" or "黑名单" in message or "blacklist" in message.lower():
+        record_business_refusal(
+            config,
+            "baostock",
+            kind="ip_blacklist",
+            cooldown_seconds=_BLACKLIST_COOLDOWN_SECONDS,
+        )
+        raise SourceCoolingDown("baostock: IP blacklist response; stop this source and cool down")
+    return result
 
 
 def _request_context(config, source: str = "baostock"):
@@ -171,8 +190,9 @@ def _session_call(operation, *, config, label: str, deadline: float):
 def _login(bs, *, sleep=time.sleep, config=None) -> None:
     last_msg = "unknown"
     for attempt in range(_LOGIN_RETRIES):
-        login = _session_call(
-            bs.login, config=config, label="login", deadline=_LOGIN_DEADLINE_SECONDS
+        login = check_result(
+            _session_call(bs.login, config=config, label="login", deadline=_LOGIN_DEADLINE_SECONDS),
+            config=config,
         )
         if getattr(login, "error_code", None) == "0":
             return
@@ -395,6 +415,8 @@ def fetch_per_symbol(
                 try:
                     _relogin(bs, sleep=sleep, config=config)
                     _ensure_socket_timeout()
+                except SourceCoolingDown:
+                    raise
                 except RuntimeError as exc:
                     # Keep rows already collected so the caller can checkpoint;
                     # remaining symbols stay on the resume set.
@@ -435,6 +457,8 @@ def fetch_per_symbol(
                         on_deadline,
                     )
                 except Exception as exc:  # noqa: BLE001 — stalled socket / broken pipe
+                    if isinstance(exc, SourceCoolingDown):
+                        raise
                     if isinstance(exc, RawArchiveError):
                         # A configured critical archive is a publish contract,
                         # not a transient vendor query failure. Retrying and
@@ -452,6 +476,8 @@ def fetch_per_symbol(
                 try:
                     _relogin(bs, sleep=sleep, config=config)
                     _ensure_socket_timeout()
+                except SourceCoolingDown:
+                    raise
                 except RuntimeError as exc:
                     logger.error(
                         "%s login failed while retrying %s: %s; returning partial",

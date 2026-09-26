@@ -1,20 +1,8 @@
-"""Keep this host's IP off EastMoney's ban lists: push2 and datacenter.
+"""Shared EastMoney request budgets and host-family breakers.
 
-push2 / push2his / push2delay ban an egress IP that requests too hard, and the
-ban escalates: from 2026-08 the main push2 pool refused this host while the
-backup hosts still served it, the backups were hit harder to compensate, and
-on 2026-09-22 they refused it too (the first day every EastMoney group ran
-automatically). A failover to another host is therefore the wrong reaction to
-a refusal — it spends the next host's goodwill on the same request pattern.
-
-datacenter-web serves ~20 datasets (and, since 2026-09-26, valuation), so a
-ban there would cost far more. It has never refused this IP — no "busy"
-message and no 403/429 in the logs through 2026-09-26, at 0.5 s / 4 in flight
-— but it does time out on individual slow reports (RPT_SHAREBONUS_DET,
-2026-09-17), which is not a refusal and must not close the whole host.
-
-Rules, enforced before a request leaves the process (every process shares one
-ledger, ``meta/state/eastmoney_guard.json``, reset at local midnight):
+The ledger follows ``CNE_RATE_LIMIT_ROOT`` so lakes using one egress can
+coordinate. A legacy lake-local ledger is imported once per lake and day.
+Rules are enforced before a request leaves the process:
 
 ==============  ==========================  ===================================
 rule            push2                       datacenter
@@ -33,15 +21,14 @@ daily budget    ``push2_daily_budget``      ``datacenter_daily_budget``
 A tripped breaker closes that host family until midnight, across processes.
 A refused request raises a :class:`EastMoneyHostBlockedError`, an
 ``httpx.ConnectError``, so every caller already treats it as a dead route:
-fail fast, no retry, its own fallbacks run. Delete the ledger to clear a
-breaker by hand.
+fail fast, no retry, and its own fallbacks run.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -51,6 +38,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from cnequity.domain.rate_limit import _write_json
 from cnequity.file_lock import exclusive_lock
 
 if TYPE_CHECKING:
@@ -161,6 +149,10 @@ def _today() -> date:
 
 
 def _state_path(config: Config) -> Path:
+    return config.rate_limit_root / "eastmoney_guard.json"
+
+
+def _legacy_state_path(config: Config) -> Path:
     return Path(config.meta_root) / "state" / "eastmoney_guard.json"
 
 
@@ -172,7 +164,7 @@ def _locked(config: Config):
         yield path
 
 
-def _load(path: Path, today: date) -> dict[str, Any]:
+def _load(path: Path, today: date, legacy_path: Path | None = None) -> dict[str, Any]:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -184,17 +176,103 @@ def _load(path: Path, today: date) -> dict[str, Any]:
         section.setdefault("requests", 0)
         section.setdefault("breaker", None)
         section.setdefault("strikes", 0)
+    if legacy_path is not None and legacy_path != path and legacy_path.exists():
+        # A hash identifies the imported lake without exposing its path.
+        identity = hashlib.sha256(str(legacy_path).encode()).hexdigest()[:24]
+        imported = state.setdefault("imported_lakes", [])
+        if identity not in imported:
+            try:
+                legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                legacy = {}
+            if isinstance(legacy, dict) and legacy.get("day") == today.isoformat():
+                for profile in _PROFILES:
+                    old = legacy.get(profile.name)
+                    if not isinstance(old, dict):
+                        continue
+                    section = state[profile.name]
+                    section["requests"] = max(0, int(section["requests"])) + max(
+                        0, int(old.get("requests", 0))
+                    )
+                    section["strikes"] = max(int(section["strikes"]), int(old.get("strikes", 0)))
+                    section["breaker"] = section["breaker"] or old.get("breaker")
+            imported.append(identity)
+    vendor = state.setdefault("vendor", {})
+    vendor["requests"] = max(
+        int(vendor.get("requests", 0) or 0),
+        sum(int(state[profile.name]["requests"]) for profile in _PROFILES),
+    )
     return state
 
 
 def _save(path: Path, state: dict[str, Any]) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    _write_json(path, state)
+
+
+def _section_policy(section: dict[str, Any], profile: _Profile, config: Config) -> None:
+    """Use the strictest positive budget and strike threshold seen today."""
+    requested = int(getattr(config, profile.budget_attr, 0) or 0)
+    current = int(section.get("budget", 0) or 0)
+    section["budget"] = min(current, requested) if current and requested else current or requested
+    section["breaker_policy"] = bool(section.get("breaker_policy")) or bool(
+        getattr(config, profile.breaker_attr, True)
+    )
+    needed = profile.strikes_needed(config)
+    previous = int(section.get("strikes_needed", needed) or needed)
+    section["strikes_needed"] = min(previous, needed)
+
+
+def _vendor_policy(state: dict[str, Any], config: Config) -> None:
+    section = state["vendor"]
+    requested = int(getattr(config, "eastmoney_daily_budget", 0) or 0)
+    if requested < 0:
+        raise ValueError("eastmoney daily_budget must be >= 0")
+    current = int(section.get("budget", 0) or 0)
+    section["budget"] = min(current, requested) if current and requested else current or requested
 
 
 def _host(url: str) -> str:
     return urlparse(url).netloc
+
+
+def _check_policy(config: Config, url: str, profile: _Profile, state: dict) -> None:
+    section = state[profile.name]
+    vendor = state["vendor"]
+    if vendor["budget"] and int(vendor["requests"]) >= int(vendor["budget"]):
+        raise EastMoneyHostBlockedError(
+            f"EastMoney shared daily budget spent ({vendor['requests']}/{vendor['budget']}); "
+            f"not sent: {_host(url)}"
+        )
+    if profile is PUSH2 and getattr(config, "eastmoney_push2_paused", False):
+        raise Push2PausedError(
+            f"push2 paused by [sources.eastmoney].push2_paused; not sent: {_host(url)}"
+        )
+    tripped = section.get("breaker")
+    if tripped:
+        raise profile.breaker_error(
+            f"{profile.name} breaker open since {tripped.get('at')} "
+            f"({tripped.get('reason')} on {tripped.get('host')}); "
+            f"not sent until tomorrow: {_host(url)}"
+        )
+    budget = int(section["budget"])
+    if budget > 0 and int(section["requests"]) >= budget:
+        raise profile.budget_error(
+            f"{profile.name} daily budget spent ({section['requests']}/{budget}); "
+            f"not sent: {_host(url)}"
+        )
+
+
+def ensure_open(config: Config | None, url: str) -> None:
+    """Early rejection and legacy import before auth headers or handshakes."""
+    if config is None or (profile := profile_for(url)) is None:
+        return
+    with _locked(config) as path:
+        state = _load(path, _today(), _legacy_state_path(config))
+        section = state[profile.name]
+        _section_policy(section, profile, config)
+        _vendor_policy(state, config)
+        _save(path, state)
+        _check_policy(config, url, profile, state)
 
 
 def admit(config: Config | None, url: str) -> None:
@@ -207,28 +285,16 @@ def admit(config: Config | None, url: str) -> None:
     profile = profile_for(url)
     if profile is None:
         return
-    if profile is PUSH2 and getattr(config, "eastmoney_push2_paused", False):
-        raise Push2PausedError(
-            f"push2 paused by [sources.eastmoney].push2_paused; not sent: {_host(url)}"
-        )
-    breaker = bool(getattr(config, profile.breaker_attr, True))
-    budget = int(getattr(config, profile.budget_attr, 0) or 0)
     with _locked(config) as path:
-        state = _load(path, _today())
+        state = _load(path, _today(), _legacy_state_path(config))
         section = state[profile.name]
-        tripped = section.get("breaker")
-        if breaker and tripped:
-            raise profile.breaker_error(
-                f"{profile.name} breaker open since {tripped.get('at')} "
-                f"({tripped.get('reason')} on {tripped.get('host')}); "
-                f"not sent until tomorrow: {_host(url)}"
-            )
-        if budget > 0 and int(section["requests"]) >= budget:
-            raise profile.budget_error(
-                f"{profile.name} daily budget spent ({section['requests']}/{budget}); "
-                f"not sent: {_host(url)}"
-            )
+        _section_policy(section, profile, config)
+        _vendor_policy(state, config)
+        # Persist a newly imported legacy ledger before refusing the request.
+        _save(path, state)
+        _check_policy(config, url, profile, state)
         section["requests"] = int(section["requests"]) + 1
+        state["vendor"]["requests"] = int(state["vendor"]["requests"]) + 1
         _save(path, state)
 
 
@@ -279,7 +345,7 @@ def note_outcome(
 
 def _clear_strikes(config: Config, profile: _Profile) -> None:
     with _locked(config) as path:
-        state = _load(path, _today())
+        state = _load(path, _today(), _legacy_state_path(config))
         if state[profile.name]["strikes"]:
             state[profile.name]["strikes"] = 0
             _save(path, state)
@@ -290,12 +356,16 @@ def strike(config: Config | None, url: str, reason: str) -> None:
     if config is None:
         return
     profile = profile_for(url)
-    if profile is None or not getattr(config, profile.breaker_attr, True):
+    if profile is None:
         return
-    needed = profile.strikes_needed(config)
     with _locked(config) as path:
-        state = _load(path, _today())
+        state = _load(path, _today(), _legacy_state_path(config))
         section = state[profile.name]
+        _section_policy(section, profile, config)
+        if not section["breaker_policy"]:
+            _save(path, state)
+            return
+        needed = int(section["strikes_needed"])
         if section.get("breaker"):
             return
         section["strikes"] = int(section["strikes"]) + 1
@@ -332,11 +402,15 @@ def trip(config: Config | None, url: str, reason: str) -> None:
     if config is None:
         return
     profile = profile_for(url)
-    if profile is None or not getattr(config, profile.breaker_attr, True):
+    if profile is None:
         return
     with _locked(config) as path:
-        state = _load(path, _today())
+        state = _load(path, _today(), _legacy_state_path(config))
         section = state[profile.name]
+        _section_policy(section, profile, config)
+        if not section["breaker_policy"]:
+            _save(path, state)
+            return
         if section.get("breaker"):
             return
         section["breaker"] = {
@@ -361,9 +435,19 @@ def breaker_enabled(config: Config | None) -> bool:
 
 def status(config: Config) -> dict[str, Any]:
     """Today's ledger, for reporting."""
-    with _locked(config) as path:
-        state = _load(path, _today())
+    # Atomic writes allow a read-only snapshot: status/--plan must not create
+    # a lake or an egress directory merely to inspect protection.
+    state = _load(_state_path(config), _today(), _legacy_state_path(config))
     for profile in _PROFILES:
-        state[profile.name]["budget"] = int(getattr(config, profile.budget_attr, 0) or 0)
+        section = state[profile.name]
+        _section_policy(section, profile, config)
+        section["budget_remaining"] = (
+            max(0, section["budget"] - section["requests"]) if section["budget"] else None
+        )
     state["push2"]["paused"] = bool(getattr(config, "eastmoney_push2_paused", False))
+    _vendor_policy(state, config)
+    vendor = state["vendor"]
+    vendor["budget_remaining"] = (
+        max(0, vendor["budget"] - vendor["requests"]) if vendor["budget"] else None
+    )
     return state

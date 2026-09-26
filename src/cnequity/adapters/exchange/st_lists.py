@@ -25,6 +25,7 @@ import logging
 import warnings
 from dataclasses import dataclass
 
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol
 
@@ -94,6 +95,7 @@ def fetch_sse_names(*, config=None) -> dict[str, str]:
             resp = _client().get(
                 SSE_URL, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
             )
+            record_http_response(config, _SOURCE, resp)
         resp.raise_for_status()
         text = resp.content.decode("gbk", "ignore")
     except Exception as exc:
@@ -122,6 +124,7 @@ def fetch_szse_names(*, config=None) -> dict[str, str]:
             resp = _client().get(
                 SZSE_URL, headers=_SZSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
             )
+            record_http_response(config, _SOURCE, resp)
         resp.raise_for_status()
         with warnings.catch_warnings():
             # The export ships without a default style; openpyxl warns and then

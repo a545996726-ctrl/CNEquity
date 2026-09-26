@@ -81,3 +81,39 @@ def test_a_quote_is_only_an_answer_for_its_latest_session():
     assert dce_futures.quote_session(stale) == date(2026, 9, 24)
     # The one contract still dated 09-23 does not make the quote 09-23's.
     assert dce_futures.parse_quotes(stale, date(2026, 9, 23)).is_empty()
+
+
+def test_experimental_official_mapping_requires_numeric_fields_and_published_totals():
+    import pytest
+
+    from cnequity.adapters.futures_exchange.common import FuturesPayloadError
+    from cnequity.adapters.futures_exchange.dce import parse_futures
+
+    # Synthetic contract fixture: validates fail-closed behavior, not the live
+    # endpoint's undocumented field mapping or coverage.
+    row = {
+        "contractId": "m2701",
+        "variety": "豆粕",
+        "volumn": 10,
+        "openInterest": 20,
+        "turnover": 300000,
+        "clearPrice": 3000,
+        "lastClear": 3000,
+        "open": 3000,
+        "high": 3000,
+        "low": 3000,
+        "close": 3000,
+        "diffI": 0,
+    }
+    total = {"variety": "总计", "volumn": 10, "openInterest": 20, "turnover": 300000}
+
+    def payload(rows):
+        return json.dumps({"data": rows}).encode()
+
+    assert parse_futures(payload([row, total]), date(2026, 9, 24)).height == 1
+    with pytest.raises(FuturesPayloadError, match="grand total"):
+        parse_futures(payload([row]), date(2026, 9, 24))
+    with pytest.raises(FuturesPayloadError, match="total mismatch"):
+        parse_futures(payload([row, {**total, "volumn": 11}]), date(2026, 9, 24))
+    with pytest.raises(FuturesPayloadError, match="numeric fields"):
+        parse_futures(payload([{**row, "openInterest": None}, total]), date(2026, 9, 24))

@@ -5,9 +5,53 @@ from __future__ import annotations
 from datetime import date
 
 import httpx
+import pytest
 
-from cnequity.adapters.tushare.st_history import fetch_st_history
+from cnequity.adapters.tushare.st_history import _post_json, fetch_st_history
 from cnequity.config import Config
+from cnequity.domain.http_policy import SourceCoolingDown
+
+
+def test_business_rate_limit_stops_remaining_symbols(tmp_path):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"code": -2001, "msg": "请求过于频繁"})
+
+    cfg = Config(data_root=tmp_path, source_intervals={"tushare": 0})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        rows, failed = fetch_st_history(
+            ["920001.BJ", "920002.BJ"],
+            date(2017, 1, 1),
+            date(2017, 1, 5),
+            token="test-token",
+            client=client,
+            config=cfg,
+            trading_dates={
+                "920001.BJ": [date(2017, 1, 4)],
+                "920002.BJ": [date(2017, 1, 4)],
+            },
+        )
+    assert rows.is_empty()
+    assert failed == ["920001.BJ", "920002.BJ"]
+    assert len(calls) == 1
+
+
+def test_http_429_does_not_sleep_and_retry(tmp_path):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": "600"})
+
+    cfg = Config(data_root=tmp_path, source_intervals={"tushare": 0}, max_retries=4)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(SourceCoolingDown):
+            _post_json(
+                client, {"token": "test-token"}, config=cfg, sleep=lambda _: pytest.fail("sleep")
+            )
+    assert len(calls) == 1
 
 
 class _Response:

@@ -33,7 +33,12 @@ _VALUE_COLUMN = 1
 
 
 def fetch_social_financing(
-    *, config=None, start_year: int = 2015, strict: bool = False
+    *,
+    config=None,
+    start_year: int = 2015,
+    strict: bool = False,
+    failures_by_year: dict[int, str] | None = None,
+    completed_years: set[int] | None = None,
 ) -> list[dict]:
     """社融增量 as ``[{"obs_date", "value"}, ...]``, newest year first."""
     return fetch_yearly_series(
@@ -43,4 +48,6 @@ def fetch_social_financing(
         config=config,
         start_year=start_year,
         strict=strict,
+        failures_by_year=failures_by_year,
+        completed_years=completed_years,
     )

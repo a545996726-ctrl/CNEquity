@@ -53,7 +53,7 @@ def config_option(func):
 
 
 def resolve_config_path(config_path: str):
-    path = Path(config_path)
+    path = Path(config_path).expanduser()
     if config_path == USER_CONFIG and not path.exists():
         # `cne init --profile demo` writes the demo config, not the user one, so every
         # command it points at afterwards ("if this fails, run `cne sources
@@ -80,7 +80,30 @@ def resolve_config_path(config_path: str):
 
 
 def _cfg(config: str):
-    return load_config(resolve_config_path(config))
+    path = resolve_config_path(config)
+    try:
+        cfg = load_config(path)
+    except (ValueError, TypeError, OSError) as exc:
+        # Parser messages may contain a literal token/proxy from the TOML.
+        # Keep the path and error type, never echo the configuration text.
+        raise click.ClickException(
+            f"无法加载配置 {path}（{type(exc).__name__}）；请检查 TOML 语法、数值类型和非负有限限速。"
+        ) from None
+    try:
+        cfg._validate_source_limits()
+    except ValueError as exc:
+        raise click.ClickException(str(exc).split("; got", 1)[0]) from None
+    return cfg
+
+
+def comma_values(value: str | None, flag: str) -> list[str] | None:
+    """An explicit empty scope must never become an unscoped network sweep."""
+    if value is None:
+        return None
+    parts = list(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    if not parts:
+        raise click.BadParameter("必须至少指定一项，不能是空字符串或只有逗号", param_hint=flag)
+    return parts
 
 
 def _progress_logging(quiet: bool = False, *, take_over: bool = True) -> bool:

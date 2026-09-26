@@ -57,6 +57,33 @@ def test_shfe_before_2020_is_halved_and_ine_is_split_out():
     assert row["open_interest"] * 2 == rb2001["OPENINTEREST"]
 
 
+def test_shfe_2018_reads_ine_from_its_own_official_file(monkeypatch):
+    day = date(2018, 3, 26)
+    urls = []
+
+    def fetch(url, **_kwargs):
+        urls.append(url)
+        return url.encode()
+
+    def parse(body, _day):
+        url = body.decode()
+        if "www.ine.cn" in url:
+            return pl.DataFrame({"symbol": ["SC1809.INE"], "exchange": ["INE"]})
+        return pl.DataFrame({"symbol": ["CU1804.SHF", "SC1809.INE"], "exchange": ["SHF", "INE"]})
+
+    monkeypatch.setattr(shfe, "fetch_bytes", fetch)
+    monkeypatch.setattr(shfe, "parse_futures", parse)
+    frame = shfe.fetch_shfe_day(day, kind="futures").futures
+    assert frame["symbol"].to_list() == ["CU1804.SHF", "SC1809.INE"]
+    assert urls == [
+        shfe.FUTURES_URL.format(ymd="20180326"),
+        shfe.INE_FUTURES_URL.format(ymd="20180326"),
+    ]
+    urls.clear()
+    shfe.fetch_shfe_day(date(2019, 1, 2), kind="futures")
+    assert urls == [shfe.FUTURES_URL.format(ymd="20190102")]
+
+
 def test_shfe_current_file_skips_tas_and_efp_rows():
     frame = shfe.parse_futures(_read("shfe_20260924.json"), date(2026, 9, 24))
     assert not frame["exchange_code"].str.contains("tas|efp").any()
@@ -125,6 +152,25 @@ def test_czce_options_parse_percent_iv_and_the_second_series():
     _valid(frame, "option_bars")
 
 
+def test_czce_expiry_file_retains_zero_settlement_contract():
+    # An expiry-day row can close its last position without trading. CZCE
+    # publishes the row, and its negative OI change is useful evidence.
+    body = (
+        "郑州商品交易所期权每日行情表(2026-01-13)\n"
+        "合约代码|昨结算|今开盘|最高价|最低价|今收盘|今结算|成交量(手)|持仓量|增减量|成交额(万元)|行权量\n"
+        "FG602C1220|0.50|0|0|0|0|0|0|0|-21168|0|1\n"
+        "小计|||||||0|0|0|0|1\n"
+    ).encode()
+    frame = czce.parse_options(body, date(2026, 1, 13))
+    assert frame.height == 1
+    row = frame.row(0, named=True)
+    assert row["symbol"] == "FG2602C1220.CZC"
+    assert row["settle"] == 0
+    assert row["oi_change"] == -21168
+    assert row["exercise_volume"] == 1
+    _valid(frame, "option_bars")
+
+
 def test_czce_holiday_page_is_no_file():
     with pytest.raises(FuturesDayUnavailable):
         czce.parse_futures(_read("czce_holiday.html"), date(2026, 9, 25))
@@ -159,3 +205,20 @@ def test_gfex_all_zero_total_means_closed():
 
 def test_dce_challenge_page_is_blocked_not_empty():
     assert looks_like_challenge(412, _read("dce_challenge_412.html"))
+
+
+def test_gfex_reference_snapshot_uses_acquisition_day(monkeypatch):
+    from cnequity.domain import market_time
+
+    monkeypatch.setattr(market_time, "shanghai_today", lambda: date(2026, 9, 27))
+    monkeypatch.setattr(gfex, "fetch_bytes", lambda *args, **kwargs: b"snapshot")
+    seen = []
+
+    def parse(body, day, *, kind):
+        seen.append(day)
+        return pl.DataFrame({"as_of": [day]})
+
+    monkeypatch.setattr(gfex, "parse_reference", parse)
+    result = gfex.fetch_gfex_reference(date(2026, 9, 4), products=["lc"], kind="option")
+    assert seen == [date(2026, 9, 27)]
+    assert result["as_of"][0] == date(2026, 9, 27)

@@ -157,16 +157,14 @@ def fetch_bars_paginated(
             raise TdxBarsPaginationError(
                 f"TDX bars pagination exceeded {_MAX_PAGES} pages for {sym}"
             )
-        wait_spec(rate_limit)
         if metrics is not None:
             metrics["requests"] = int(metrics.get("requests", 0)) + 1
             metrics["pages"] = int(metrics.get("pages", 0)) + 1
         try:
-            # The QPS reservation happens before the slot so waiting for an
-            # already-running request does not itself consume in-flight
-            # capacity.  The slot is held only across the wire call and is
-            # released even when the native client raises.
+            # Pace after obtaining capacity so slow preceding calls cannot
+            # release a burst of already-paced requests onto the socket.
             with source_request_slot_spec(rate_limit, metrics=metrics):
+                wait_spec(rate_limit)
                 if is_index:
                     raw = client.index(
                         symbol=code,

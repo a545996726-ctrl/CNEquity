@@ -144,6 +144,63 @@ def test_the_frame_matches_the_eastmoney_contract(monkeypatch):
     assert rows.schema["risk_warning"] == pl.Boolean
 
 
+def test_quotes_and_status_share_one_request_per_exchange(tmp_path, monkeypatch):
+    import io
+
+    import pandas as pd
+
+    from cnequity.adapters.exchange import daily_quotes
+    from cnequity.config import Config
+
+    workbook = io.BytesIO()
+    pd.DataFrame(
+        [
+            {
+                "交易日期": DAY.isoformat(),
+                "证券代码": "000001",
+                "证券简称": "平安银行",
+                "开盘": "11",
+                "最高": "12",
+                "最低": "10",
+                "今收": "11.5",
+                "成交量(万股)": "1",
+                "成交金额(万元)": "11.5",
+            }
+        ]
+    ).to_excel(workbook, index=False)
+    calls = []
+
+    class Response:
+        def __init__(self, is_sse):
+            self.is_sse = is_sse
+            self.content = b"" if is_sse else workbook.getvalue()
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "date": 20260915,
+                "time": 153000,
+                "list": [["600519", "贵州茅台", 100, 101, 99, 100, 10, 1000]],
+            }
+
+    class Client:
+        def get(self, url, **kwargs):
+            calls.append(url)
+            return Response("yunhq" in url)
+
+    monkeypatch.setattr(daily_quotes, "_client", lambda: Client())
+    monkeypatch.setattr(mod, "_client", lambda: Client())
+    cfg = Config(data_root=tmp_path / "data", source_intervals={"exchange": 0.0})
+    quotes = daily_quotes.fetch_exchange_daily_quotes(DAY, config=cfg)
+    status = mod.fetch_trading_status_exchange(None, DAY, config=cfg)
+
+    assert quotes.covered == {"sse", "szse"}
+    assert status.covered == {"sse", "szse"}
+    assert len(calls) == 2
+
+
 def test_a_mixed_fallback_day_keeps_each_row_its_own_owner(tmp_path, monkeypatch):
     """An outage day is served by two sources; one label would misreport one.
 

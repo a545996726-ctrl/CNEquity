@@ -108,7 +108,7 @@ def test_a_contract_past_its_last_trading_day_is_not_owed(cfg):
     }
     _write(cfg, "futures_contracts", [contract])
     report = derivative_tip_scope(cfg, "futures_bars")
-    assert report["state"] == "complete"
+    assert report["state"] == "unverified"
     assert report["expected"] == 1
 
 
@@ -133,7 +133,8 @@ def test_an_exchange_hole_inside_its_span_is_reported(cfg):
     )
     assert exchange_session_gaps(cfg, "futures_bars") == {"CFE": [date(2026, 9, 22)]}
     checks = [f["check"] for f in derivative_findings(cfg)]
-    assert checks == ["futures_exchange_session_gap"]
+    assert "futures_exchange_session_gap" in checks
+    assert "derivative_contracts_missing" in checks
 
 
 def test_a_session_the_exchange_never_published_is_not_a_gap(cfg):
@@ -169,7 +170,7 @@ def test_prices_off_the_tick_grid_and_a_wrong_lot_are_reported(cfg):
     assert {"futures_tick_grid", "futures_multiplier_mismatch"} <= checks
 
 
-def test_without_an_end_date_a_contract_in_delivery_is_not_owed(cfg):
+def test_delivery_month_without_authoritative_expiry_does_not_excuse_missing_rows(cfg):
     _write(
         cfg,
         "futures_bars",
@@ -182,5 +183,134 @@ def test_without_an_end_date_a_contract_in_delivery_is_not_owed(cfg):
         ],
     )
     report = derivative_tip_scope(cfg, "futures_bars")
-    assert report["state"] == "complete"
-    assert report["expected"] == 1
+    assert report["state"] == "incomplete"
+    assert report["expected"] == 2
+    assert report["missing"] == ["IF2609.CFE"]
+
+
+def test_rebuilding_contracts_cannot_turn_a_missing_row_into_proven_expiry(cfg):
+    from cnequity.derive.derivative_contracts import build_futures_contracts
+
+    rows = [
+        _bar("IF2610.CFE", date(2026, 9, 23)),
+        _bar("IF2611.CFE", date(2026, 9, 23)),
+        _bar("IF2610.CFE", date(2026, 9, 24)),
+    ]
+    _write(cfg, "futures_bars", rows)
+    _write(cfg, "futures_contracts", build_futures_contracts(pl.DataFrame(rows).lazy()).to_dicts())
+    report = derivative_tip_scope(cfg, "futures_bars")
+    assert report["state"] == "incomplete"
+    assert report["missing"] == ["IF2611.CFE"]
+
+
+def test_dated_reference_adds_a_new_listing_to_expected_contracts(cfg):
+    _write(
+        cfg,
+        "futures_bars",
+        [_bar("IF2610.CFE", date(2026, 9, 23)), _bar("IF2610.CFE", date(2026, 9, 24))],
+    )
+    path = cfg.meta_root / "derivatives" / "references" / "CFE"
+    path.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["IF2611.CFE"],
+            "kind": ["future"],
+            "list_date": [date(2026, 9, 24)],
+            "last_trade_date": [date(2026, 11, 20)],
+        }
+    ).write_parquet(path / "2026-09-24-future.parquet")
+    report = derivative_tip_scope(cfg, "futures_bars")
+    assert report["missing"] == ["IF2611.CFE"]
+
+
+def test_exchange_missing_for_multiple_sessions_is_visible(cfg):
+    cfg.futures_exchanges = ["CFE", "GFE"]
+    rows = [_bar("IF2610.CFE", date(2026, 9, d)) for d in (21, 22, 23, 24)]
+    _write(cfg, "futures_bars", rows)
+    report = derivative_tip_scope(cfg, "futures_bars")
+    assert report["state"] == "incomplete"
+    assert report["missing_exchanges"] == ["GFE"]
+    assert exchange_session_gaps(cfg, "futures_bars")["GFE"] == [
+        date(2026, 9, d) for d in (21, 22, 23, 24)
+    ]
+
+
+def test_unpublished_mutable_rows_do_not_change_coverage_evidence(cfg):
+    from cnequity.storage.revisions import RevisionStore
+
+    rows = [
+        _bar("IF2610.CFE", date(2026, 9, 23)),
+        _bar("IF2611.CFE", date(2026, 9, 23)),
+        _bar("IF2610.CFE", date(2026, 9, 24)),
+    ]
+    _write(cfg, "futures_bars", rows)
+    RevisionStore(cfg.meta_root, cfg.curated_root, cfg.derived_root).ensure_current("futures_bars")
+    _write(cfg, "futures_bars", [_bar("IF2611.CFE", date(2026, 9, 24))])
+    assert derivative_tip_scope(cfg, "futures_bars")["missing"] == ["IF2611.CFE"]
+
+
+def test_explicit_window_reports_empty_exchange(cfg):
+    assert exchange_session_gaps(
+        cfg, "futures_bars", start=date(2026, 9, 23), end=date(2026, 9, 24)
+    ) == {"CFE": [date(2026, 9, 23), date(2026, 9, 24)]}
+
+
+def test_window_finds_historical_contract_gap_when_tip_has_recovered(cfg):
+    from cnequity.quality.derivative_window import derivative_window
+
+    _write(
+        cfg,
+        "futures_bars",
+        [
+            _bar("IF2610.CFE", date(2026, 9, 22)),
+            _bar("IF2611.CFE", date(2026, 9, 22)),
+            _bar("IF2610.CFE", date(2026, 9, 23)),
+            _bar("IF2610.CFE", date(2026, 9, 24)),
+            _bar("IF2611.CFE", date(2026, 9, 24)),
+        ],
+    )
+    report = derivative_window(cfg, "futures_bars", date(2026, 9, 23), date(2026, 9, 24))
+    assert report["state"] == "incomplete"
+    assert report["exchange_gaps"] == {}
+    assert report["missing_contracts"] == [
+        {"date": date(2026, 9, 23), "exchange": "CFE", "symbols": ["IF2611.CFE"]}
+    ]
+    assert report["observed_contracts"] == 2
+    assert report["missing_metadata"] == ["IF2610.CFE", "IF2611.CFE"]
+
+
+def test_window_without_supported_route_never_claims_complete(cfg):
+    from cnequity.quality.derivative_window import derivative_window
+
+    cfg.futures_exchanges = ["DCE"]
+    report = derivative_window(cfg, "option_bars", date(2026, 9, 23), date(2026, 9, 24))
+    assert report["state"] == "unverified"
+    assert any("does not supply" in reason for reason in report["unverified_reasons"])
+
+
+def test_window_checks_authoritative_contract_absent_for_entire_window(cfg, monkeypatch):
+    from cnequity.quality import derivative_window as module
+
+    _write(cfg, "futures_bars", [_bar("IF2610.CFE", date(2026, 9, 24))])
+    real_scan = module._scan
+    metadata = pl.DataFrame(
+        {
+            "symbol": ["IF2611.CFE"],
+            "exchange": ["CFE"],
+            "dates_basis": ["exchange"],
+            "list_date": [date(2026, 9, 23)],
+            "last_trade_date": [date(2026, 9, 24)],
+        }
+    ).lazy()
+    monkeypatch.setattr(
+        module,
+        "_scan",
+        lambda config, dataset: (
+            metadata if dataset == "futures_contracts" else real_scan(config, dataset)
+        ),
+    )
+    report = module.derivative_window(cfg, "futures_bars", date(2026, 9, 23), date(2026, 9, 24))
+    assert [row["symbols"] for row in report["missing_contracts"]] == [
+        ["IF2611.CFE"],
+        ["IF2611.CFE"],
+    ]

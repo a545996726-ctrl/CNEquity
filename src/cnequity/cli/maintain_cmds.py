@@ -192,8 +192,8 @@ def derive(
     所以在这里跑它们属于修复或补更早的窗口，不是正常一天的一部分。
     `sector_routing`、`sector_code_map` 和 `valuation_orphans` 没有任何调度会跑，只能手动执行。
     `futures_continuous` 和 `option_greeks` 在 `derivatives` 组里日更。
-    `futures_continuous` 每次全量重算；`option_greeks` 只重算期权/期货分区比它新的交易日，
-    所以回填 futures_bars / option_bars 之后直接再跑一次即可；换了模型或利率历史才需要 `--full`。
+    `futures_continuous` 每次全量重算；`option_greeks` 自动检测行情、合约、利率和模型依赖变化。
+    衍生品回填后自动更新合约及派生；`--full` 可显式全部重算。
     """
     # Derive targets are lower case in the registry, and command names are
     # already case-insensitive; a target typed in caps should resolve the same.
@@ -225,6 +225,8 @@ def derive(
             outcome["rows_written"] = summary.get("rows", 0)
         click.echo(json.dumps(summary, indent=2, default=str))
     elif name == "futures_continuous":
+        if start or end:
+            raise click.ClickException("futures_continuous 必须全量重算，不支持 --start / --end")
         from cnequity.derive.futures_continuous import derive_futures_continuous
 
         with _published_derive(cfg, name) as outcome:
@@ -345,6 +347,11 @@ def clean(
     并且记录过一次成功的 compact。没跑完或从没 compact 过的 staging 会留着等重试，
     除非加了 --force。同时清理过期的 `meta/source_snapshots` run_id 目录。
     """
+    if dry_run and reconcile_runs:
+        raise click.UsageError(
+            "--dry-run 不能与 --reconcile-runs 同用：对账会修改运行状态。"
+            "请先去掉 --reconcile-runs 查看清理预演。"
+        )
     cfg = _cfg(config_path)
     attach_log_file(cfg, "run-clean")
     reconciled: dict[str, int] | None = None

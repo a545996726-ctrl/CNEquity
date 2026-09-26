@@ -166,6 +166,147 @@ class StateStore:
             payload["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._write_payload(path, payload)
 
+    def get_missing_dates(self, dataset: str) -> set[date]:
+        """Durable failed by-date requests, independent of the max watermark."""
+        rows = self.get_payload(dataset).get("missing_ranges", [])
+        if not isinstance(rows, list):
+            raise ValueError(f"state field {dataset}.missing_ranges must be a list")
+        return {date.fromisoformat(row["start"]) for row in rows}
+
+    def record_missing_dates(
+        self, dataset: str, days: Iterable[date], *, reason: str, now: datetime | None = None
+    ) -> None:
+        stamp = _utc_now(now).isoformat()
+        with self.transaction(dataset) as payload:
+            rows = {row["start"]: row for row in payload.get("missing_ranges", [])}
+            for day in days:
+                key = day.isoformat()
+                old = rows.get(key, {})
+                rows[key] = {
+                    "start": key,
+                    "end": key,
+                    "last_failure": reason,
+                    "last_attempt": stamp,
+                    "next_retry_at": stamp,
+                    "attempts": int(old.get("attempts", 0)) + 1,
+                }
+            payload["missing_ranges"] = [rows[key] for key in sorted(rows)]
+            complete_raw = payload.get("complete_through")
+            if complete_raw and rows:
+                safe = min(
+                    date.fromisoformat(complete_raw),
+                    date.fromisoformat(min(rows)) - timedelta(days=1),
+                )
+                payload["complete_through"] = safe.isoformat()
+            payload["coverage_status"] = "incomplete"
+            payload["updated_at"] = stamp
+
+    def clear_missing_dates(self, dataset: str, days: Iterable[date]) -> None:
+        cleared = {day.isoformat() for day in days}
+        if not cleared:
+            return
+        with self.transaction(dataset) as payload:
+            payload["missing_ranges"] = [
+                row for row in payload.get("missing_ranges", []) if row["start"] not in cleared
+            ]
+            payload["coverage_status"] = (
+                "incomplete"
+                if payload["missing_ranges"] or payload.get("missing_units")
+                else "unknown"
+            )
+            payload["updated_at"] = _utc_now().isoformat()
+
+    def mark_staged_request_days(self, dataset: str, run_id: str, days: Iterable[date]) -> None:
+        """Remember validated requests until their staging reaches a revision."""
+        incoming = {day.isoformat() for day in days}
+        if not incoming:
+            return
+        with self.transaction(dataset) as payload:
+            staged = payload.setdefault("staged_request_days", {})
+            staged[run_id] = sorted(set(staged.get(run_id, [])) | incoming)
+            payload["last_attempt"] = _utc_now().isoformat()
+            payload["updated_at"] = _utc_now().isoformat()
+
+    def commit_staged_request_days(self, dataset: str, run_id: str) -> None:
+        """Clear only gaps whose successful request was actually published."""
+        with self.transaction(dataset) as payload:
+            staged = payload.get("staged_request_days", {})
+            days = set(staged.pop(run_id, []))
+            if not days:
+                return
+            payload["missing_ranges"] = [
+                row for row in payload.get("missing_ranges", []) if row["start"] not in days
+            ]
+            if not staged:
+                payload.pop("staged_request_days", None)
+            payload["last_success"] = _utc_now().isoformat()
+            payload["coverage_status"] = (
+                "incomplete"
+                if payload["missing_ranges"] or payload.get("missing_units")
+                else "unknown"
+            )
+            payload["updated_at"] = _utc_now().isoformat()
+
+    def record_missing_units(self, dataset: str, failures: Iterable[tuple[str, str]]) -> None:
+        incoming = list(failures)
+        if not incoming:
+            return
+        stamp = _utc_now().isoformat()
+        with self.transaction(dataset) as payload:
+            units = payload.setdefault("missing_units", {})
+            for unit, reason in incoming:
+                old = units.get(unit, {})
+                units[unit] = {
+                    "reason": reason,
+                    "last_attempt": stamp,
+                    "next_retry_at": stamp,
+                    "attempts": int(old.get("attempts", 0)) + 1,
+                }
+            payload["coverage_status"] = "incomplete"
+            payload["updated_at"] = stamp
+
+    def clear_missing_units(self, dataset: str, units: Iterable[str]) -> None:
+        """Clear gaps for ranges whose complete request confirmed no rows."""
+        cleared = set(units)
+        if not cleared:
+            return
+        with self.transaction(dataset) as payload:
+            missing = payload.get("missing_units", {})
+            for unit in cleared:
+                missing.pop(unit, None)
+            if not missing:
+                payload.pop("missing_units", None)
+            payload["coverage_status"] = (
+                "incomplete" if missing or payload.get("missing_ranges") else "unknown"
+            )
+            payload["updated_at"] = _utc_now().isoformat()
+
+    def mark_staged_units(self, dataset: str, run_id: str, units: Iterable[str]) -> None:
+        incoming = set(units)
+        if not incoming:
+            return
+        with self.transaction(dataset) as payload:
+            staged = payload.setdefault("staged_units", {})
+            staged[run_id] = sorted(set(staged.get(run_id, [])) | incoming)
+
+    def commit_staged_units(self, dataset: str, run_id: str) -> None:
+        with self.transaction(dataset) as payload:
+            staged = payload.get("staged_units", {})
+            units = staged.pop(run_id, [])
+            if not units:
+                return
+            missing = payload.get("missing_units", {})
+            for unit in units:
+                missing.pop(unit, None)
+            if not staged:
+                payload.pop("staged_units", None)
+            if not missing:
+                payload.pop("missing_units", None)
+            payload["coverage_status"] = (
+                "incomplete" if missing or payload.get("missing_ranges") else "unknown"
+            )
+            payload["updated_at"] = _utc_now().isoformat()
+
     # ------------------------------------------------------------------
     # Outstanding keys: what a tolerated gap still owes the lake.
     #

@@ -31,6 +31,7 @@ import httpx
 import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import (
     SINA_FETCH_ATTEMPTS,
     SINA_RATE_LIMIT_COOLDOWN_SECONDS,
@@ -189,6 +190,7 @@ def _get_with_cooldown(client, sina_sym: str, *, config):
         try:
             with source_request(config, "sina"):
                 resp = client.get(_URL, params={"symbol": sina_sym})
+                record_http_response(config, "sina", resp)
             resp.raise_for_status()
             return resp
         except Exception as exc:  # noqa: BLE001 — classified on the status below

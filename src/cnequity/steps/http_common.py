@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import logging
+import re
+import uuid
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -11,9 +14,10 @@ from datetime import date
 import polars as pl
 
 from cnequity.config import Config
-from cnequity.domain.datasets import DATASETS
-from cnequity.domain.schemas import data_version_for, with_provenance
+from cnequity.domain.datasets import DATASETS, fetch_semantics
+from cnequity.domain.schemas import data_version_for, validate_dataframe, with_provenance
 from cnequity.steps.common import fetch_incremental_daily, write_simple
+from cnequity.storage import StagingWriter
 from cnequity.storage.raw_archive import (
     RawArchiveError,
     RawPayloadArchive,
@@ -26,6 +30,8 @@ from cnequity.storage.raw_archive import (
     capture_nonce as active_capture_nonce,
 )
 from cnequity.storage.state import StateStore
+
+logger = logging.getLogger(__name__)
 
 _RAW_ARCHIVE_EVIDENCE_SEAL = object()
 
@@ -484,6 +490,20 @@ def write_fetched(
             url=url,
         )
         result = write_simple(config, run_id, dataset, df, batch_id=batch_id)
+    if not df.is_empty() and "source" in df.columns:
+        from cnequity.diagnostics.source_health import record_validated_ingest
+
+        try:
+            for row in df.group_by("source").len().iter_rows(named=True):
+                record_validated_ingest(
+                    config,
+                    dataset=dataset,
+                    source=str(row["source"]),
+                    rows=int(row["len"]),
+                    run_id=run_id,
+                )
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("%s: could not save passive source evidence: %s", dataset, exc)
     if snapshot_date is not None:
         _mark_snapshot_capture(config, dataset, snapshot_date)
     return result
@@ -524,6 +544,42 @@ def run_incremental_fetched(
     request_params: dict | None = None,
     url: str | None = None,
 ) -> dict:
+    checkpoint_days = (
+        fetch_semantics(dataset) == "by_date"
+        and not getattr(config, "_backfill", False)
+        and not config.should_archive_raw(dataset)
+    )
+    recovered: dict[date, pl.DataFrame] = {}
+    if checkpoint_days:
+        for path in StagingWriter(config.staging_root).list_run_files(dataset, run_id):
+            match = re.fullmatch(r"part-day-(\d{4}-\d{2}-\d{2})-[0-9a-f]+", path.stem)
+            if match:
+                recovered[date.fromisoformat(match.group(1))] = validate_dataframe(
+                    pl.read_parquet(path), dataset
+                )
+    successful_days: list[date] = []
+
+    def on_day(day: date, part: pl.DataFrame) -> None:
+        if checkpoint_days:
+            staged = part
+            if universe and not staged.is_empty():
+                if "symbol" not in staged.columns:
+                    raise RuntimeError(
+                        f"{dataset}: cannot reconcile source rows without a symbol column"
+                    )
+                staged = staged.filter(pl.col("symbol").is_in(list(universe)))
+                if staged.is_empty():
+                    raise RuntimeError(f"{dataset}: no rows matched the reconciled universe")
+            write_fetched(
+                config,
+                run_id,
+                dataset,
+                staged,
+                source=source,
+                batch_id=f"day-{day.isoformat()}-{uuid.uuid4().hex}",
+            )
+        successful_days.append(day)
+
     df, findings = fetch_incremental_daily(
         config,
         dataset,
@@ -531,7 +587,11 @@ def run_incremental_fetched(
         fetch_fn,
         allow_empty=allow_empty,
         date_col=date_col,
+        on_day=on_day,
+        recovered_days=recovered,
+        durable_day_checkpoints=checkpoint_days,
     )
+    successful_days.extend(day for day in recovered if day not in successful_days)
     if universe and not df.is_empty():
         # Constrain a live snapshot (e.g. EastMoney valuation clist) to the
         # tradable universe: the source returns delisted / never-traded names the
@@ -590,23 +650,34 @@ def run_incremental_fetched(
                 "source/request evidence factory"
             )
         evidence = raw_archive_evidence_factory()
-    result = write_fetched(
-        config,
-        run_id,
-        dataset,
-        df,
-        source=source,
-        raw_payload=raw_payload,
-        raw_archive_evidence=evidence,
-        request_params=request_params,
-        url=url,
-    )
+    if checkpoint_days:
+        # Each requested day is already durable. Avoid writing a second full
+        # copy under batch-0, and retain earlier days if a later request fails.
+        result = {"rows_read": df.height, "rows_written": df.height}
+    else:
+        result = write_fetched(
+            config,
+            run_id,
+            dataset,
+            df,
+            source=source,
+            raw_payload=raw_payload,
+            raw_archive_evidence=evidence,
+            request_params=request_params,
+            url=url,
+        )
+    StateStore(config.meta_root).mark_staged_request_days(dataset, run_id, successful_days)
     _mark_snapshot_capture(config, dataset, trade_date)
     if findings:
         result["context_updates"] = {"audit_findings": findings}
         status = _incomplete_window_status(findings)
         if status is not None:
             result["status"] = status
+        if checkpoint_days and status == "degraded":
+            # The missing date is in StateStore and its neighbours are durable
+            # individual files. The batch may settle while coverage remains
+            # explicitly incomplete and the next plan retries that date.
+            result["batch_settled"] = True
     return result
 
 

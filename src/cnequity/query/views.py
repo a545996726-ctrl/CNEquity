@@ -205,6 +205,7 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
     con.execute(f"SET threads={config.duckdb_threads}")
 
     for name, spec in sorted(DATASETS.items()):
+        view_name = "flash_news_wire_legacy" if name == "flash_news_wire" else name
         glob_path, hive = _view_glob(root, spec)
         if _glob_has_files(glob_path) or require_data:
             source = (
@@ -219,12 +220,43 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
             }
             con.execute(
                 f"""
-                CREATE OR REPLACE VIEW {name} AS
+                CREATE OR REPLACE VIEW {view_name} AS
                 {_view_select_sql(name, glob_path, hive, columns=columns)}
                 """
             )
         else:
-            con.execute(_empty_view_sql(name))
+            con.execute(_empty_view_sql(name).replace(f"VIEW {name} AS", f"VIEW {view_name} AS"))
+
+    # Existing flash revisions remain readable, while every new EastMoney
+    # item is stored only in news_headlines. Keep the wire's public columns and
+    # hash contract in SQL, including the compatibility key's de-duplication.
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW flash_news_wire AS
+        SELECT * FROM (
+            SELECT wire_id, wire_source, item_hash, publish_date, publish_time,
+                   title, summary, related_symbols, importance, channel,
+                   source, data_version, fetched_at
+            FROM flash_news_wire_legacy
+            UNION ALL
+            SELECT 'eastmoney:' || news_id AS wire_id,
+                   'eastmoney' AS wire_source,
+                   substr(sha256('eastmoney|' || CAST(publish_date AS VARCHAR)
+                       || 'T' || coalesce(publish_time, '00:00:00') || '|'
+                       || trim(title)), 1, 16) AS item_hash,
+                   publish_date, publish_time, trim(title) AS title, summary,
+                   related_symbols, CAST(NULL AS TINYINT) AS importance,
+                   coalesce(channel, 'fast_news') AS channel,
+                   source, data_version, fetched_at
+            FROM news_headlines
+            WHERE news_id IS NOT NULL AND trim(title) <> ''
+        )
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY wire_id, wire_source
+            ORDER BY fetched_at DESC NULLS LAST
+        ) = 1
+        """
+    )
 
     # Adjusted bars per ADR-0004: only hfq factors are stored.
     #   hfq price = raw * factor

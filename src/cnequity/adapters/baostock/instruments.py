@@ -24,7 +24,7 @@ from datetime import date
 
 import polars as pl
 
-from cnequity.adapters.baostock._session import _login, _logout, import_baostock
+from cnequity.adapters.baostock._session import _login, _logout, check_result, import_baostock
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import (
     format_symbol,
@@ -102,7 +102,7 @@ def fetch_instrument_basics(*, bs=None, sleep=time.sleep, config=None) -> pl.Dat
     _login(bs, sleep=sleep, config=config)
     try:
         with source_request(config, "baostock"):
-            rs = bs.query_stock_basic()
+            rs = check_result(bs.query_stock_basic(), config=config)
         error_code = getattr(rs, "error_code", "0")
         if error_code != "0":
             raise RuntimeError(

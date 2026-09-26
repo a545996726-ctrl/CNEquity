@@ -117,6 +117,8 @@ def test_empty_days_reported_not_fatal(tmp_path, monkeypatch):
     assert out["days_empty"] == 1
     assert out["days_fetched"] == 1
     assert out["rows_written"] == 50
+    assert out["status"] == "warning"
+    assert out["batch_settled"] is True
     finding = out["context_updates"]["audit_findings"][0]
     assert finding["check"] == "backfill_empty_days"
     assert finding["severity"] == "warning"
@@ -141,10 +143,33 @@ def test_partial_response_is_not_staged_and_is_retryable(tmp_path, monkeypatch):
     assert out["days_fetched"] == 0
     assert out["failed_days"] == 1
     assert out["rows_written"] == 0
+    assert not out.get("batch_settled")
     assert not list(cfg.staging_root.glob("margin_trading/**/*.parquet"))
     finding = out["context_updates"]["audit_findings"][0]
     assert finding["check"] == "backfill_incomplete_days"
     assert finding["days"] == [{"trade_date": "2026-06-01", "symbols": 1}]
+
+
+def test_empty_day_does_not_settle_a_batch_with_an_incomplete_day(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "data")
+    cfg._backfill_start = date(2026, 6, 1)
+    cfg._backfill_end = date(2026, 6, 3)
+    _setup(monkeypatch, cfg)
+
+    def fetch(d: date, *, client=None) -> pl.DataFrame:
+        if d.day == 1:
+            return pl.DataFrame()
+        if d.day == 2:
+            return pl.DataFrame([_fake_row(d)])
+        return _fake_rows(d)
+
+    monkeypatch.setattr("cnequity.steps.capital.fetch_margin_trading", fetch)
+    out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-mixed")
+    assert out["days_empty"] == 1
+    assert out["failed_days"] == 1
+    assert out["rows_written"] == 50
+    assert out["status"] == "warning"
+    assert not out.get("batch_settled")
 
 
 def test_rejects_rows_from_a_different_requested_date(tmp_path, monkeypatch):

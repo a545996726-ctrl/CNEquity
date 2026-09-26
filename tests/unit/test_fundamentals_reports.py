@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from cnequity.adapters.eastmoney import fundamentals as fundamentals_module
 from cnequity.adapters.eastmoney.fundamentals import (
     _ANNOUNCE_SOURCE,
     _REPORTS,
@@ -226,6 +227,34 @@ def test_backfill_rejects_rows_from_another_report_period(monkeypatch):
             backfill=True,
             client=client,  # type: ignore[arg-type]
         )
+
+
+def test_backfill_keeps_other_report_units_when_one_request_fails(monkeypatch):
+    monkeypatch.setattr(fundamentals_module, "_report_period_dates", lambda *a, **k: ["2024-03-31"])
+    queried: list[str] = []
+
+    def fake_report(_client, report, _expr, **_kwargs):
+        queried.append(report.name)
+        if report.name == "RPT_DMSK_FN_BALANCE":
+            raise RuntimeError("gateway reset")
+        if report is _ANNOUNCE_SOURCE:
+            return [_lico_row(REPORTDATE="2024-03-31")]
+        return []
+
+    monkeypatch.setattr(fundamentals_module, "_fetch_report", fake_report)
+    staged: list[str] = []
+    failures: list[tuple[str, str]] = []
+    frame = fetch_financial_statement_items(
+        date(2024, 6, 28),
+        backfill=True,
+        client=FakeDatacenterClient({}),  # type: ignore[arg-type]
+        on_unit=lambda unit, scope, rows: staged.append(unit),
+        failures=failures,
+    )
+    assert frame.height > 0
+    assert "2024-03-31|RPT_LICO_FN_CPD" in staged
+    assert failures == [("2024-03-31|RPT_DMSK_FN_BALANCE", "gateway reset")]
+    assert "RPT_DMSK_FN_CASHFLOW" in queried
 
 
 def _REPORTS_in(urls: list[str]) -> set[str]:

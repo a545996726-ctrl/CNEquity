@@ -8,7 +8,7 @@ and the rendering rules that keep the page hard to misread.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 import pytest
@@ -136,7 +136,7 @@ def test_probes_grouped_by_blast_radius_are_contiguous():
 def test_only_filter_selects_a_subset(config, monkeypatch):
     monkeypatch.setattr(sh, "PROBES", (_probe(key="a"), _probe(key="b")))
     monkeypatch.setattr(sh, "PROBES_BY_KEY", {p.key: p for p in sh.PROBES})
-    report = sh.run_probes(config, vantage="test", only=["a", "nope"])
+    report = sh.run_probes(config, vantage="test", only=["a", "a"])
     assert [r.key for r in report.results] == ["a"]
 
 
@@ -146,6 +146,93 @@ def test_empty_only_probes_nothing(config, monkeypatch):
     monkeypatch.setattr(sh, "PROBES", (_probe(key="a"),))
     monkeypatch.setattr(sh, "PROBES_BY_KEY", {p.key: p for p in sh.PROBES})
     assert sh.run_probes(config, vantage="test", only=[]).results == []
+
+
+def test_manual_only_source_is_not_probed_by_default(config, monkeypatch):
+    calls = []
+    risky = _probe(key="risky", manual_only=True, run=lambda _cfg: calls.append(1) or "ok")
+    monkeypatch.setattr(sh, "PROBES", (risky,))
+    monkeypatch.setattr(sh, "PROBES_BY_KEY", {risky.key: risky})
+    report = sh.run_probes(config, vantage="test")
+    assert report.results[0].status == "skipped"
+    assert "--only" in report.results[0].detail
+    assert calls == []
+    assert sh.run_probes(config, vantage="test", only=["risky"]).results[0].status == "ok"
+    assert calls == [1]
+
+
+def test_futures_probe_reads_only_futures_and_at_most_two_sessions(config):
+    from cnequity.adapters.futures_exchange.common import FuturesDayUnavailable
+
+    calls = []
+
+    class Reader:
+        def fetch(self, day, *, kind, config):
+            calls.append((day, kind))
+            raise FuturesDayUnavailable("closed")
+
+    with pytest.raises(sh.ProbeEmpty, match="两个工作日"):
+        sh._probe_futures_exchange("SHF", reader=Reader())(config)
+    assert len(calls) == 2
+    assert all(kind == "futures" for _, kind in calls)
+
+
+def test_bse_probe_only_requests_landing_and_first_page(config, monkeypatch):
+    import httpx
+
+    calls = []
+    original_client = httpx.Client
+
+    def respond(request):
+        calls.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, text="landing")
+        return httpx.Response(200, json=[{"content": [{"hqzqdm": "920571"}], "totalElements": 580}])
+
+    def client_with_mock(*args, **kwargs):
+        return original_client(*args, transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client_with_mock)
+    detail = sh._probe_bse(config)
+    assert "未检查余页" in detail
+    assert len(calls) == 2
+
+
+def test_recent_validated_ingest_avoids_active_probe(config, monkeypatch):
+    monkeypatch.setenv("CNE_SOURCE_VANTAGE", "test")
+    sh.record_validated_ingest(config, dataset="daily_bars", source="bse", rows=3, run_id="run-1")
+    probe = _probe(key="bse", run=lambda _cfg: pytest.fail("probe must not send"))
+    monkeypatch.setattr(sh, "PROBES_BY_KEY", {"bse": probe})
+    report = sh.run_probes(config, vantage="test", only=["bse"], stale_only=True)
+    assert report.results[0].status == "ok"
+    assert report.results[0].sample_kind == "passive"
+    assert report.results[0].latency_ms is None
+
+
+def test_passive_success_does_not_mask_active_failure_in_slo():
+    from cnequity.diagnostics.source_slo import evaluate_source_slo
+
+    now = datetime.now(timezone.utc)
+    base = dict(
+        key="bse", label="BSE", host="bse", powers=["daily_bars"], latency_ms=None, detail="x"
+    )
+    report = sh.HealthReport(
+        vantage="cn",
+        generated_at=now.isoformat(),
+        version="test",
+        results=[
+            sh.ProbeResult(**base, status="blocked", sample_kind="active"),
+            sh.ProbeResult(**base, status="ok", sample_kind="passive"),
+        ],
+    )
+    row = next(
+        item
+        for item in evaluate_source_slo([report], now=now, minimum_observations=1).results
+        if item.key == "bse"
+    )
+    assert row.evidence_kind == "active"
+    assert row.active_observations == row.passive_observations == 1
+    assert row.availability == 0.0
 
 
 # --- serialisation ---------------------------------------------------------

@@ -19,12 +19,13 @@ from cnequity.cli._shared import (
     _progress_logging,
     _run_status_exit_code,
     attach_log_file,
+    comma_values,
     config_option,
     ingest_scope_label,
     parse_date_option,
     resolve_config_path,
 )
-from cnequity.config import load_config, validate_config, write_user_config
+from cnequity.config import validate_config, write_user_config
 from cnequity.domain.market_time import shanghai_today
 from cnequity.orchestrator.engine import JobEngine
 from cnequity.orchestrator.run_lock import INIT_JOB_LOCK, is_run_locked
@@ -87,11 +88,12 @@ def _echo_init_plan(
     elif profile == "full":
         click.echo(
             f"初始化计划：full，{scope}，日线从 {BACKFILL_START.isoformat()} 起；"
-            "实测量级约 3 小时、GB 级。"
+            "深历史需要更多分页；耗时以批次进度和 ETA 为准。"
         )
     else:
         click.echo(
-            f"初始化计划：quick，{scope}，最近 {QUICK_PROFILE_YEARS} 年；实测量级约 1 小时、GB 级。"
+            f"初始化计划：quick，{scope}，最近 {QUICK_PROFILE_YEARS} 年；"
+            "耗时受源可达性、分页和已有缓存影响，以批次进度和 ETA 为准。"
         )
     if not baostock_enabled:
         click.echo(
@@ -104,12 +106,12 @@ def _echo_init_plan(
             f"范围说明：init 不是只拉 {st_history_budget} 条数据；"
             f"{st_history_budget} 只证券上限仅用于最慢的历史 ST 状态扫描。"
             "要补完这部分，init 后运行 `cne backfill trading_status --config "
-            f"{config_path}`（全市场整轮实测约 10–11 小时）。"
+            f"{config_path}`；全市场逐证券扫描耗时较长，以续跑进度为准。"
         )
     else:
         click.echo(
             "历史 ST 说明：本配置未设置每轮证券数上限，init 会尝试完成整轮扫描；"
-            "全市场实测约 10–11 小时，以实时进度为准。"
+            "全市场逐证券扫描耗时较长，以实时进度为准。"
         )
 
 
@@ -152,7 +154,7 @@ def _reject_foreign_options(profile: str, names: tuple[str, ...]) -> None:
     help="建多大。demo = 用真实数据源抓几只票，sample = 同样的形状但离线且确定 —— "
     "两者都不是一个市场。"
     f"quick = 全市场标的、最近 {QUICK_PROFILE_YEARS} 年；"
-    f"full = 全市场标的、从 {BACKFILL_START.isoformat()} 起（实测约 3 倍时间）。"
+    f"full = 全市场标的、从 {BACKFILL_START.isoformat()} 起（通常需要更多分页）。"
     "以后可以用 `cne backfill daily_bars` 补深。",
 )
 @click.option(
@@ -255,10 +257,9 @@ def init(
     `coverage_start` 会如实记下湖有多深，少一个标的却会看起来像这只票从未交易过。
 
     \b
-    为什么 quick 是默认：单连接每 10 只标的实测，3 年约 4.8 秒，而 2001 年至今约 15.1 秒 ——
-    全市场就是一小时和几小时的差别。再浅几乎买不到什么（1 年实测约 3.9 秒，窗口一短，
-    每个标的的往返开销就占主导），却会丢掉多数因子研究要用的多年窗口。
-    所以：第一次就跑出一个能用的湖，需要多深再补多深。
+    为什么 quick 是默认：历史窗口越深，分页和落盘通常越多；但窗口很浅时，
+    每只标的仍有连接和请求开销。近 3 年是默认研究窗口，先建可用的湖，
+    需要更深历史时再按缺口补齐。实际耗时取决于出口、源响应和缓存。
 
     \b
     不用重跑 init 也能补深：
@@ -282,7 +283,7 @@ def init(
 
         runner = run_sample_demo if profile == "sample" else run_demo
         runner(
-            symbols=[s.strip() for s in symbols.split(",") if s.strip()],
+            symbols=comma_values(symbols, "--symbols"),
             days=days,
             data_root=Path(data_root),
             trade_date=parse_date_option(trade_date, "--trade-date"),
@@ -432,7 +433,7 @@ def config_cmd(action: str, config_path: str, force: bool, data_root: str | None
         return
 
     if action == "create":
-        out = Path(config_path)
+        out = Path(config_path).expanduser()
         try:
             write_user_config(out, data_root=data_root, force=force)
         except FileExistsError as exc:
@@ -461,19 +462,29 @@ def doctor(config_path: str, as_json: bool):
     最典型的是配置里启用了某个源、但它背后的包没装，这件事别的命令都不会说。
     """
     from cnequity.diagnostics.render import render_text, to_dict
-    from cnequity.diagnostics.report import build_report
+    from cnequity.diagnostics.report import Finding, Severity, build_report
 
     cfg = None
     resolved: Path | None = None
-    path = Path(config_path)
+    path = Path(config_path).expanduser()
+    config_problem = None
     if path.exists():
         try:
-            cfg = load_config(path)
+            cfg = _cfg(str(path))
             resolved = path
         except Exception as exc:  # config errors must not hide the dependency report
-            click.echo(f"WARN: 配置解析失败 {path}: {exc}", err=True)
+            config_problem = f"配置加载失败：{path}（{type(exc).__name__}）"
+    elif click.get_current_context().get_parameter_source("config_path") in {
+        click.core.ParameterSource.COMMANDLINE,
+        click.core.ParameterSource.ENVIRONMENT,
+    }:
+        config_problem = f"指定的配置不存在：{path}"
 
     report = build_report(config=cfg, config_path=resolved)
+    if config_problem:
+        report.findings.append(
+            Finding(Severity.ERROR, config_problem, fix="cne config validate --config <path>")
+        )
 
     if as_json:
         click.echo(json.dumps(to_dict(report), indent=2, default=str))

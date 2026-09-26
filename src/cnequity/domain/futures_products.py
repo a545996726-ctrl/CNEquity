@@ -100,7 +100,7 @@ _FUTURES: tuple[ProductSpec, ...] = (
     _f("SHF", "BR", "丁二烯橡胶", 5, 5, _T),
     _f("SHF", "SP", "纸浆", 10, 2, _T),
     _f("SHF", "OP", "胶版印刷纸", 40, 2, _T),
-    # INE (published in SHFE's files)
+    # INE (2018 futures have a separate official daily file)
     _f("INE", "SC", "原油", 1000, 0.1, "元/桶"),
     _f("INE", "LU", "低硫燃料油", 10, 1, _T),
     _f("INE", "NR", "20号胶", 10, 5, _T),
@@ -328,6 +328,18 @@ def product_spec(
     of one this table has not met still gets its bars — with a null
     multiplier and an audit finding, not a guessed one.
     """
+    # FB changed units for already-live contracts. A single contract-level
+    # spec cannot describe the transition; do not apply the new multiplier
+    # retrospectively until dated authoritative terms are available.
+    if (
+        exchange == "DCE"
+        and product == "FB"
+        and on is not None
+        and on < date(2020, 1, 1)
+        and delivery is not None
+        and delivery >= date(2020, 1, 1)
+    ):
+        return None
     versions = _BY_KEY.get((exchange, product, kind))
     if not versions:
         return None

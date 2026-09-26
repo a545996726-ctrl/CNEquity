@@ -160,8 +160,14 @@ def test_one_unreachable_year_does_not_lose_the_rest(monkeypatch):
         return section.replace("index.html", "wb")
 
     monkeypatch.setattr(_tables, "workbook_url", _flaky)
-    rows = sf.fetch_social_financing(start_year=2015)
+    failures: dict[int, str] = {}
+    completed: set[int] = set()
+    rows = sf.fetch_social_financing(
+        start_year=2015, failures_by_year=failures, completed_years=completed
+    )
     assert [r["obs_date"] for r in rows] == [date(2026, 1, 31)]
+    assert completed == {2026}
+    assert "timeout" in failures[2025]
 
 
 def test_strict_mode_rejects_a_partial_yearly_series(monkeypatch):
@@ -202,3 +208,37 @@ def test_start_year_bounds_the_sweep(monkeypatch, start_year):
     _patch_pipeline(monkeypatch, {2015: [["2015.01", 1.0]], 2026: [["2026.01", 2.0]]})
     years = {r["obs_date"].year for r in sf.fetch_social_financing(start_year=start_year)}
     assert min(years) >= start_year
+
+
+def test_completed_years_are_reused_after_a_later_year_fails(tmp_path, monkeypatch):
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "data")
+    monkeypatch.setattr(
+        _tables,
+        "year_sections",
+        lambda **kw: {2026: "https://pbc.invalid/2026", 2025: "https://pbc.invalid/2025"},
+    )
+    calls = []
+
+    def workbook(section, **kw):
+        calls.append(section)
+        if section.endswith("2025") and len(calls) == 2:
+            raise ConnectionError("temporarily unavailable")
+        return section + "/workbook.xlsx"
+
+    monkeypatch.setattr(_tables, "workbook_url", workbook)
+    monkeypatch.setattr(
+        _tables, "get_bytes", lambda url, **kw: _workbook([[f"{url.split('/')[-2]}.01", 100]])
+    )
+
+    with pytest.raises(_tables.PBOCSeriesError, match="2025"):
+        sf.fetch_social_financing(config=cfg, start_year=2025, strict=True)
+    rows = sf.fetch_social_financing(config=cfg, start_year=2025, strict=True)
+
+    assert len(rows) == 2
+    assert calls == [
+        "https://pbc.invalid/2026",
+        "https://pbc.invalid/2025",
+        "https://pbc.invalid/2025",
+    ]

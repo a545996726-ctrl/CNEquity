@@ -923,10 +923,16 @@ class JobEngine:
         context: dict[str, Any],
         *,
         force: bool = False,
+        steps: tuple[str, ...] = (
+            "compact",
+            "derive_adj_factors",
+            "derive_industry_index",
+            "audit",
+        ),
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         batches = self.manifest.get_batches_for_run(run_id)
-        for step_name in ("compact", "derive_adj_factors", "derive_industry_index", "audit"):
+        for step_name in steps:
             if not force and step_succeeded(batches, step_name):
                 continue
             result = self._run_step(step_name, trade_date, run_id, context)
@@ -939,6 +945,19 @@ class JobEngine:
             results.append(result)
             batches = self.manifest.get_batches_for_run(run_id)
         return results
+
+    def _has_ready_staging(self, run_id: str) -> bool:
+        """Whether an incomplete run has a dataset compact can safely publish."""
+        from cnequity.domain.datasets import PARTITION_COLS
+        from cnequity.orchestrator.compact_gate import compact_allowed
+        from cnequity.storage import StagingWriter
+
+        writer = StagingWriter(self.config.staging_root)
+        return any(
+            writer.list_run_files(dataset, run_id)
+            and compact_allowed(self.manifest, run_id, dataset)[0]
+            for dataset in PARTITION_COLS
+        )
 
     def _merge_retry_context(self, run_id: str, trade_date: date) -> dict[str, Any]:
         context: dict[str, Any] = {"run_id": run_id, "trade_date": trade_date}
@@ -1348,6 +1367,14 @@ class JobEngine:
             # attempt. Re-run the finalize chain so curated data and coverage
             # receipts cannot lag behind the now-successful fetch.
             results.extend(self._run_finalize_steps(run_id, trade_date, context, force=True))
+        elif auto_finalize and self._has_ready_staging(run_id):
+            # An unrelated failed dataset must not hold ready revisions in
+            # staging. Compact itself still gates each incomplete dataset.
+            results.extend(
+                self._run_finalize_steps(
+                    run_id, trade_date, context, force=True, steps=("compact",)
+                )
+            )
 
         status, still_missing = self._gate_on_missing_steps(
             run_id, self._retry_batch_status(run_id)
@@ -1594,6 +1621,14 @@ class JobEngine:
                     else "success",
                     "results": fin_results,
                 }
+            )
+        elif "phase4_finalize" in phases and self._has_ready_staging(run_id):
+            context = self._merge_retry_context(run_id, trade_date)
+            compact_results = self._run_finalize_steps(
+                run_id, trade_date, context, force=True, steps=("compact",)
+            )
+            phase_results.append(
+                {"phase": "phase4_partial_compact", "status": "warning", "results": compact_results}
             )
 
         status = self._finalize_init_run(

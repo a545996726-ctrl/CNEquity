@@ -26,7 +26,7 @@ from cnequity.adapters.baostock._session import (
     fetch_per_symbol,
     to_baostock_symbol,
 )
-from cnequity.domain.rate_limit import source_request
+from cnequity.adapters.baostock.wide_history import query_history
 from cnequity.domain.trading_status import STATUS_NORMAL, STATUS_SUSPENDED
 
 __all__ = ["fetch_st_history", "to_baostock_symbol"]
@@ -62,15 +62,16 @@ def _fetch_one_st(bs, symbol: str, start: date, end: date, *, config=None) -> li
         end = min(end, effective - timedelta(days=1))
         if start > end:
             return []
-    with source_request(config, "baostock"):
-        rs = bs.query_history_k_data_plus(
-            to_baostock_symbol(query_symbol),
-            _ST_FIELDS,
-            start_date=start.isoformat(),
-            end_date=end.isoformat(),
-            frequency="d",
-            adjustflag="3",  # ST flag is adjust-independent
-        )
+    rs = query_history(
+        bs,
+        to_baostock_symbol(query_symbol),
+        _ST_FIELDS,
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        frequency="d",
+        adjustflag="3",
+        config=config,
+    )
     if getattr(rs, "error_code", "0") != "0":
         return None
     out: list[dict] = []

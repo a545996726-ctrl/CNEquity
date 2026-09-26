@@ -11,10 +11,15 @@ from __future__ import annotations
 
 from datetime import date
 
+import httpx
 import polars as pl
 import pytest
 
 from cnequity.adapters.eastmoney import shareholders as sh
+from cnequity.adapters.eastmoney.datacenter import EastMoneyDatacenterError
+from cnequity.config import Config
+from cnequity.steps.http_common import verify_raw_archive
+from cnequity.storage.raw_archive import begin_capture
 
 PERIOD = date(2025, 6, 30)
 WIN_START = date(2025, 1, 1)
@@ -85,6 +90,28 @@ def test_share_structure_maps_the_four_share_counts(monkeypatch):
     assert row["free_float_shares"] == 8160481215
     assert row["change_reason"] == "高管股份变动"
     assert row["announce_date"] == date(2025, 8, 23)
+
+
+def test_share_structure_returns_valid_pages_as_partial_positive_facts(monkeypatch):
+    def page_then_fail(_client, _report, _columns, **kwargs):
+        kwargs["on_valid_page"](
+            [
+                {
+                    "SECUCODE": "000001.SZ",
+                    "END_DATE": "2025-06-30",
+                    "NOTICE_DATE": NOTICE,
+                    "TOTAL_SHARES": 100,
+                }
+            ]
+        )
+        raise EastMoneyDatacenterError("page 2 timed out")
+
+    monkeypatch.setattr(sh, "fetch_datacenter", page_then_fail)
+    progress = sh.ShareholderProgress()
+    frame = sh.fetch_share_structure(WIN_START, WIN_END, client=_Client(), progress=progress)
+    assert frame.height == 1
+    assert progress.failed_report == sh._EQUITY_REPORT
+    assert progress.valid_pages == 1
 
 
 def test_share_structure_is_swept_by_date_window_never_by_quarter_end(monkeypatch):
@@ -235,6 +262,25 @@ def test_total_scope_borrows_its_disclosure_date_from_the_float_report(monkeypat
     assert total["announce_date"].to_list() == [date(2025, 8, 23)] * 2
 
 
+def test_partial_float_holder_pages_do_not_start_a_second_report(monkeypatch):
+    calls = []
+
+    def page_then_fail(_client, report, _columns, **kwargs):
+        calls.append(report)
+        kwargs["on_valid_page"](
+            [_holder("600519", 1, name="A", pct_field="FREE_HOLDNUM_RATIO", pct=1.0, notice=NOTICE)]
+        )
+        raise EastMoneyDatacenterError("later page timed out")
+
+    monkeypatch.setattr(sh, "fetch_datacenter", page_then_fail)
+    progress = sh.ShareholderProgress()
+    frame = sh.fetch_top_holders(WIN_START, WIN_END, client=_Client(), progress=progress)
+    assert frame.height == 1
+    assert frame["holder_scope"].to_list() == [sh.SCOPE_FLOAT]
+    assert calls == [sh._FREEHOLDERS_REPORT]
+    assert progress.failed_report == sh._FREEHOLDERS_REPORT
+
+
 def test_undated_total_rows_are_dropped_not_stamped_with_the_period(monkeypatch):
     """Dating them 06-30 would assert the list was known on 06-30 — the exact
     lookahead this dataset exists to prevent."""
@@ -330,3 +376,37 @@ def test_registered_with_pit_and_the_rank_in_the_key():
     assert "holder_rank" in PRIMARY_KEYS["top_holders"]
     assert "holder_name" in PRIMARY_KEYS["top_holders"]
     assert "holder_scope" in PRIMARY_KEYS["top_holders"]
+
+
+def test_filtered_shareholder_page_carries_exact_wire_capture(tmp_path):
+    config = Config(data_root=tmp_path / "lake", raw_archive_datasets=["share_structure"])
+    scope = "change_date:2025-01-01:2025-12-31"
+    nonce = begin_capture(
+        config, "share_structure", "run-1", source="eastmoney", request_scope=scope
+    )
+    capture = sh.ShareholderCapture("share_structure", "run-1", "eastmoney", scope, nonce)
+
+    class Client:
+        def get(self, url):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                json={
+                    "success": True,
+                    "result": {"pages": 1, "count": 1, "data": [{"SECUCODE": "600519.SH"}]},
+                },
+            )
+
+    rows = sh._fetch_filtered(
+        Client(),
+        "RPT_F10_EH_EQUITY",
+        "SECUCODE",
+        "(END_DATE='2025-01-01')",
+        config=config,
+        archive_context=capture,
+    )
+    assert rows == [{"SECUCODE": "600519.SH"}]
+    evidence = verify_raw_archive(
+        config, "share_structure", "run-1", source="eastmoney", request_scope=scope
+    )
+    assert evidence.record_keys

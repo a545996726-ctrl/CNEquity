@@ -6,31 +6,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from cnequity.config import Config
-from cnequity.domain.rate_limit import RateLimiter, SourceConcurrencyLimiter
-
-
-def _source_family(source: str) -> str:
-    """Map endpoint-specific pacing names to one vendor concurrency budget."""
-    text = str(source).strip().lower()
-    if text.startswith("ths"):
-        return "ths"
-    if text.startswith("tdx"):
-        return "tdx_protocol"
-    if text.startswith("cninfo"):
-        return "cninfo"
-    if text.startswith("eastmoney_push2"):
-        # push2 bans an IP that crawls it; it gets its own (narrow) in-flight
-        # cap instead of sharing datacenter's.
-        return "eastmoney_push2"
-    if text.startswith("eastmoney_dc"):
-        # datacenter serves most EastMoney datasets; a ban there would cost the
-        # most, so it gets its own cap rather than the shared EastMoney one.
-        return "eastmoney_dc"
-    if text.startswith("eastmoney") or text in {"em", "datacenter"}:
-        return "eastmoney"
-    if text.startswith("sina"):
-        return "sina"
-    return text
+from cnequity.domain.http_policy import check_source_cooldown, source_probe_slot
+from cnequity.domain.http_policy import source_family as _source_family
+from cnequity.domain.rate_limit import (
+    RateLimiter,
+    SourceConcurrencyLimiter,
+    record_metered_attempt,
+)
 
 
 @dataclass
@@ -43,7 +25,7 @@ class SourceRateLimiters:
     _request_local: threading.local = field(default_factory=threading.local, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        state_dir = self.config.meta_root / "rate_limits"
+        state_dir = self.config.rate_limit_root
         if self.config.tdx_enabled:
             interval = self.config.tdx_min_interval_ms / 1000.0
             self._limiters["tdx_protocol"] = RateLimiter(
@@ -54,6 +36,17 @@ class SourceRateLimiters:
             )
         for source, interval in self.config.source_intervals.items():
             self._limiters[source] = RateLimiter(source, interval, state_dir)
+        # Alias lanes also need one family-wide start spacing. An explicit
+        # family interval is the aggregate floor; keep slower endpoint lanes
+        # separate so a catalog page does not slow unrelated K-line requests.
+        # Without a family setting, use the strictest alias as a safe default.
+        family_intervals: dict[str, float] = {}
+        for name, limiter in self._limiters.items():
+            family = _source_family(name)
+            family_intervals[family] = max(family_intervals.get(family, 0.0), limiter.min_interval)
+        for family, interval in family_intervals.items():
+            family_interval = self.config.source_intervals.get(family, interval)
+            self._limiters[family] = RateLimiter(family, family_interval, state_dir)
 
         # Every source with an interval gets a default cap as well.  The
         # default follows the legacy scheduler budget, while an explicit
@@ -97,8 +90,22 @@ class SourceRateLimiters:
 
     def wait(self, source: str) -> None:
         limiter = self._limiters.get(source)
+        family = _source_family(source)
+        if limiter is None and (
+            family in self._limiters or source.startswith("futures_exchange_") or source == "sina"
+        ):
+            base = self._limiters.get(
+                "futures_exchange" if source.startswith("futures_exchange_") else family
+            )
+            state_dir = self.config.rate_limit_root
+            limiter = RateLimiter(
+                source, base.min_interval if base else (0.3 if source == "sina" else 1.0), state_dir
+            )
+            self._limiters[source] = limiter
         if limiter is not None:
             limiter.wait()
+        if family != source and (family_limiter := self._limiters.get(family)) is not None:
+            family_limiter.wait()
 
     def defer(self, source: str, seconds: float) -> None:
         """Apply a vendor-wide cooling-off deadline to every pacing alias."""
@@ -116,7 +123,7 @@ class SourceRateLimiters:
             # A source can be used by a lazy adapter without a min-interval
             # entry.  Materialize its cap on demand so it still participates
             # in the global in-flight contract.
-            state_dir = self.config.meta_root / "rate_limits"
+            state_dir = self.config.rate_limit_root
             limit = self._configured_limit(family, {source})
             limiter = SourceConcurrencyLimiter(
                 family,
@@ -146,8 +153,15 @@ class SourceRateLimiters:
         metrics: dict | None = None,
         timeout: float | None = None,
     ) -> Iterator[None]:
-        """Pace, then hold the vendor slot across one request."""
+        """Acquire capacity, then pace immediately before the request."""
         family = _source_family(source)
+        switches = {source, family}
+        if family.startswith("eastmoney"):
+            switches.add("eastmoney")
+        if source.startswith("futures_exchange_"):
+            switches.add("futures_exchange")
+        if any(self.config.sources.get(name, True) is False for name in switches):
+            raise RuntimeError(f"{source}: source disabled in config")
         active = getattr(self._request_local, "active", None)
         if active is None:
             active = set()
@@ -156,13 +170,20 @@ class SourceRateLimiters:
         # second pacing reservation as well: a nested helper is part of the
         # same caller operation, not a new request start.
         if family in active:
+            check_source_cooldown(self.config.rate_limit_root, source)
             with self.slot(source, metrics=metrics, timeout=timeout):
+                check_source_cooldown(self.config.rate_limit_root, source)
                 yield
             return
-        self.wait(source)
+        check_source_cooldown(self.config.rate_limit_root, source)
         active.add(family)
         try:
             with self.slot(source, metrics=metrics, timeout=timeout):
-                yield
+                check_source_cooldown(self.config.rate_limit_root, source)
+                self.wait(source)
+                check_source_cooldown(self.config.rate_limit_root, source)
+                with source_probe_slot(self.config.rate_limit_root, source):
+                    record_metered_attempt(self.config.rate_limit_root, source, family)
+                    yield
         finally:
             active.discard(family)

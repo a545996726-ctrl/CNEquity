@@ -16,17 +16,25 @@ as "no data".
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import math
+import os
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import polars as pl
 
+from cnequity.domain.http_policy import record_cache_reuse, record_http_response
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -44,7 +52,11 @@ _HEADERS = {
     ),
 }
 _CACHE_ENTRIES = 16
-_cache: OrderedDict[tuple[str, str, str], bytes] = OrderedDict()
+_cache: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
+_clients: dict[tuple, object] = {}
+_blocked: dict[str, float] = {}
+_transport_lock = threading.RLock()
+_host_locks: dict[str, threading.RLock] = {}
 _cache_lock = threading.Lock()
 
 
@@ -76,6 +88,75 @@ def looks_like_challenge(status_code: int, body: bytes) -> bool:
     return status_code == 412 or b"$_ts" in head
 
 
+def _budget_root(config) -> Path | None:
+    shared = os.environ.get("CNE_RATE_LIMIT_ROOT")
+    return (
+        Path(shared).expanduser()
+        if shared
+        else config.meta_root / "rate_limits"
+        if config
+        else None
+    )
+
+
+def _host_key(url: str, source: str) -> str:
+    # Sina stocks and derivatives share a refusal domain and pacing budget.
+    return "sina" if source.startswith("sina") else (urlsplit(url).hostname or "unknown")
+
+
+def check_circuit(url: str, *, config=None, source: str = SOURCE) -> None:
+    from cnequity.storage.derivative_evidence import read_json
+
+    host = _host_key(url, source)
+    root = _budget_root(config)
+    deadline = _blocked.get(host, 0.0)
+    if root is not None:
+        deadline = max(deadline, float(read_json(root / f"refusal-{host}.json").get("until", 0)))
+    if deadline > time.time() or host in getattr(config, "_derivative_blocked_hosts", set()):
+        raise FuturesSourceBlocked(f"{host}: circuit open; do not retry in this run")
+
+
+def check_response(resp, url: str, *, config=None, source: str = SOURCE) -> None:
+    from cnequity.storage.atomic import write_json_atomic
+
+    code = resp.status_code
+    html = resp.content.lstrip().lower().startswith((b"<!doctype html", b"<html"))
+    if (
+        code in (403, 412, 429, 456)
+        or 500 <= code < 600
+        or looks_like_challenge(code, resp.content)
+        or (code == 200 and html)
+    ):
+        seconds = 300.0
+        retry_after = resp.headers.get("Retry-After", "")
+        try:
+            seconds = max(seconds, float(retry_after))
+        except ValueError:
+            try:
+                until = parsedate_to_datetime(retry_after)
+                seconds = max(seconds, (until - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                pass
+        host = _host_key(url, source)
+        deadline = time.time() + seconds
+        _blocked[host] = deadline
+        if config is not None:
+            blocked = getattr(config, "_derivative_blocked_hosts", set())
+            blocked.add(host)
+            config._derivative_blocked_hosts = blocked
+            config.defer_source(source, seconds)
+        root = _budget_root(config)
+        if root is not None:
+            write_json_atomic(root / f"refusal-{host}.json", {"until": deadline, "status": code})
+        raise FuturesSourceBlocked(f"{url}: upstream refusal (HTTP {code}); cooldown {seconds:g}s")
+    if code in (301, 302, 303, 307, 308, 404):
+        raise FuturesDayUnavailable(f"{url}: HTTP {code}")
+    if code != 200:
+        raise FuturesPayloadError(f"{url}: HTTP {code}")
+    if resp.content.lstrip().lower().startswith((b"<!doctype html", b"<html")):
+        raise FuturesPayloadError(f"{url}: HTML instead of market data")
+
+
 def fetch_bytes(
     url: str,
     *,
@@ -84,63 +165,127 @@ def fetch_bytes(
     data: dict | None = None,
     json_body: dict | None = None,
     follow_redirects: bool = False,
+    source: str = SOURCE,
+    ttl: float = 3600.0,
+    as_of: date | None = None,
+    client=None,
+    params: dict | None = None,
 ) -> bytes:
-    """One paced request, answered from a small per-process cache when repeated.
+    """Paced, single-flight, cached public market-data requests.
 
-    `futures_bars` and `option_bars` read the same CFFEX file; the cache keeps
-    that to one download per session instead of two. Only a 200 response is
-    cached, so a day that is not yet published is asked again next time.
+    Cache TTL is bounded even for historical files: exchanges can correct
+    them. A refresh bypasses cached responses, never an upstream circuit.
+    Disk entries retain exact response bytes; parsers still validate on reuse.
     """
-    body_key = "&".join(
-        f"{k}={v}" for k, v in sorted({**(data or {}), **(json_body or {})}.items())
+    from contextlib import nullcontext
+
+    from cnequity.file_lock import exclusive_lock
+    from cnequity.storage.atomic import write_json_atomic
+    from cnequity.storage.derivative_evidence import read_json
+
+    if as_of is not None:
+        from cnequity.domain.market_time import shanghai_today
+
+        ttl = 30 * 86400 if (shanghai_today() - as_of).days > 7 else 3600
+    identity = json.dumps([method, url, data, json_body, params, follow_redirects], sort_keys=True)
+    key = hashlib.sha256(identity.encode()).hexdigest()
+    cache_root = config.meta_root / "derivatives" / "http_cache" if config else None
+    path = cache_root / f"{key}.json" if cache_root else None
+    budget = _budget_root(config)
+    host = _host_key(url, source)
+    refreshed = getattr(config, "_derivative_refreshed_requests", set())
+    refresh = bool(getattr(config, "_derivatives_refresh", False)) and key not in refreshed
+    # Serialize per origin across processes. Independent origins remain free.
+    lock = (
+        exclusive_lock(budget / f"derivatives-http-{host}.lock", timeout=90)
+        if budget
+        else nullcontext()
     )
-    key = (method, url, body_key)
     with _cache_lock:
-        cached = _cache.get(key)
-        if cached is not None:
-            _cache.move_to_end(key)
-            return cached
-    resp = None
-    for attempt in range(_NETWORK_ATTEMPTS):
-        try:
-            with source_request(config, SOURCE):
-                with httpx.Client(
-                    timeout=_TIMEOUT_SECONDS,
-                    headers=_HEADERS,
-                    follow_redirects=follow_redirects,
-                ) as client:
-                    resp = client.request(method, url, data=data, json=json_body)
-            break
-        except (httpx.NetworkError, httpx.RemoteProtocolError) as exc:
-            # A dropped connection (GFEX reset one on 2026-08-31 mid-sweep) is
-            # the network, not the file; one paced retry recovers it. Timeouts
-            # are not retried: a server that took 60 s will take 60 s again.
-            if attempt + 1 == _NETWORK_ATTEMPTS:
+        host_lock = _host_locks.setdefault(host, threading.RLock())
+    with host_lock, lock:
+        now = time.time()
+        with _cache_lock:
+            cached = _cache.get(key)
+            if not refresh and cached is not None and now - cached[0] < ttl:
+                _cache.move_to_end(key)
+                record_cache_reuse(
+                    config, SOURCE + "_" + host if source == SOURCE else source, "memory_response"
+                )
+                return cached[1]
+        if path is not None and not refresh:
+            saved = read_json(path)
+            if now - float(saved.get("time", 0)) < ttl:
+                try:
+                    body = base64.b64decode(saved["body"], validate=True)
+                    if hashlib.sha256(body).hexdigest() == saved.get("sha256"):
+                        record_cache_reuse(
+                            config,
+                            SOURCE + "_" + host if source == SOURCE else source,
+                            "disk_response",
+                        )
+                        return body
+                except (ValueError, KeyError):
+                    pass
+        check_circuit(url, config=config, source=source)
+        if client is None:
+            # httpx.Client is thread-safe; one pool per request policy avoids
+            # retaining clients for every short-lived DAG worker thread.
+            pool_key = (follow_redirects, source)
+            with _transport_lock:
+                if pool_key not in _clients:
+                    headers = {
+                        **_HEADERS,
+                        **({"Referer": "https://finance.sina.com.cn"} if source == "sina" else {}),
+                    }
+                    _clients[pool_key] = httpx.Client(
+                        timeout=_TIMEOUT_SECONDS, headers=headers, follow_redirects=follow_redirects
+                    ).__enter__()
+                client = _clients[pool_key]
+        for attempt in range(_NETWORK_ATTEMPTS):
+            try:
+                pacing = SOURCE + "_" + host if source == SOURCE else source
+                with source_request(config, pacing):
+                    check_circuit(url, config=config, source=source)
+                    resp = client.request(method, url, data=data, json=json_body, params=params)
+                    record_http_response(config, pacing, resp)
+                break
+            except (httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                if attempt + 1 == _NETWORK_ATTEMPTS:
+                    raise FuturesPayloadError(f"{url}: {type(exc).__name__}: {exc}") from exc
+                time.sleep(_RETRY_PAUSE_SECONDS)
+            except httpx.HTTPError as exc:
                 raise FuturesPayloadError(f"{url}: {type(exc).__name__}: {exc}") from exc
-            logger.info("%s: %s, retrying once", url, type(exc).__name__)
-            time.sleep(_RETRY_PAUSE_SECONDS)
-        except httpx.HTTPError as exc:
-            raise FuturesPayloadError(f"{url}: {type(exc).__name__}: {exc}") from exc
-    if resp is None:  # unreachable: every attempt either breaks or raises
-        raise FuturesPayloadError(f"{url}: no response")
-    body = resp.content
-    if looks_like_challenge(resp.status_code, body):
-        raise FuturesSourceBlocked(f"{url}: access challenge (HTTP {resp.status_code})")
-    if resp.status_code in (301, 302, 303, 307, 308, 404):
-        raise FuturesDayUnavailable(f"{url}: HTTP {resp.status_code}")
-    if resp.status_code != 200:
-        raise FuturesPayloadError(f"{url}: HTTP {resp.status_code}")
-    with _cache_lock:
-        _cache[key] = body
-        _cache.move_to_end(key)
-        while len(_cache) > _CACHE_ENTRIES:
-            _cache.popitem(last=False)
-    return body
+        check_response(resp, url, config=config, source=source)
+        body = resp.content
+        if config is not None and getattr(config, "_derivatives_refresh", False):
+            refreshed.add(key)
+            config._derivative_refreshed_requests = refreshed
+        with _cache_lock:
+            _cache[key] = (time.time(), body)
+            _cache.move_to_end(key)
+            while len(_cache) > _CACHE_ENTRIES:
+                _cache.popitem(last=False)
+        if path is not None:
+            write_json_atomic(
+                path,
+                {
+                    "time": time.time(),
+                    "body": base64.b64encode(body).decode(),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                },
+            )
+        return body
 
 
 def clear_cache() -> None:
-    with _cache_lock:
+    """Close pooled connections and clear process state; disk evidence remains."""
+    with _transport_lock:
         _cache.clear()
+        _blocked.clear()
+        for client in _clients.values():
+            client.__exit__(None, None, None)
+        _clients.clear()
 
 
 def decode_text(body: bytes) -> str:

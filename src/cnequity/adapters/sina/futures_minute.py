@@ -28,8 +28,7 @@ from datetime import date, datetime, time, timedelta
 import httpx
 import polars as pl
 
-from cnequity.adapters.futures_exchange.common import parse_number, parse_price
-from cnequity.domain.rate_limit import source_request
+from cnequity.adapters.futures_exchange.common import fetch_bytes, parse_number, parse_price
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +103,15 @@ def fetch_minute_bars(
     with httpx.Client(timeout=30.0, headers=_HEADERS, follow_redirects=True) as client:
         for symbol in symbols:
             try:
-                with source_request(config, SOURCE):
-                    resp = client.get(URL, params={"symbol": sina_code(symbol), "type": "1"})
-                resp.raise_for_status()
-                match = _ARRAY.search(resp.content.decode("gbk", "replace"))
+                body = fetch_bytes(
+                    URL,
+                    params={"symbol": sina_code(symbol), "type": "1"},
+                    config=config,
+                    source=SOURCE,
+                    ttl=30,
+                    client=client,
+                )
+                match = _ARRAY.search(body.decode("gbk", "replace"))
                 payload = json.loads(match.group(0)) if match else None
                 if not payload:
                     failures[symbol] = "no bars served"

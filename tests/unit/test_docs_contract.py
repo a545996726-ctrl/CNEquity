@@ -32,12 +32,14 @@ def test_init_help_answers_the_scope_and_400_symbol_questions():
     assert "cne backfill trading_status" in help_result.output
 
 
-def test_source_health_note_does_not_describe_removed_eastmoney_sticky_state():
+def test_source_health_note_recommends_cooldown_instead_of_egress_rotation():
     from cnequity.diagnostics.source_health import PROBES_BY_KEY
 
     note = PROBES_BY_KEY["eastmoney_push2his"].note
     assert "sticky" not in note.lower()
-    assert "proxy" in note
+    assert "等待冷却" in note
+    assert "proxy" not in note.lower()
+    assert "换出口" not in note
 
 
 def test_the_declared_version_is_the_packaged_version():
@@ -89,6 +91,9 @@ def test_documented_counts_match_the_registries():
     claims = [
         (docs / "modules" / "steps.md", f"**{len(PRISTINE_STEP_NAMES)} 个**注册 step"),
         (docs / "datasets" / "catalog.md", str(len(DATASETS))),
+        (ROOT / "README.md", f"**{len(DATASETS)} 个数据集"),
+        (ROOT / "README.en.md", f"**{len(DATASETS)} datasets"),
+        (ROOT / "README.pypi.md", f"所有 {len(DATASETS)} 个数据集"),
     ]
     for path, needle in claims:
         assert needle in path.read_text(encoding="utf-8"), (

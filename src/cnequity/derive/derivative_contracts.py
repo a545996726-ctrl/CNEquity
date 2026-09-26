@@ -1,27 +1,9 @@
-"""Build the futures and option contract tables from what the exchanges showed.
+"""Contract metadata from observed bars and authoritative exchange references.
 
-Every exchange file lists every live contract every session, traded or not. So
-in observed history a contract's first appearance is its listing day and its
-last appearance is its last trading day, and that is exact. It stops being
-exact where observation began: a contract that was already trading on the
-first day the lake has for its exchange listed earlier, on a day nobody saw.
-
-Three sources of dates, recorded in ``dates_basis``:
-
-``exchange``
-    The exchange's reference file names both dates. This is the only way to
-    know a *live* contract's last trading day before it happens.
-``observed``
-    The contract listed and expired inside observed history.
-``observed_truncated``
-    The contract was already live when observation began. Its ``list_date`` is
-    the first day seen, which is a lower bound on age, not a listing date.
-``vendor_observed``
-    First and last appearance in a vendor series that drops sessions with no
-    trades (Sina, for DCE). A lower bound on the span, not the exact span.
-``open``
-    The contract is still live and no reference file named its end.
-    ``last_trade_date`` is null rather than guessed.
+Observation bounds are not listing or expiry dates: a missing contract can be
+an ingestion failure. Only references populate contractual dates; observations
+remain available as first_seen_date and last_seen_date. Legacy observed basis
+labels describe the observation window, never proof of expiry.
 """
 
 from __future__ import annotations
@@ -75,11 +57,18 @@ def observed_contracts(bars: pl.LazyFrame, *, kind: str) -> pl.DataFrame:
 
 def _dated(observed: pl.DataFrame, reference: pl.DataFrame | None) -> pl.DataFrame:
     if reference is not None and not reference.is_empty():
-        ref = reference.select(
-            "symbol",
-            pl.col("list_date").alias("_ref_list"),
-            pl.col("last_trade_date").alias("_ref_last"),
-        ).unique(subset=["symbol"], keep="last")
+        ref = (
+            reference.select(
+                "symbol",
+                pl.col("list_date").alias("_ref_list"),
+                pl.col("last_trade_date").alias("_ref_last"),
+            )
+            .group_by("symbol", maintain_order=True)
+            .agg(
+                pl.col("_ref_list").drop_nulls().last(),
+                pl.col("_ref_last").drop_nulls().last(),
+            )
+        )
         frame = observed.join(ref, on="symbol", how="left")
     else:
         frame = observed.with_columns(
@@ -88,16 +77,14 @@ def _dated(observed: pl.DataFrame, reference: pl.DataFrame | None) -> pl.DataFra
         )
     expired = pl.col("last_seen_date") < pl.col("_exchange_last")
     truncated = pl.col("first_seen_date") <= pl.col("_exchange_first")
-    has_ref = pl.col("_ref_last").is_not_null()
+    has_ref = pl.col("_ref_last").is_not_null() | pl.col("_ref_list").is_not_null()
     return frame.with_columns(
         pl.when(has_ref & pl.col("_ref_list").is_not_null())
         .then(pl.col("_ref_list"))
-        .otherwise(pl.col("first_seen_date"))
+        .otherwise(pl.lit(None, dtype=pl.Date))
         .alias("list_date"),
         pl.when(has_ref)
         .then(pl.col("_ref_last"))
-        .when(expired)
-        .then(pl.col("last_seen_date"))
         .otherwise(pl.lit(None, dtype=pl.Date))
         .alias("_last"),
         pl.when(has_ref)
@@ -118,7 +105,13 @@ def _spec_columns(rows: list[dict], kind: str) -> list[dict]:
     for row in rows:
         contract = parse(row["exchange_code"], row["exchange"], row["first_seen_date"])
         series = contract.series if kind == "option" else contract
-        spec = product_spec(row["exchange"], row["product"], kind, delivery=series.delivery_month)
+        spec = product_spec(
+            row["exchange"],
+            row["product"],
+            kind,
+            delivery=series.delivery_month,
+            on=row["first_seen_date"],
+        )
         row["product_name"] = spec.name if spec else None
         row["multiplier"] = float(spec.multiplier) if spec else None
         row["tick_size"] = float(spec.tick_size) if spec else None

@@ -238,12 +238,36 @@ def _update_watermarks(
     older) watermark cannot trigger a re-fetch storm — it just surfaces the hole.
     """
     state = StateStore(config.meta_root)
+    from cnequity.domain.datasets import fetch_semantics
+
     for dataset, pcol in _watermarked_datasets():
         if datasets is not None and dataset not in datasets:
             continue
         max_dt = _watermark_date_for(config, dataset, pcol)
         if max_dt is not None:
             state.update_max_date(dataset, max_dt)
+        if fetch_semantics(dataset) == "by_date":
+            observed = _max_partition_date(config, dataset, pcol)
+            with state.transaction(dataset) as payload:
+                missing = {
+                    date.fromisoformat(row["start"]) for row in payload.get("missing_ranges", [])
+                }
+                if observed is not None:
+                    payload["observed_max"] = observed.isoformat()
+                complete = max_dt
+                if complete is not None and missing:
+                    complete = min(complete, min(missing) - timedelta(days=1))
+                if complete is not None:
+                    payload["complete_through"] = complete.isoformat()
+                else:
+                    payload.pop("complete_through", None)
+                payload["coverage_status"] = (
+                    "incomplete"
+                    if missing
+                    or payload.get("missing_units")
+                    or (observed is not None and (complete is None or observed > complete))
+                    else "complete"
+                )
 
 
 def _reconcile_watermarks(config: Config) -> list[dict]:
@@ -513,8 +537,11 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     publication = evaluate_publication(
         config, run_id, trade_date, {item[0]: config.curated_root / item[0] for item in pending}
     )
+    blocked_datasets = set(publication.get("blocked_datasets") or [])
     if publication["blocked"]:
         for ds, _pcol, rows, *_ in pending:
+            if ds not in blocked_datasets:
+                continue
             quarantine = revisions.quarantine_candidate(
                 ds, run_id=run_id, reason="publication_gate"
             )
@@ -538,7 +565,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 error_message="candidate audit introduced errors; see publication report",
             )
         audit_findings.extend(publication["new_errors"])
-        pending = []
+        pending = [item for item in pending if item[0] not in blocked_datasets]
     for ds, pcol, rows, changed_files, change_log, gate_spec in pending:
         try:
             contract = dataset_contract(ds)
@@ -555,7 +582,9 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                     "canonical_policy": canonical_policy(ds),
                     "changes": change_log,
                     "publication_audit": {
-                        key: publication.get(key) for key in ("mode", "blocked", "report_path")
+                        "mode": publication.get("mode"),
+                        "blocked": False,
+                        "report_path": publication.get("report_path"),
                     },
                     "validation": {
                         "schema": "passed",
@@ -584,6 +613,10 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 error_message=str(exc),
             )
             raise
+        if ds in {"futures_bars", "option_bars"}:
+            from cnequity.storage.derivative_evidence import confirm_receipts
+
+            confirm_receipts(config, ds)
         if revision is not None:
             committed_revisions[ds] = {
                 "revision": revision.revision,
@@ -611,6 +644,10 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 criticality=_dataset_criticality(ds),
                 rows_written=rows,
             )
+    for published_dataset in compacted:
+        published_state = StateStore(config.meta_root)
+        published_state.commit_staged_request_days(published_dataset, run_id)
+        published_state.commit_staged_units(published_dataset, run_id)
     if compacted:
         _update_watermarks(config, frozenset(compacted), trade_date)
     audit_findings.extend(_reconcile_watermarks(config))

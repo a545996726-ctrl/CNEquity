@@ -34,9 +34,12 @@ from datetime import date
 import polars as pl
 
 from cnequity.adapters.baostock._session import (
+    check_result,
     fetch_per_symbol,
     to_baostock_symbol,
 )
+from cnequity.adapters.baostock.wide_history import query_history
+from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -93,7 +96,11 @@ def _year_end_total_shares(
     for year in year_list:
         try:
             with source_request(config, "baostock"):
-                rs = bs.query_profit_data(code=code, year=year, quarter=4)
+                rs = check_result(
+                    bs.query_profit_data(code=code, year=year, quarter=4), config=config
+                )
+        except SourceCoolingDown:
+            raise
         except Exception as exc:  # noqa: BLE001 — treat like empty; k-data still usable
             logger.warning("baostock profit Q4 failed for %s %s: %s", symbol, year, exc)
             continue
@@ -163,15 +170,16 @@ def _fetch_one(bs, symbol: str, start: date, end: date, *, config=None) -> list[
     code = to_baostock_symbol(symbol)
     raw_rows: list[list[str]] = []
     for w_start, w_end in _year_windows(start, end):
-        with source_request(config, "baostock"):
-            rs = bs.query_history_k_data_plus(
-                code,
-                _FIELDS,
-                start_date=w_start.isoformat(),
-                end_date=w_end.isoformat(),
-                frequency="d",
-                adjustflag="3",  # unadjusted; PE/PB/PS ratios are adjust-independent
-            )
+        rs = query_history(
+            bs,
+            code,
+            _FIELDS,
+            start_date=w_start.isoformat(),
+            end_date=w_end.isoformat(),
+            frequency="d",
+            adjustflag="3",
+            config=config,
+        )
         if getattr(rs, "error_code", "0") != "0":
             return None
         # Materialize before the next baostock call — a second query can

@@ -20,9 +20,11 @@ import polars as pl
 
 from cnequity.adapters.baostock._session import (
     capture_wire,
+    check_result,
     fetch_per_symbol,
     to_baostock_symbol,
 )
+from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
 from cnequity.storage.raw_archive import RawArchiveError, RawPayloadArchive, begin_capture
@@ -298,11 +300,16 @@ def _fetch_one_corporate_actions(
             with capture_wire(capturing) as recorder, source_request(config, "baostock"):
                 if metrics is not None:
                     metrics["network_requests"] += 1
-                result = bs.query_dividend_data(
-                    to_baostock_symbol(symbol),
-                    year,
-                    yearType="operate",
+                result = check_result(
+                    bs.query_dividend_data(
+                        to_baostock_symbol(symbol),
+                        year,
+                        yearType="operate",
+                    ),
+                    config=config,
                 )
+        except SourceCoolingDown:
+            raise
         except Exception as exc:  # noqa: BLE001 - session helper retries it
             logger.warning(
                 "baostock corporate_actions query failed for %s/%s: %s", symbol, year, exc

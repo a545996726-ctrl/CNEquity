@@ -603,8 +603,8 @@ def fetch_instruments(
         market_errors: list[str] = []
         for market, exch in _TDX_STOCK_MARKETS:
             try:
-                wait_spec(rate_limit)
                 with source_request_slot_spec(rate_limit):
+                    wait_spec(rate_limit)
                     raw = client.stocks(market=market)
             except Exception as exc:
                 market_errors.append(f"{exch}: {exc}")

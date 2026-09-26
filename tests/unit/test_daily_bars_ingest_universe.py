@@ -218,6 +218,40 @@ def test_explicit_backfill_scope_is_never_narrowed(tmp_path, monkeypatch):
     assert requested == ["158030.SZ"]
 
 
+@pytest.mark.parametrize("symbol", ["600519.SH", "920184.BJ"])
+def test_small_explicit_history_skips_whole_board_tip_snapshots(tmp_path, monkeypatch, symbol):
+    cfg = _instrument_lake(tmp_path)
+    cfg._backfill = True
+    cfg._backfill_start = D1
+    cfg._backfill_end = D3
+    cfg._backfill_symbols = [symbol]
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    monkeypatch.setattr(
+        "cnequity.steps.bars._fetch_tip_via_exchange",
+        lambda *args, **kwargs: pytest.fail("scoped history fetched the exchange board"),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars._fetch_bj_tip_via_bse",
+        lambda *args, **kwargs: pytest.fail("scoped history fetched the BSE board"),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_daily_bars_parallel",
+        lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "failed_symbols": []},
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars._fetch_bj_history_via_tdx",
+        lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "covered": set()},
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0},
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars._finish_daily_bars", lambda *args, **kwargs: {"status": "success"}
+    )
+    assert step_daily_bars(cfg, D3, run_id, {})["status"] == "success"
+
+
 # --------------------------------------------------------------------------
 # P0-B — certify before gating
 # --------------------------------------------------------------------------

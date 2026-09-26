@@ -23,6 +23,7 @@ from pypdf import PdfReader
 from cnequity.adapters.cninfo.announcements import post_with_retry
 from cnequity.adapters.cninfo.reviewed_cash_corrections import reviewed_cash_correction
 from cnequity.adapters.cninfo.reviewed_holder_notices import reviewed_holder_notice
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.market_time import SHANGHAI_TZ
 from cnequity.domain.rate_limit import source_request
 from cnequity.steps.http_common import verify_raw_archive, write_fetched
@@ -336,6 +337,7 @@ def _get(client: httpx.Client, url: str, *, config) -> httpx.Response:
         try:
             with source_request(config, "cninfo"):
                 response = client.get(url)
+                record_http_response(config, "cninfo", response)
                 response.raise_for_status()
                 return response
         except Exception as exc:  # noqa: BLE001 - bounded transport retry
@@ -581,6 +583,10 @@ def repair_cninfo_payment_notices(
             ]
             repaired_rows = []
             holder_evidence = []
+            pdf_cache: dict[
+                str, tuple[bytes, str, str | None, int | None, dict | None, str | None]
+            ] = {}
+            archived_notices: set[tuple[str, str]] = set()
             for old in group.to_dicts():
                 possible = [
                     item
@@ -594,43 +600,52 @@ def repair_cninfo_payment_notices(
                     if not path:
                         continue
                     url = _PDF_ROOT + path
-                    response = _get(client, url, config=config)
-                    if metrics is not None:
-                        metrics["network_requests"] = metrics.get("network_requests", 0) + 1
-                        metrics["cninfo_network_responses"] = (
-                            metrics.get("cninfo_network_responses", 0) + 1
+                    if url not in pdf_cache:
+                        response = _get(client, url, config=config)
+                        if metrics is not None:
+                            metrics["network_requests"] = metrics.get("network_requests", 0) + 1
+                            metrics["cninfo_network_responses"] = (
+                                metrics.get("cninfo_network_responses", 0) + 1
+                            )
+                        payload = response.content
+                        digest = hashlib.sha256(payload).hexdigest()
+                        try:
+                            text, pages = _pdf_text(payload)
+                            facts = parse_payment_notice_text(text)
+                            parse_error = None
+                        except Exception as exc:  # noqa: BLE001 - bytes archived below
+                            text, pages, facts = None, None, None
+                            parse_error = type(exc).__name__
+                        pdf_cache[url] = (payload, digest, text, pages, facts, parse_error)
+                    payload, digest, text, pages, facts, parse_error = pdf_cache[url]
+                    announcement_id = str(item.get("announcementId") or "")
+                    evidence_key = (url, announcement_id)
+                    if evidence_key not in archived_notices:
+                        records.append(
+                            archive.archive(
+                                "corporate_actions",
+                                payload,
+                                source="cninfo",
+                                request_params={
+                                    "announcement_id": announcement_id,
+                                    "pdf_sha256": digest,
+                                },
+                                run_id=run_id,
+                                url=url,
+                                payload_format="bytes",
+                                http_metadata={"wire_exact": True},
+                                observation_id=f"{run_id}:{scope}:notice:{announcement_id}",
+                                request_scope=scope,
+                            )
                         )
-                    payload = response.content
-                    digest = hashlib.sha256(payload).hexdigest()
-                    records.append(
-                        archive.archive(
-                            "corporate_actions",
-                            payload,
-                            source="cninfo",
-                            request_params={
-                                "announcement_id": str(item.get("announcementId") or ""),
-                                "pdf_sha256": digest,
-                            },
-                            run_id=run_id,
-                            url=url,
-                            payload_format="bytes",
-                            http_metadata={"wire_exact": True},
-                            observation_id=(
-                                f"{run_id}:{scope}:notice:{item.get('announcementId')}"
-                            ),
-                            request_scope=scope,
-                        )
-                    )
-                    try:
-                        text, pages = _pdf_text(payload)
-                        facts = parse_payment_notice_text(text)
-                    except Exception as exc:  # noqa: BLE001 - evidence remains archived
+                        archived_notices.add(evidence_key)
+                    if parse_error is not None:
                         diagnostics.append(
                             {
                                 "symbol": symbol,
                                 "ex_date": str(old["ex_date"]),
                                 "announcement_id": str(item.get("announcementId") or ""),
-                                "reason": f"pdf_parse_failed:{type(exc).__name__}",
+                                "reason": f"pdf_parse_failed:{parse_error}",
                             }
                         )
                         continue

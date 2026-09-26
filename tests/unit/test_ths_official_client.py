@@ -14,6 +14,7 @@ from cnequity.adapters.ths_official import (
     ThsOfficialParameterError,
     client_from_config,
 )
+from cnequity.adapters.ths_official.client import ThsOfficialRateLimited
 from cnequity.config import Config
 
 
@@ -80,7 +81,7 @@ def test_parameter_errors_are_distinct_and_never_retried():
     assert len(calls) == 1
 
 
-def test_rate_limiting_backs_off_then_surfaces(monkeypatch):
+def test_rate_limiting_surfaces_without_repeated_requests(monkeypatch):
     monkeypatch.setattr("cnequity.adapters.ths_official.client.time.sleep", lambda _: None)
     calls = []
 
@@ -91,7 +92,23 @@ def test_rate_limiting_backs_off_then_surfaces(monkeypatch):
     client = _client(handler)
     with pytest.raises(ThsOfficialError):
         client.get("/api/a-share/prices/snapshot")
-    assert len(calls) == 4
+    assert len(calls) == 1
+
+
+def test_http_429_stops_without_an_extra_retry(monkeypatch):
+    monkeypatch.setattr(
+        "cnequity.adapters.ths_official.client.time.sleep", lambda _: pytest.fail("sleep")
+    )
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(429)
+
+    client = _client(respond)
+    with pytest.raises(ThsOfficialRateLimited):
+        client.get("/api/a-share/prices/snapshot")
+    assert len(calls) == 1
 
 
 def test_a_transport_failure_is_retried_then_reported(monkeypatch):

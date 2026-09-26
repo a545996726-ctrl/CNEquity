@@ -222,6 +222,53 @@ def test_retry_stops_at_configured_budget(tmp_path, monkeypatch):
     assert repeated["retry_exhausted"] == 1
 
 
+def test_retry_compacts_ready_dataset_while_another_still_fails(tmp_path, monkeypatch):
+    import polars as pl
+
+    from cnequity.storage import StagingWriter
+
+    cfg = Config(data_root=tmp_path / "data", max_retries=1, retry_backoff_seconds=0)
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily", {"trade_date": "2024-06-28"})
+    manifest.start_batch(run_id, "failed", "daily_bars", "daily_bars")
+    manifest.finish_batch(run_id, "failed", "failed", error_message="timeout")
+    manifest.start_batch(run_id, "ready", "fund_flow", "fund_flow")
+    manifest.finish_batch(run_id, "ready", "success", rows_written=1)
+    StagingWriter(cfg.staging_root).write_batch(
+        "fund_flow",
+        run_id,
+        "ready",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "trade_date": [date(2024, 6, 28)],
+                "main_net_inflow": [1.0],
+                "super_large_net_inflow": [0.0],
+                "large_net_inflow": [0.0],
+                "medium_net_inflow": [0.0],
+                "small_net_inflow": [0.0],
+                "source": ["eastmoney"],
+                "data_version": ["v1"],
+                "fetched_at": ["2024-06-28T00:00:00Z"],
+            }
+        ),
+    )
+    engine = JobEngine(cfg)
+    finalize = []
+
+    def retry_failed(name, day, resumed_run_id, context, *, retry_of=None):
+        manifest.start_batch(resumed_run_id, "failed", name, name)
+        manifest.finish_batch(resumed_run_id, "failed", "failed", error_message="still down")
+        return {"status": "failed"}
+
+    monkeypatch.setattr(engine, "_run_step", retry_failed)
+    monkeypatch.setattr(engine, "_run_finalize_steps", lambda *a, **kw: finalize.append(kw) or [])
+    engine.run_job("retry", run_id=run_id, retry_failed_only=True)
+
+    assert finalize and finalize[0]["steps"] == ("compact",)
+
+
 def test_retry_does_not_repeat_non_transient_worker_failures(tmp_path, monkeypatch):
     cfg = Config(
         data_root=tmp_path / "data",

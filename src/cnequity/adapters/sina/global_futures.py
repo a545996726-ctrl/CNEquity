@@ -18,6 +18,7 @@ import httpx
 import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,7 @@ def fetch_offshore_commodity_bars_range(
             try:
                 with source_request(config, "sina"):
                     resp = client.get(_URL, params={"symbol": sina_sym})
+                    record_http_response(config, "sina", resp)
                 resp.raise_for_status()
                 payload = resp.json()
                 if not isinstance(payload, list):

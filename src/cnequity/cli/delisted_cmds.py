@@ -18,8 +18,6 @@ from cnequity.cli._shared import (
     config_option,
     parse_date_option,
 )
-from cnequity.domain.market_time import shanghai_today
-from cnequity.orchestrator.engine import JobEngine
 
 # Exit 0 even when sources are down. A red source is this command's *output*,
 # not its failure.
@@ -86,35 +84,17 @@ def delisted_status(config_path: str, since: str, sample: int):
 @config_option
 @click.option("--since", default="2016-01-01", show_default=True, help="湖窗口起点。")
 def delisted_backfill(config_path: str, since: str):
-    """抓取名录里退市标的的价格历史，并 compact 进湖。"""
+    """兼容入口；新任务使用 backfill daily_bars --profile delisted。"""
 
-    from cnequity.steps.delisted import backfill_delisted_bars
+    from cnequity.cli.backfill_cmds import _run_delisted_profile
 
+    click.echo(
+        "提示：请改用 `cne backfill daily_bars --profile delisted --start YYYY-MM-DD`。",
+        err=True,
+    )
     cfg = _cfg(config_path)
     attach_log_file(cfg, "delisted-backfill")
-    engine = JobEngine(cfg)
-    run_id = engine.manifest.start_run("delisted_backfill", {"since": since})
-    result = backfill_delisted_bars(cfg, run_id, parse_date_option(since, "--since"))
-    compact_out = engine.run_step("compact", shanghai_today(), run_id)
-    complete = (
-        result.get("status", "success") == "success"
-        and compact_out.get("status", "success") == "success"
-    )
-    run_status = "success" if complete else "warning"
-    error_message = None if complete else "delisted recovery has unresolved targets"
-    engine.manifest.finish_run(
-        run_id,
-        run_status,
-        rows_read=result.get("rows_read", 0),
-        rows_written=result.get("rows_written", 0),
-        error_message=error_message,
-    )
-    click.echo(
-        json.dumps(
-            {"run_id": run_id, **result, "status": run_status, "compact": compact_out},
-            indent=2,
-            default=str,
-        )
-    )
-    if not complete:
-        raise click.ClickException(error_message)
+    result = _run_delisted_profile(cfg, parse_date_option(since, "--since"))
+    click.echo(json.dumps(result, indent=2, default=str))
+    if result["status"] != "success":
+        raise click.ClickException("delisted recovery has unresolved targets")

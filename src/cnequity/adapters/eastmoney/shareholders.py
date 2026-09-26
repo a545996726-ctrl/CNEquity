@@ -29,16 +29,38 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
 
 from cnequity.adapters.eastmoney.common import symbol_from_secucode
-from cnequity.adapters.eastmoney.datacenter import fetch_datacenter
+from cnequity.adapters.eastmoney.datacenter import EastMoneyDatacenterError, fetch_datacenter
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient, rate_limit_if_unconfigured
 from cnequity.config import Config
+from cnequity.domain.http_policy import SourceCoolingDown
+from cnequity.storage.raw_archive import RawPayloadArchive
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ShareholderCapture:
+    dataset: str
+    run_id: str
+    source: str
+    request_scope: str
+    nonce: str
+
+
+@dataclass
+class ShareholderProgress:
+    """Report a failed dynamic sweep separately from its valid observed rows."""
+
+    failed_report: str | None = None
+    failure: str | None = None
+    valid_pages: int = 0
+
 
 _EQUITY_REPORT = "RPT_F10_EH_EQUITY"
 _EQUITY_COLUMNS = (
@@ -74,6 +96,12 @@ SCOPE_FLOAT = "float"
 # It is not; waiting does nothing. Sorting by SECUCODE and handing the same
 # column to keyset_column is what actually gets past page 100.
 _KEYSET_COLUMN = "SECUCODE"
+
+# Do not replace the date windows with guessed SECUCODE prefix ranges. A
+# bounded live page-1 check on 2026-09-27 answered success with 000001.SZ for
+# a requested SECUCODE >= '5' range; another full-code bound returned 9501.
+# Keyset continuation uses a full observed key, but that does not establish
+# that arbitrary prefix ranges are a valid partition contract for this report.
 
 # Genuine busy answers do also happen on a sweep this long. A little more
 # patience than the default 3/5s is cheap here because failing at page 90 throws
@@ -160,20 +188,64 @@ def _fetch_filtered(
     filter_expr: str,
     *,
     config: Config | None,
+    archive_context: ShareholderCapture | None = None,
+    progress: ShareholderProgress | None = None,
 ) -> list[dict]:
     rate_limit_if_unconfigured(client, config)
-    return fetch_datacenter(
-        client,
-        report,
-        columns,
-        filter_expr=filter_expr,
-        # Ascending by the keyset column is a precondition of re-anchoring.
-        sort_columns=_KEYSET_COLUMN,
-        sort_types="1",
-        keyset_column=_KEYSET_COLUMN,
-        max_retries=_SWEEP_RETRIES,
-        retry_backoff_seconds=_SWEEP_BACKOFF_SECONDS,
-    )
+    archive = None
+    if archive_context is not None:
+        if config is None:
+            raise ValueError("shareholder archive capture requires config")
+        archive = RawPayloadArchive(
+            config.meta_root,
+            enabled=True,
+            datasets=[archive_context.dataset],
+            compression=config.raw_archive_compression,
+            max_payload_bytes=config.raw_archive_max_payload_bytes,
+            capture_owner=config,
+            capture_run_id=archive_context.run_id,
+            capture_source=archive_context.source,
+            capture_scope=archive_context.request_scope,
+            capture_nonce=archive_context.nonce,
+        )
+    valid_rows: list[dict] = []
+
+    def _page(batch: list[dict]) -> None:
+        valid_rows.extend(batch)
+        if progress is not None:
+            progress.valid_pages += 1
+
+    try:
+        return fetch_datacenter(
+            client,
+            report,
+            columns,
+            filter_expr=filter_expr,
+            # Ascending by the keyset column is a precondition of re-anchoring.
+            sort_columns=_KEYSET_COLUMN,
+            sort_types="1",
+            keyset_column=_KEYSET_COLUMN,
+            max_retries=_SWEEP_RETRIES,
+            retry_backoff_seconds=_SWEEP_BACKOFF_SECONDS,
+            on_valid_page=_page if progress is not None else None,
+            archive=archive,
+            archive_dataset=archive_context.dataset if archive_context else None,
+            archive_run_id=archive_context.run_id if archive_context else None,
+            archive_source=archive_context.source if archive_context else "eastmoney",
+            archive_request_scope=archive_context.request_scope if archive_context else None,
+        )
+    except (EastMoneyDatacenterError, SourceCoolingDown) as exc:
+        if progress is None or not valid_rows:
+            raise
+        progress.failed_report = report
+        progress.failure = str(exc)
+        logger.warning(
+            "EastMoney %s incomplete after %d valid page(s); keeping positive rows: %s",
+            report,
+            progress.valid_pages,
+            exc,
+        )
+        return valid_rows
 
 
 def fetch_share_structure(
@@ -183,6 +255,8 @@ def fetch_share_structure(
     by: str = CHANGE_DATE,
     client: EastMoneyClient | None = None,
     config: Config | None = None,
+    archive_context: ShareholderCapture | None = None,
+    progress: ShareholderProgress | None = None,
 ) -> pl.DataFrame:
     """股本结构变动 in a date window.
 
@@ -210,6 +284,8 @@ def fetch_share_structure(
             _EQUITY_COLUMNS,
             _range_filter(column, start, end),
             config=config,
+            archive_context=archive_context,
+            progress=progress,
         )
         raw = _rows_in_date_window(raw, column, start, end)
     finally:
@@ -246,6 +322,8 @@ def fetch_shareholder_counts(
     by: str = CHANGE_DATE,
     client: EastMoneyClient | None = None,
     config: Config | None = None,
+    archive_context: ShareholderCapture | None = None,
+    progress: ShareholderProgress | None = None,
 ) -> pl.DataFrame:
     """股东户数 in a date window.
 
@@ -268,6 +346,8 @@ def fetch_shareholder_counts(
             _HOLDERNUM_COLUMNS,
             _range_filter(column, start, end),
             config=config,
+            archive_context=archive_context,
+            progress=progress,
         )
         raw = _rows_in_date_window(raw, column, start, end)
     finally:
@@ -363,6 +443,8 @@ def fetch_top_holders(
     by: str = CHANGE_DATE,
     client: EastMoneyClient | None = None,
     config: Config | None = None,
+    archive_context: ShareholderCapture | None = None,
+    progress: ShareholderProgress | None = None,
 ) -> pl.DataFrame:
     """前十大股东 + 前十大流通股东 over a record-date window, one frame.
 
@@ -394,13 +476,21 @@ def fetch_top_holders(
             _FREEHOLDERS_COLUMNS,
             _range_filter("END_DATE", start, end),
             config=config,
+            archive_context=archive_context,
+            progress=progress,
         )
-        total_raw = _fetch_filtered(
-            client,
-            _HOLDERS_REPORT,
-            _HOLDERS_COLUMNS,
-            _range_filter("END_DATE", start, end),
-            config=config,
+        total_raw = (
+            _fetch_filtered(
+                client,
+                _HOLDERS_REPORT,
+                _HOLDERS_COLUMNS,
+                _range_filter("END_DATE", start, end),
+                config=config,
+                archive_context=archive_context,
+                progress=progress,
+            )
+            if progress is None or progress.failed_report is None
+            else []
         )
         free_raw = _rows_in_date_window(free_raw, "END_DATE", start, end)
         total_raw = _rows_in_date_window(total_raw, "END_DATE", start, end)

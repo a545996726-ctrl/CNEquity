@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import polars as pl
 
+from cnequity.domain.http_policy import SourceCoolingDown, record_http_response
 from cnequity.domain.market_time import SHANGHAI_TZ
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, infer_exchange_from_code, is_all_a_symbol
@@ -187,6 +188,7 @@ def post_with_retry(
             # backoff sleep.
             with source_request(config, "cninfo", metrics=metrics):
                 resp = client.post(url, data=data)
+                record_http_response(config, "cninfo", resp, expected_json=True)
                 try:
                     resp.raise_for_status()
                 except Exception:
@@ -208,13 +210,18 @@ def post_with_retry(
                 if on_response is not None:
                     on_response(resp, parsed, attempt)
                 return parsed
-        except RawArchiveError:
+        except (RawArchiveError, SourceCoolingDown):
             # An archive policy/integrity failure is fail-closed.  Retrying the
             # source request cannot repair missing or tampered evidence and
             # would make it possible to continue without a required archive.
             raise
         except Exception as exc:  # noqa: BLE001 — retried uniformly, re-raised below
             last_exc = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None and status not in {408, 500, 502, 503, 504}:
+                # Refusals already recorded a shared cooldown; a missing or
+                # invalid resource also cannot be fixed by replaying it.
+                raise
             if attempt + 1 < _POST_RETRIES:
                 time.sleep(_POST_BACKOFF_SECONDS * (attempt + 1))
     raise last_exc  # type: ignore[misc]

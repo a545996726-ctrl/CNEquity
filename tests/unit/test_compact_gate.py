@@ -160,6 +160,50 @@ def test_compact_advances_watermark_when_all_batches_succeed(tmp_path):
     ).exists()
 
 
+def test_partial_by_date_publication_keeps_the_missing_day_outstanding(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    state = StateStore(cfg.meta_root)
+    writer = StagingWriter(cfg.staging_root)
+
+    def breadth(day):
+        values = {
+            "advance_count": 1.0,
+            "decline_count": 0.0,
+            "flat_count": 0.0,
+            "limit_up_count": 0.0,
+            "limit_down_count": 0.0,
+            "advance_ratio": 1.0,
+            "total_count": 1.0,
+        }
+        return pl.DataFrame(
+            {
+                "trade_date": [day] * len(values),
+                "metric_id": list(values),
+                "value": list(values.values()),
+                "source": ["derived"] * len(values),
+                "data_version": ["v1"] * len(values),
+                "fetched_at": ["2024-06-28T00:00:00Z"] * len(values),
+            }
+        )
+
+    day_26, day_27, day_28 = (date(2024, 6, d) for d in (26, 27, 28))
+    state.record_missing_dates("market_breadth", [day_27], reason="timeout")
+    for day in (day_26, day_28):
+        writer.write_batch("market_breadth", "partial", f"day-{day}", breadth(day))
+    state.mark_staged_request_days("market_breadth", "partial", [day_26, day_28])
+
+    step_compact(cfg, day_28, "partial", {})
+    assert state.get_missing_dates("market_breadth") == {day_27}
+    payload = state.get_payload("market_breadth")
+    assert payload["observed_max"] == "2024-06-28"
+    assert payload["coverage_status"] == "incomplete"
+
+    writer.write_batch("market_breadth", "repair", f"day-{day_27}", breadth(day_27))
+    state.mark_staged_request_days("market_breadth", "repair", [day_27])
+    step_compact(cfg, day_28, "repair", {})
+    assert state.get_missing_dates("market_breadth") == set()
+
+
 def test_source_diff_gate_rolls_back_mutable_candidate_before_next_partition(tmp_path):
     root = tmp_path / "data"
     cfg = Config(

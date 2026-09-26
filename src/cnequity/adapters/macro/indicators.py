@@ -140,15 +140,32 @@ def _to_month_end(value: date) -> date:
     return value.replace(day=calendar.monthrange(value.year, value.month)[1])
 
 
-def _eastmoney_daily(client: EastMoneyClient, trade_date: date) -> list[dict]:
+def _capture_series(unit: str, fetch, failures, completed):
+    try:
+        rows = fetch()
+    except Exception as exc:
+        if failures is None:
+            raise
+        failures.append((unit, str(exc)))
+        return []
+    if completed is not None:
+        completed.add(unit)
+    return rows
+
+
+def _eastmoney_daily(
+    client: EastMoneyClient, trade_date: date, *, failures=None, completed=None
+) -> list[dict]:
     ds = trade_date.isoformat()
     rows: list[dict] = []
 
-    treasury = fetch_datacenter(
-        client,
-        _TREASURY_REPORT,
-        _TREASURY_COLUMNS,
-        filter_expr=f"(SOLAR_DATE='{ds}')",
+    treasury = _capture_series(
+        "eastmoney:cnbond_yield_10y",
+        lambda: fetch_datacenter(
+            client, _TREASURY_REPORT, _TREASURY_COLUMNS, filter_expr=f"(SOLAR_DATE='{ds}')"
+        ),
+        failures,
+        completed,
     )
     for item in treasury:
         val = _finite_float(item.get("EMM00166466"))
@@ -164,11 +181,16 @@ def _eastmoney_daily(client: EastMoneyClient, trade_date: date) -> list[dict]:
                 }
             )
 
-    shibor = fetch_datacenter(
-        client,
-        _SHIBOR_REPORT,
-        _SHIBOR_COLUMNS,
-        filter_expr=f"{_SHIBOR_FILTER}(REPORT_DATE='{ds}')",
+    shibor = _capture_series(
+        "eastmoney:shibor_3m",
+        lambda: fetch_datacenter(
+            client,
+            _SHIBOR_REPORT,
+            _SHIBOR_COLUMNS,
+            filter_expr=f"{_SHIBOR_FILTER}(REPORT_DATE='{ds}')",
+        ),
+        failures,
+        completed,
     )
     for item in shibor:
         val = _finite_float(item.get("IR_RATE"))
@@ -184,11 +206,13 @@ def _eastmoney_daily(client: EastMoneyClient, trade_date: date) -> list[dict]:
                 }
             )
 
-    lpr = fetch_datacenter(
-        client,
-        _LPR_REPORT,
-        _LPR_COLUMNS,
-        filter_expr=f"(TRADE_DATE='{ds}')",
+    lpr = _capture_series(
+        "eastmoney:lpr_1y",
+        lambda: fetch_datacenter(
+            client, _LPR_REPORT, _LPR_COLUMNS, filter_expr=f"(TRADE_DATE='{ds}')"
+        ),
+        failures,
+        completed,
     )
     for item in lpr:
         val = _finite_float(item.get("LPR1Y"))
@@ -271,7 +295,9 @@ def fetch_daily_rates_range(
     )
 
 
-def _eastmoney_monthly(client: EastMoneyClient, trade_date: date) -> list[dict]:
+def _eastmoney_monthly(
+    client: EastMoneyClient, trade_date: date, *, failures=None, completed=None
+) -> list[dict]:
     """PMI and M2 straight from the EastMoney datacenter reports.
 
     Each report returns its whole published history (~220 months back to 2008)
@@ -284,12 +310,13 @@ def _eastmoney_monthly(client: EastMoneyClient, trade_date: date) -> list[dict]:
     for indicator_id, spec in _EM_MONTHLY_SERIES.items():
         report = spec["report"]
         value_column = spec["value_column"]
-        records = fetch_datacenter(
-            client,
-            report,
-            spec["columns"],
-            sort_columns="REPORT_DATE",
-            sort_types="-1",
+        records = _capture_series(
+            f"eastmoney:{indicator_id}",
+            lambda report=report, columns=spec["columns"]: fetch_datacenter(
+                client, report, columns, sort_columns="REPORT_DATE", sort_types="-1"
+            ),
+            failures,
+            completed,
         )
 
         for item in records:
@@ -314,7 +341,13 @@ def _eastmoney_monthly(client: EastMoneyClient, trade_date: date) -> list[dict]:
     return rows
 
 
-def _social_financing_rows(trade_date: date, *, config=None) -> list[dict]:
+def _social_financing_rows(
+    trade_date: date,
+    *,
+    config=None,
+    failures: list[tuple[str, str]] | None = None,
+    completed_units: set[str] | None = None,
+) -> list[dict]:
     """社融增量 from the PBOC's own statistical tables.
 
     Read from the publisher rather than a republisher. MOFCOM, which this
@@ -329,6 +362,24 @@ def _social_financing_rows(trade_date: date, *, config=None) -> list[dict]:
 
     from cnequity.adapters.pboc.social_financing import fetch_social_financing
 
+    year_failures: dict[int, str] = {}
+    completed_years: set[int] = set()
+    series = fetch_social_financing(
+        config=config,
+        strict=failures is None,
+        failures_by_year=year_failures,
+        completed_years=completed_years,
+    )
+    if failures is not None:
+        failures.extend(
+            (f"pboc:social_financing:{year or 'index'}", reason)
+            for year, reason in sorted(year_failures.items())
+        )
+    if completed_units is not None:
+        completed_units.update(f"pboc:social_financing:{year}" for year in completed_years)
+        if not year_failures:
+            completed_units.add("pboc:social_financing")
+
     return [
         {
             "indicator_id": "social_financing",
@@ -337,10 +388,7 @@ def _social_financing_rows(trade_date: date, *, config=None) -> list[dict]:
             "frequency": "monthly",
             "source": "pboc",
         }
-        # This is a canonical write path. A partial set of PBOC years would
-        # look like a complete history to compact and could advance the macro
-        # watermark while leaving an interior gap, so fail the whole fetch.
-        for item in fetch_social_financing(config=config, strict=True)
+        for item in series
         if item["obs_date"] <= trade_date
     ]
 
@@ -350,17 +398,21 @@ def fetch_macro_indicators(
     *,
     client: EastMoneyClient | None = None,
     config=None,
+    failures: list[tuple[str, str]] | None = None,
+    completed_units: set[str] | None = None,
 ) -> pl.DataFrame:
     owns = client is None
     if client is None:
         client = EastMoneyClient(config=config)
 
     try:
-        rows = _eastmoney_daily(client, trade_date)
+        rows = _eastmoney_daily(client, trade_date, failures=failures, completed=completed_units)
         # Daily rates first, so an LPR row already published on the daily report
         # wins over a monthly restatement of the same (indicator_id, obs_date).
         seen = {(r["indicator_id"], r["obs_date"]) for r in rows}
-        for item in _eastmoney_monthly(client, trade_date):
+        for item in _eastmoney_monthly(
+            client, trade_date, failures=failures, completed=completed_units
+        ):
             key = (item["indicator_id"], item["obs_date"])
             if key not in seen:
                 rows.append(item)
@@ -369,7 +421,16 @@ def fetch_macro_indicators(
         if owns:
             client.close()
 
-    for item in _social_financing_rows(trade_date, config=config):
+    try:
+        social = _social_financing_rows(
+            trade_date, config=config, failures=failures, completed_units=completed_units
+        )
+    except Exception as exc:
+        if failures is None:
+            raise
+        failures.append(("pboc:social_financing", str(exc)))
+        social = []
+    for item in social:
         key = (item["indicator_id"], item["obs_date"])
         if key not in seen:
             rows.append(item)

@@ -29,6 +29,21 @@ if TYPE_CHECKING:
     from cnequity.config.loader import ScheduleGroup
 
 CADENCES = ("daily", "weekly")
+DEFAULT_SCHEDULE_GROUPS = ("core", "capital", "signals", "fundamentals", "macro_risk", "research")
+
+
+def group_is_runnable(config: Any, group: ScheduleGroup) -> bool:
+    """Whether a configured group has any enabled dataset to fetch."""
+    from cnequity.domain.datasets import DATASETS, is_dataset_enabled
+
+    datasets = [step for step in group.steps if step in DATASETS]
+    return not datasets or any(is_dataset_enabled(name, config) for name in datasets)
+
+
+def scheduled_group_names(config: Any) -> list[str]:
+    """The single ordered group plan used by CLI, shell and launchd."""
+    groups = getattr(config, "schedule_groups", None) or {}
+    return [name for name, group in groups.items() if group_is_runnable(config, group)]
 
 
 def _is_session(day: date) -> bool:
@@ -76,7 +91,9 @@ def _is_snapshot(step: str) -> bool:
     from cnequity.domain.datasets import DATASETS
 
     spec = DATASETS.get(step)
-    return spec is not None and spec.fetch_semantics == "snapshot"
+    return step == "futures_minute_bars" or (
+        spec is not None and spec.fetch_semantics == "snapshot"
+    )
 
 
 def due_steps(group: ScheduleGroup, trade_date: date) -> list[str]:

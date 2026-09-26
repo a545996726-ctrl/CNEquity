@@ -210,7 +210,7 @@ def fetch_cffex_day(trade_date: date, *, config=None) -> ExchangeDay:
     """Every CFFEX contract for *trade_date*, or :class:`FuturesDayUnavailable`."""
     if trade_date < FIRST_SESSION:
         raise FuturesDayUnavailable(f"CFFEX has no sessions before {FIRST_SESSION.isoformat()}")
-    body = fetch_bytes(_url(DAILY_URL, trade_date), config=config)
+    body = fetch_bytes(_url(DAILY_URL, trade_date), config=config, as_of=trade_date)
     return parse_daily_csv(body, trade_date)
 
 

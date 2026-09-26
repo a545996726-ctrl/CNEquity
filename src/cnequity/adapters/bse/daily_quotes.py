@@ -13,14 +13,17 @@ import json
 import logging
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
 import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
+from cnequity.domain.http_policy import record_cache_reuse, record_http_response
 from cnequity.domain.rate_limit import source_request
+from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,7 @@ _QUOTATION_PAGE = f"{_BASE_URL}/nq/quotation.html"
 _QUOTATION_API = f"{_BASE_URL}/nqhqController/nqhq_en.do"
 _PAGE_SIZE = 20
 _MAX_PAGES = 100
+_BOARD_CACHE_SECONDS = 300
 _CALLBACK_RE = re.compile(r"^[A-Za-z_$][\w$]*\((.*)\);?$", re.DOTALL)
 _HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -67,11 +71,15 @@ def _parse_page(text: str) -> tuple[list[dict[str, Any]], int]:
         raise BseMarketDataError("BSE quotation response is missing content")
     if not isinstance(content, list) or not all(isinstance(row, dict) for row in content):
         raise BseMarketDataError("BSE quotation content is not a list of objects")
+    if "totalElements" not in page:
+        raise BseMarketDataError("BSE quotation response is missing totalElements")
     try:
-        total = int(page.get("totalElements") or 0)
+        total = int(page["totalElements"])
     except (TypeError, ValueError) as exc:
         raise BseMarketDataError("BSE quotation totalElements is invalid") from exc
-    return content, max(0, total)
+    if total < 0 or (content and total == 0):
+        raise BseMarketDataError("BSE quotation totalElements contradicts page content")
+    return content, total
 
 
 def _parse_date(value: object) -> date | None:
@@ -126,6 +134,7 @@ def read_board(
     *,
     client: httpx.Client | None = None,
     config=None,
+    expected_date: date | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Walk the whole quotation board, returning its raw rows and its own total.
 
@@ -133,13 +142,68 @@ def read_board(
     session: callers filter on ``hqjsrq`` themselves.
 
     A walk that ends on an empty page before the advertised total is a
-    truncated board and raises here, for every caller. An *under-filled* page
-    does not: the loop paginates by page offset, so it cannot see one. That is
-    what the total is returned for — comparing it against ``len(rows)`` is a
-    stricter completeness test, and trading status needs it, because Beijing
-    encodes a halt as an absence and a short read would otherwise look like the
-    exchange suspending itself.
+    truncated board and raises here. An *under-filled* page does not: the loop
+    paginates by page offset, so it cannot see one. The returned total lets
+    consumers enforce completeness before treating an absent security as
+    evidence of a halt.
     """
+    # The endpoint has no date parameter. Only reuse a *complete* reading
+    # whose own row dates match the consumer's session. A custom client is a
+    # transport boundary (notably in offline tests), so it bypasses the cache.
+    if config is not None and client is None and expected_date is not None:
+        path = config.meta_root / "source_cache" / "bse" / f"board-{expected_date}.json"
+        with exclusive_lock(path.with_suffix(".lock")):
+            if path.exists():
+                try:
+                    cached = json.loads(path.read_text(encoding="utf-8"))
+                    captured = datetime.fromisoformat(cached["captured_at"])
+                    rows = cached["rows"]
+                    total = cached["total"]
+                    fresh = (
+                        datetime.now(timezone.utc) - captured
+                    ).total_seconds() < _BOARD_CACHE_SECONDS
+                    if fresh and _complete_session(rows, total, expected_date):
+                        record_cache_reuse(config, "bse", "board_snapshot")
+                        return rows, total
+                except (KeyError, TypeError, ValueError, OSError):
+                    pass
+            rows, total = _read_board_uncached(config=config)
+            if _complete_session(rows, total, expected_date):
+                write_json_atomic(
+                    path,
+                    {
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "rows": rows,
+                        "total": total,
+                    },
+                )
+            return rows, total
+    return _read_board_uncached(client=client, config=config)
+
+
+def _complete_session(rows: list[dict[str, Any]], total: int, day: date) -> bool:
+    return (
+        bool(total)
+        and len(rows) >= total
+        and all(_parse_date(row.get("hqjsrq")) == day for row in rows)
+    )
+
+
+def _request_data(page: int) -> dict[str, object]:
+    """One BSE board page; also used by the bounded reachability probe."""
+    return {
+        "page": page,
+        "type_en": '["B"]',
+        "sortfield": "hqcjsl",
+        "sorttype": "desc",
+        "xxfcbj_en": "[2]",
+        "zqdm": "",
+    }
+
+
+def _read_board_uncached(
+    *, client: httpx.Client | None = None, config=None
+) -> tuple[list[dict[str, Any]], int]:
     owns_client = client is None
     if client is None:
         client = httpx.Client(timeout=20.0, follow_redirects=False, headers=_HEADERS)
@@ -150,32 +214,37 @@ def read_board(
         # the same URL; do not follow that redirect because it loops on some
         # overseas CDNs, and the cookie is enough for the JSONP endpoint.
         with source_request(config, "bse"):
-            client.get(_QUOTATION_PAGE)
+            landing = client.get(_QUOTATION_PAGE)
+            record_http_response(config, "bse", landing)
+            if landing.status_code not in {301, 302, 307, 308}:
+                landing.raise_for_status()
         first_page = True
         page = 0
         while first_page or page * _PAGE_SIZE < total:
             if page >= _MAX_PAGES:
                 raise BseMarketDataError("BSE quotation pagination exceeded safety limit")
-            request_data = {
-                "page": page,
-                "type_en": '["B"]',
-                "sortfield": "hqcjsl",
-                "sorttype": "desc",
-                "xxfcbj_en": "[2]",
-                "zqdm": "",
-            }
+            request_data = _request_data(page)
             with source_request(config, "bse"):
                 response = client.post(_QUOTATION_API, data=request_data)
+                record_http_response(config, "bse", response, expected_json=True)
             if getattr(response, "status_code", 200) in {301, 302, 307, 308}:
                 # The site occasionally refreshes its WAF cookie with a
                 # same-URL redirect. Re-establish the page cookie once; never
                 # follow an arbitrary Location header into another endpoint.
                 with source_request(config, "bse"):
-                    client.get(_QUOTATION_PAGE)
+                    landing = client.get(_QUOTATION_PAGE)
+                    record_http_response(config, "bse", landing)
+                    if landing.status_code not in {301, 302, 307, 308}:
+                        landing.raise_for_status()
                 with source_request(config, "bse"):
                     response = client.post(_QUOTATION_API, data=request_data)
+                    record_http_response(config, "bse", response, expected_json=True)
             response.raise_for_status()
             page_rows, page_total = _parse_page(response.text)
+            if total and page_total and page_total != total:
+                raise BseMarketDataError(
+                    f"BSE quotation totalElements changed during pagination ({total} -> {page_total})"
+                )
             # An empty tail page reports zero; keep the last real figure so it
             # cannot erase the number the walk is being measured against.
             total = page_total or total
@@ -210,7 +279,11 @@ def fetch_daily_quotes(
     the board-wide pagination, while the response remains board-authoritative.
     """
     wanted = set(symbols) if symbols is not None else None
-    raw_rows, _total = read_board(client=client, config=config)
+    raw_rows, total = read_board(client=client, config=config, expected_date=trade_date)
+    if total and len(raw_rows) != total:
+        raise BseMarketDataError(
+            f"BSE quotation pagination returned {len(raw_rows)}/{total} advertised rows"
+        )
     rows: list[dict[str, Any]] = []
     for raw in raw_rows:
         quote = _row_to_quote(raw, trade_date)

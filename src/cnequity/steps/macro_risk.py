@@ -19,6 +19,7 @@ from cnequity.orchestrator.registry import register_step
 from cnequity.quality.macro_checks import macro_revision_findings
 from cnequity.steps.common import BACKFILL_START, list_trading_dates
 from cnequity.steps.http_common import run_incremental_fetched
+from cnequity.storage.state import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -246,12 +247,16 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
     # it is what lets a corrected history heal on the next run without a
     # migration (issue #3) — so this records the change rather than blocking it.
     revisions: list[dict] = []
+    source_failures: list[tuple[str, str]] = []
+    completed_units: set[str] = set()
     daily_gaps: dict[date, list[str]] = {}
     daily_pending: dict[date, list[str]] = {}
     backfill = getattr(config, "_backfill", False)
 
     def _fetch(day: date):
-        df = fetch_macro_indicators(day, config=config)
+        df = fetch_macro_indicators(
+            day, config=config, failures=source_failures, completed_units=completed_units
+        )
         if backfill:
             # The run-day fetch still runs, so a backfill writes everything it
             # used to (monthly series, 社融, a same-day LPR) plus the window's
@@ -277,18 +282,23 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
         revisions.extend(macro_revision_findings(config, df, day))
         return df
 
-    result = run_incremental_fetched(
-        config,
-        trade_date,
-        run_id,
-        "macro_indicators",
-        _fetch,
-        # The adapter stamps `source` per row (EastMoney and the PBOC both feed
-        # this dataset), and with_provenance keeps a pre-set column. This value
-        # only applies to the empty-frame case.
-        source="eastmoney",
-        allow_empty=False,
-    )
+    try:
+        result = run_incremental_fetched(
+            config,
+            trade_date,
+            run_id,
+            "macro_indicators",
+            _fetch,
+            # Adapter rows retain their own EastMoney/PBOC provenance.
+            source="eastmoney",
+            allow_empty=False,
+        )
+    finally:
+        if source_failures:
+            StateStore(config.meta_root).record_missing_units("macro_indicators", source_failures)
+    if not config.sources.get("pboc", True):
+        completed_units.discard("pboc:social_financing")
+    StateStore(config.meta_root).mark_staged_units("macro_indicators", run_id, completed_units)
     if revisions:
         updates = result.setdefault("context_updates", {})
         updates["audit_findings"] = [*(updates.get("audit_findings") or []), *revisions]
@@ -334,6 +344,20 @@ def step_macro_indicators(config: Config, trade_date: date, run_id: str, context
                 },
             },
         ]
+    if source_failures and result.get("rows_written", 0):
+        updates = result.setdefault("context_updates", {})
+        updates["audit_findings"] = [
+            *(updates.get("audit_findings") or []),
+            {
+                "dataset": "macro_indicators",
+                "severity": "error",
+                "check": "macro_source_units_failed",
+                "message": f"{len(source_failures)} source/indicator request(s) failed; successful units were staged",
+                "units": [{"unit": unit, "error": error} for unit, error in source_failures],
+            },
+        ]
+        result["status"] = "degraded"
+        result["batch_settled"] = True
     return result
 
 

@@ -14,14 +14,20 @@ adapter supplies only its two labels.
 
 from __future__ import annotations
 
+import base64
 import calendar
+import hashlib
 import io
+import json
 import logging
 import math
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
+from cnequity.domain.http_policy import record_cache_reuse, record_http_response
 from cnequity.domain.rate_limit import source_request
+from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +65,7 @@ def client():
 def get_text(url: str, *, config=None, source: str = "pboc") -> str:
     with source_request(config, source):
         resp = client().get(url, impersonate="chrome", timeout=TIMEOUT_SECONDS)
+        record_http_response(config, source, resp)
     resp.raise_for_status()
     resp.encoding = "utf-8"
     return resp.text
@@ -67,6 +74,7 @@ def get_text(url: str, *, config=None, source: str = "pboc") -> str:
 def get_bytes(url: str, *, config=None, source: str = "pboc") -> bytes:
     with source_request(config, source):
         resp = client().get(url, impersonate="chrome", timeout=TIMEOUT_SECONDS)
+        record_http_response(config, source, resp)
     resp.raise_for_status()
     return resp.content
 
@@ -80,7 +88,18 @@ def year_sections(
 ) -> dict[int, str]:
     """Map year → that year's statistics section URL."""
     if index_html is None:
-        html = get_text(STATS_INDEX, config=config, source=source)
+        if config is None:
+            html = get_text(STATS_INDEX, config=config, source=source)
+        else:
+            path = config.meta_root / "source_cache" / "pboc" / "index.json"
+            with exclusive_lock(path.with_suffix(".lock")):
+                cached = _read_fresh(path, 3600)
+                if cached is None:
+                    html = get_text(STATS_INDEX, config=config, source=source)
+                    write_json_atomic(path, {"captured_at": _now(), "payload": html})
+                else:
+                    record_cache_reuse(config, source, "year_index")
+                    html = cached
     else:
         html = index_html
     return {int(year): absolute(href) for href, year in _YEAR_SECTION_RE.findall(html)}
@@ -178,6 +197,8 @@ def fetch_yearly_series(
     source_name: str = "pboc",
     start_year: int = 2015,
     strict: bool = False,
+    failures_by_year: dict[int, str] | None = None,
+    completed_years: set[int] | None = None,
 ) -> list[dict]:
     """Walk every year ≥ ``start_year``, newest first, and merge the series.
 
@@ -200,6 +221,8 @@ def fetch_yearly_series(
             sections = year_sections(config=config, source=source_name)
     except Exception as exc:
         logger.warning("PBOC statistics index unavailable: %s", exc)
+        if failures_by_year is not None:
+            failures_by_year[0] = f"statistics index unavailable: {exc}"
         if strict:
             raise PBOCSeriesError("PBOC statistics index unavailable") from exc
         return []
@@ -209,26 +232,16 @@ def fetch_yearly_series(
     failures: dict[int, str] = {}
     for year in sorted((y for y in sections if y >= start_year), reverse=True):
         try:
-            if config is None:
-                url = workbook_url(sections[year], topic=topic, table_label=table_label)
-            else:
-                url = workbook_url(
-                    sections[year],
-                    topic=topic,
-                    table_label=table_label,
-                    config=config,
-                    source=source_name,
-                )
-            if url is None:
-                reason = f"no {table_label} workbook link found"
-                failures[year] = reason
-                logger.warning("PBOC %s: %s", year, reason)
-                continue
-            if config is None:
-                content = get_bytes(url)
-            else:
-                content = get_bytes(url, config=config, source=source_name)
-            year_rows = parse_month_column(content, value_column, unit=unit)
+            year_rows = _year_rows(
+                year,
+                sections[year],
+                topic=topic,
+                table_label=table_label,
+                value_column=value_column,
+                unit=unit,
+                config=config,
+                source=source_name,
+            )
         except Exception as exc:
             failures[year] = str(exc)
             logger.warning("PBOC %s %s skipped: %s", year, table_label, exc)
@@ -239,17 +252,111 @@ def fetch_yearly_series(
                 "PBOC %s %s parsed to no rows; layout may have changed", year, table_label
             )
             continue
+        if completed_years is not None:
+            completed_years.add(year)
         for row in year_rows:
             if row["obs_date"] in seen:
                 continue
             seen.add(row["obs_date"])
             rows.append(row)
 
+    if failures_by_year is not None:
+        failures_by_year.update(failures)
     if strict and failures:
         details = "; ".join(f"{year}: {reason}" for year, reason in sorted(failures.items()))
         raise PBOCSeriesError(f"PBOC {table_label} series is incomplete: {details}")
     if not rows:
         logger.warning("PBOC %s returned no usable rows", table_label)
+        if failures_by_year is not None and not failures:
+            failures_by_year[0] = f"PBOC {table_label} returned no usable rows"
         if strict:
             raise PBOCSeriesError(f"PBOC {table_label} returned no usable rows")
     return rows
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_fresh(path, ttl_seconds: int):
+    if not path.exists():
+        return None
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(item["captured_at"])
+        if 0 <= age.total_seconds() < ttl_seconds:
+            return item["payload"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _year_rows(
+    year: int,
+    section: str,
+    *,
+    topic: str,
+    table_label: str,
+    value_column: int,
+    unit: str,
+    config,
+    source: str,
+) -> list[dict]:
+    key = hashlib.sha256(
+        f"{year}|{section}|{topic}|{table_label}|{value_column}|{unit}".encode()
+    ).hexdigest()[:24]
+    path = (
+        config.meta_root / "source_cache" / "pboc" / f"year-{key}.json"
+        if config is not None
+        else None
+    )
+
+    def fetch() -> tuple[list[dict], bytes, str]:
+        kwargs = {} if config is None else {"config": config, "source": source}
+        url = workbook_url(section, topic=topic, table_label=table_label, **kwargs)
+        if url is None:
+            raise PBOCSeriesError(f"no {table_label} workbook link found")
+        content = get_bytes(url, **kwargs)
+        parsed = parse_month_column(content, value_column, unit=unit)
+        if not parsed:
+            raise PBOCSeriesError("parsed to no rows; layout may have changed")
+        return parsed, content, url
+
+    if path is None:
+        return fetch()[0]
+    # The newest two calendar years may be revised. Historical workbooks are
+    # revisited monthly, but are never silently treated as newly observed.
+    ttl = 86400 if year >= date.today().year - 1 else 30 * 86400
+    with exclusive_lock(path.with_suffix(".lock")):
+        cached = _read_fresh(path, ttl)
+        if isinstance(cached, dict) and cached.get("parser_version") == 1:
+            try:
+                raw = base64.b64decode(cached["content_b64"], validate=True)
+                if hashlib.sha256(raw).hexdigest() == cached["sha256"]:
+                    # Parsed rows are a convenience index, not trusted source
+                    # bytes. Reparse the verified workbook so a damaged JSON
+                    # cache cannot silently manufacture observations.
+                    parsed = parse_month_column(raw, value_column, unit=unit)
+                    if parsed:
+                        record_cache_reuse(config, source, "year_workbook")
+                        return parsed
+            except (ValueError, KeyError, TypeError):
+                pass
+        parsed, content, url = fetch()
+        write_json_atomic(
+            path,
+            {
+                "captured_at": _now(),
+                "payload": {
+                    "parser_version": 1,
+                    "url": url,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_b64": base64.b64encode(content).decode("ascii"),
+                    "rows": [
+                        {"obs_date": row["obs_date"].isoformat(), "value": row["value"]}
+                        for row in parsed
+                    ],
+                },
+            },
+        )
+        return parsed

@@ -42,6 +42,7 @@ import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
 from cnequity.adapters.sina.adj_factors import to_sina_symbol
+from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.schemas import DAILY_BARS_SCHEMA
 
@@ -122,6 +123,7 @@ def _request(
         # long probe cannot occupy a slot while it performs its second call.
         with source_request(config, "sina_bars"):
             resp = client.get(_KLINE_URL, params=params, headers=_HEADERS)
+            record_http_response(config, "sina_bars", resp)
         resp.raise_for_status()
         return _parse_payload(resp.text)
     finally:

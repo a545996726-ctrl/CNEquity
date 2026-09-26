@@ -239,9 +239,9 @@ def fetch_minute_bars_paginated(
                     f"before reaching window start {start}"
                 )
             break
-        wait_spec(rate_limit)
         try:
             with source_request_slot_spec(rate_limit):
+                wait_spec(rate_limit)
                 raw = client.bars(
                     symbol=code,
                     frequency=category,

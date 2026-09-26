@@ -1,16 +1,9 @@
-"""DCE's own daily quotes — opt-in, and not yet seen answering.
+"""Experimental DCE official route, opt-in and not verified on live payloads.
 
-``[futures] dce_route = "official"`` reads this route. It is not the default,
-because from every network this project has measured on, DCE answers with an
-access challenge (HTTP 412 with a ``$_ts`` bootstrap), which reads here as
-:class:`FuturesSourceBlocked`. That includes a mainland exit (2026-09-26): the
-challenge wants its JavaScript run, not a Chinese address. The endpoint and its field names are the ones
-the akshare project uses (1.18.81, ``dcereport/publicweb/dailystat/dayQuotes``,
-a JSON POST). Whether it answers is a property of the network, so the ``dce``
-health probe reports it on each machine: an operator whose probe is green can
-switch to this route, and the parse below is then checked against the real
-payload by the same subtotal and schema checks every other exchange passes.
-Until that happens, treat the field mapping as unverified.
+The measured endpoints returned HTTP 412 at the tested exits in September
+2026. Other network conditions are unknown. A successful health response
+alone is not acceptance: required fields, response dates when present, schema
+and published grand totals must pass; live fixtures still need verification.
 """
 
 from __future__ import annotations
@@ -55,9 +48,35 @@ def _rows(body: bytes, trade_date: date) -> list[dict]:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FuturesPayloadError(f"DCE {trade_date.isoformat()}: not a JSON answer") from exc
-    rows = [r for r in payload.get("data") or [] if "计" not in str(r.get("variety") or "")]
+    raw_rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_rows, list) or any(not isinstance(r, dict) for r in raw_rows):
+        raise FuturesPayloadError(f"DCE {trade_date}: expected a data array")
+    rows = [r for r in raw_rows if "计" not in str(r.get("variety") or "")]
     if not rows:
         raise FuturesDayUnavailable(f"DCE {trade_date.isoformat()}: no contracts listed")
+    required = ("volumn", "openInterest", "turnover", "clearPrice")
+    for row in rows:
+        if not row.get("contractId") or any(
+            parse_number(row.get(field)) is None for field in required
+        ):
+            raise FuturesPayloadError(f"DCE {trade_date}: missing contract or numeric fields")
+        response_day = str(row.get("tradeDate") or "").replace("-", "")[:8]
+        if response_day and response_day != trade_date.strftime("%Y%m%d"):
+            raise FuturesPayloadError(f"DCE {trade_date}: response date mismatch")
+    # This route is experimental: require independently published totals and
+    # fail closed rather than silently accepting a truncated candidate mapping.
+    totals = [r for r in raw_rows if "总计" in str(r.get("variety") or "")]
+    if len(totals) != 1:
+        raise FuturesPayloadError(
+            f"DCE {trade_date}: missing unique grand total; mapping unverified"
+        )
+    for field in ("volumn", "openInterest", "turnover"):
+        total = parse_number(totals[0].get(field))
+        observed = sum(parse_number(r[field]) for r in rows)
+        tolerance = max(0.01 * len(rows), abs(observed) * 1e-8) if field == "turnover" else 0
+        if total is None or abs(total - observed) > tolerance:
+            raise FuturesPayloadError(f"DCE {trade_date}: {field} total mismatch")
+
     return rows
 
 
@@ -135,6 +154,7 @@ def _post(trade_date: date, trade_type: str, variety: str, *, config=None) -> by
     return fetch_bytes(
         QUOTES_URL,
         config=config,
+        as_of=trade_date,
         method="POST",
         json_body={
             "contractId": "",
@@ -148,10 +168,14 @@ def _post(trade_date: date, trade_type: str, variety: str, *, config=None) -> by
     )
 
 
-def fetch_dce_official_day(trade_date: date, *, config=None) -> ExchangeDay:
-    futures = parse_futures(_post(trade_date, "1", "all", config=config), trade_date)
+def fetch_dce_official_day(
+    trade_date: date, *, config=None, kind: str | None = None
+) -> ExchangeDay:
+    futures = pl.DataFrame()
+    if kind != "options":
+        futures = parse_futures(_post(trade_date, "1", "all", config=config), trade_date)
     frames = []
-    for product in OPTION_PRODUCTS:
+    for product in OPTION_PRODUCTS if kind != "futures" else ():
         try:
             frames.append(parse_options(_post(trade_date, "2", product, config=config), trade_date))
         except FuturesDayUnavailable:

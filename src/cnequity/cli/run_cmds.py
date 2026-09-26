@@ -126,6 +126,10 @@ def stale_fetch_plan(cfg, anchor: date, *, groups: set[str] | None = None) -> li
         if allowed is not None and name not in allowed:
             continue
         spec = DATASETS[name]
+        if name == "flash_news_wire":
+            # A compatibility projection of news_headlines, not an independent
+            # source or watermark. Its canonical fetch is scheduled once.
+            continue
         if spec.layer == "derived" or name not in STEP_REGISTRY:
             continue
         if not is_dataset_enabled(name, cfg):
@@ -246,12 +250,9 @@ def _group_is_runnable(cfg, group) -> bool:
     opt-in and off by default. Running them from `--all-groups` would report a
     failure for work nobody asked for.
     """
-    from cnequity.domain.datasets import DATASETS, is_dataset_enabled
+    from cnequity.orchestrator.cadence import group_is_runnable
 
-    datasets = [step for step in group.steps if step in DATASETS]
-    if not datasets:
-        return True
-    return any(is_dataset_enabled(name, cfg) for name in datasets)
+    return group_is_runnable(cfg, group)
 
 
 def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, repairs: list):

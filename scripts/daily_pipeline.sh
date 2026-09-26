@@ -24,7 +24,7 @@
 #        设为 0 则 soft 失败仍 exit 1（国内全组日更可用），
 #      CNE_STALE_RETRY=0 (default) — 兼容开关；设为 1 才在本进程收尾补抓，
 #      CNE_STALE_RETRY_DELAY_SEC=1800 (default) — 兼容补抓前等多久，
-#      CNE_SOURCE_HEALTH=1 (default) — 每日串行探测并积累 SLO 样本；0 关闭，
+#      CNE_SOURCE_HEALTH=1 (default) — 复用有效采集证据，只补探未触达来源；0 关闭，
 #      CNE_SOURCE_VANTAGE=local — 当前网络出口的稳定标签，
 #      CNE_TRADE_DATE (same as optional CLI arg — catch up a prior session).
 set -uo pipefail
@@ -64,10 +64,16 @@ if [[ -n "$TRADE_DATE" ]]; then
   DATE_ARGS=(--trade-date "$TRADE_DATE")
 fi
 
-# Order mirrors configs/cnequity.toml [job.daily.groups] cadence
-# (core 16:00 → research 18:30). Sequential, not by wall-clock time.
 # NB: not named GROUPS — that is a reserved bash builtin (user group IDs).
-GROUP_LIST="${CNE_GROUPS:-core capital signals fundamentals macro_risk research}"
+# Read the configured group order through the same Python selector used by
+# `cne run daily --all-groups`; CNE_GROUPS remains an explicit host override.
+GROUP_LIST="${CNE_GROUPS:-}"
+if [[ -z "$GROUP_LIST" ]]; then
+  if ! GROUP_LIST="$("$PY" -m cnequity.orchestrator.schedule_groups --config "$CONFIG")"; then
+    echo "cannot resolve configured daily groups" >&2
+    exit 1
+  fi
+fi
 GATE_GROUP_LIST="${CNE_GATE_GROUPS:-core}"
 # Overseas Mac: expected EM lag must not paint the whole day red.
 SOFT_FAIL_OK="${CNE_SOFT_FAIL_OK:-1}"
@@ -82,6 +88,7 @@ STALE_RETRY="${CNE_STALE_RETRY:-0}"
 STALE_RETRY_DELAY_SEC="${CNE_STALE_RETRY_DELAY_SEC:-1800}"
 SOURCE_HEALTH="${CNE_SOURCE_HEALTH:-1}"
 SOURCE_VANTAGE="${CNE_SOURCE_VANTAGE:-local}"
+export CNE_SOURCE_VANTAGE="$SOURCE_VANTAGE"
 
 # `mkdir` is the portable atomic primitive available in macOS Bash 3.2. Keep
 # one lock around the entire script so the independently scheduled stale pass
@@ -204,7 +211,7 @@ fi
 # and release/acceptance gates invoke it separately with `--enforce`.
 if [[ "$SOURCE_HEALTH" == "1" ]]; then
   log "--- source health (vantage=${SOURCE_VANTAGE}) ---"
-  if ! "$CNE" sources probe --config "$CONFIG" --vantage "$SOURCE_VANTAGE" >>"$LOG" 2>&1; then
+  if ! "$CNE" sources probe --stale-only --config "$CONFIG" --vantage "$SOURCE_VANTAGE" >>"$LOG" 2>&1; then
     log "source probe command FAILED (non-fatal)"
   fi
   if ! "$CNE" sources slo --config "$CONFIG" >>"$LOG" 2>&1; then

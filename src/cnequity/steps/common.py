@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -224,8 +225,17 @@ def incremental_trade_dates(config: Config, dataset: str, trade_date: date) -> l
     """
     start = incremental_window(config, dataset, trade_date)
     if walks_calendar_days(dataset):
-        return [start + timedelta(days=offset) for offset in range((trade_date - start).days + 1)]
-    return list_trading_dates(config, start, trade_date)
+        current = [
+            start + timedelta(days=offset) for offset in range((trade_date - start).days + 1)
+        ]
+    else:
+        current = list_trading_dates(config, start, trade_date)
+    if fetch_semantics(dataset) == "by_date":
+        # A max watermark can move beyond a failed interior day. The durable
+        # ledger keeps that day in the plan even after the normal tail expires.
+        owed = StateStore(config.meta_root).get_missing_dates(dataset)
+        return sorted(set(current) | {day for day in owed if day <= trade_date})
+    return current
 
 
 #: How far back :func:`last_session_on_or_before` will look. The longest CN
@@ -399,6 +409,9 @@ def fetch_incremental_daily(
     *,
     allow_empty: bool = False,
     date_col: str | None = None,
+    on_day: Callable[[date, pl.DataFrame], None] | None = None,
+    recovered_days: dict[date, pl.DataFrame] | None = None,
+    durable_day_checkpoints: bool = False,
 ) -> tuple[pl.DataFrame, list[dict]]:
     """Fetch one or more trading days from watermark+1 through *trade_date*.
 
@@ -463,11 +476,13 @@ def fetch_incremental_daily(
     # inside a 30-day reconciliation tail blinded the dataset until it rolled
     # out of that tail. Isolate the days from each other; the guard above keeps
     # this to datasets whose own window comes back for the failure.
-    tolerate_failed_day = _reconciliation_window_retries(dataset)
+    tolerate_failed_day = _reconciliation_window_retries(dataset) or durable_day_checkpoints
     for d in fetch_dates:
         try:
-            part = fetch_fn(d)
+            part = recovered_days[d] if recovered_days and d in recovered_days else fetch_fn(d)
         except Exception as exc:  # noqa: BLE001 — re-raised below when total
+            if semantics == "by_date":
+                StateStore(config.meta_root).record_missing_dates(dataset, [d], reason=str(exc))
             if not tolerate_failed_day:
                 raise
             first_failure = first_failure or exc
@@ -483,6 +498,10 @@ def fetch_incremental_daily(
                 logger.debug("%s: %s is not a session and returned no rows", dataset, d)
                 continue
             if not allow_empty:
+                if semantics == "by_date":
+                    StateStore(config.meta_root).record_missing_dates(
+                        dataset, [d], reason="unexpected empty response"
+                    )
                 raise RuntimeError(f"{dataset}: no rows returned for {d.isoformat()}")
             spec = DATASETS.get(dataset)
             if spec is not None and spec.coverage_mode == "session_dense":
@@ -493,6 +512,8 @@ def fetch_incremental_daily(
         # before diagonal concatenation; once several days are merged the
         # offending response can no longer be attributed to one request.
         _validate_trade_date(part, dataset, d, date_col=date_col)
+        if on_day is not None and not (recovered_days and d in recovered_days):
+            on_day(d, part)
         frames.append(part)
     if first_failure is not None and fetched_days == 0:
         # Nothing was readable: that is a source outage, not one bad day, and
@@ -1013,6 +1034,23 @@ def walk_day_backfill(
         if existing_dates_fn is not None
         else _existing_dates(config, dataset, date_col)
     )
+    # A failed attempt can already have durable, validated chunks in this
+    # run.  Curated-only resume would fetch them again; worse, the old
+    # bf-0000 name would replace a longer successful chunk on the next
+    # attempt.  Only files written by this helper count as completed days.
+    writer = StagingWriter(config.staging_root)
+    for path in writer.list_run_files(dataset, run_id):
+        if not (path.stem.startswith("part-bf-") or "-bf-" in path.stem):
+            continue
+        from cnequity.domain.schemas import validate_dataframe
+
+        staged = validate_dataframe(pl.read_parquet(path), dataset)
+        if date_col not in staged.columns:
+            raise RuntimeError(f"{dataset}: staged backfill part lacks {date_col}: {path}")
+        staged_dates = staged.get_column(date_col).cast(pl.Date, strict=False)
+        if staged_dates.null_count():
+            raise RuntimeError(f"{dataset}: staged backfill part has invalid {date_col}: {path}")
+        have.update(staged_dates.to_list())
     todo = [d for d in days if d not in have]
     if not todo:
         return {"rows_read": 0, "rows_written": 0, "days_skipped": len(days)}
@@ -1022,11 +1060,12 @@ def walk_day_backfill(
     # publish boundary can verify the adapter's exact-wire receipt before a
     # staging file is created.  Keep the legacy writer only as the explicit
     # compatibility default for non-archived datasets.
-    writer = StagingWriter(config.staging_root) if publish_fn is None else None
+    writer = writer if publish_fn is None else None
     frames: list[pl.DataFrame] = []
     rows_written = 0
     empty_days: list[date] = []
     n_parts = 0
+    attempt_id = uuid.uuid4().hex
 
     def flush() -> None:
         nonlocal frames, rows_written, n_parts
@@ -1037,7 +1076,7 @@ def walk_day_backfill(
             source=source,
             data_version=data_version_for(dataset),
         )
-        batch_id = f"bf-{n_parts:04d}"
+        batch_id = f"bf-{attempt_id}-{n_parts:04d}"
         if publish_fn is None:
             assert writer is not None
             writer.write_batch(dataset, run_id, batch_id, part)

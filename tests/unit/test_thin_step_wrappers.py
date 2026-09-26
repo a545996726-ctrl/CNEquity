@@ -168,7 +168,7 @@ def test_macro_risk_guards_and_writes(cfg, monkeypatch):
     monkeypatch.setattr(
         macro_risk,
         "fetch_macro_indicators",
-        lambda d, config=None, strict=False: pl.DataFrame(
+        lambda d, config=None, strict=False, **_kwargs: pl.DataFrame(
             {
                 "indicator_id": ["gdp"],
                 "obs_date": [d],

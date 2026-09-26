@@ -79,13 +79,20 @@ def compute_option_greeks(
     frame = options.select(
         "symbol", "trade_date", "exchange", "underlying_symbol", "option_type", "strike", "settle"
     ).join(
-        contracts.select("symbol", "expiry_date", "exercise_style", "expiry_month"),
+        contracts.with_columns(
+            pl.when(pl.col("dates_basis") == "exchange")
+            .then(pl.col("expiry_date"))
+            .otherwise(None)
+            .alias("expiry_date")
+        ).select("symbol", "expiry_date", "exercise_style", "expiry_month")
+        if "dates_basis" in contracts.columns
+        else contracts.select("symbol", "expiry_date", "exercise_style", "expiry_month"),
         on="symbol",
         how="left",
     )
     frame = frame.with_columns(
-        # The series an option belongs to: its expiry month on its exchange.
-        (pl.col("underlying_symbol") + "@" + pl.col("expiry_month").cast(pl.Utf8)).alias("series"),
+        # Use the actual expiry, not the underlying delivery month, for parity.
+        (pl.col("underlying_symbol") + "@" + pl.col("expiry_date").cast(pl.Utf8)).alias("series"),
         (pl.col("expiry_date") - pl.col("trade_date")).dt.total_days().alias("_days"),
         ((pl.col("expiry_date") - pl.col("trade_date")).dt.total_days())
         .clip(lower_bound=1)
@@ -118,7 +125,9 @@ def compute_option_greeks(
         pl.col("symbol").alias("underlying_symbol"), "trade_date", pl.col("settle").alias("_fut")
     )
     frame = frame.join(settles, on=["underlying_symbol", "trade_date"], how="left")
-    forwards = _parity_forwards(frame.filter(pl.col("exchange") == "CFE"))
+    forwards = _parity_forwards(
+        frame.filter((pl.col("exchange") == "CFE") & pl.col("t").is_not_null())
+    )
     if forwards:
         frame = frame.join(
             pl.DataFrame(
@@ -144,7 +153,9 @@ def compute_option_greeks(
         .alias("forward_source"),
         pl.when(pl.col("exercise_style") == "european")
         .then(pl.lit("black76"))
-        .otherwise(pl.lit("baw"))
+        .when(pl.col("exercise_style") == "american")
+        .then(pl.lit("baw"))
+        .otherwise(pl.lit("unknown"))
         .alias("model"),
     )
     parts = []
@@ -169,6 +180,8 @@ def _solve(group: pl.DataFrame, model: str) -> pl.DataFrame:
     status[(days <= 0) & (status == "ok")] = "expiry_day"
     status[np.isnan(f) & (status == "ok")] = "no_underlying"
     status[(np.isnan(price) | (price <= 0)) & (status == "ok")] = "no_price"
+    if model == "unknown":
+        status[status == "ok"] = "no_exercise_style"
     usable = status == "ok"
     iv = np.full(n, np.nan)
     out = {name: np.full(n, np.nan) for name in ("delta", "gamma", "vega", "theta", "rho")}
@@ -196,7 +209,9 @@ def _solve(group: pl.DataFrame, model: str) -> pl.DataFrame:
 
 
 def _curated(config, dataset: str, **filters) -> pl.DataFrame | None:
-    root = config.curated_root / dataset
+    from cnequity.storage.read_context import read_root
+
+    root = read_root(config, dataset)
     files = list(root.glob("**/*.parquet")) if root.exists() else []
     if not files:
         return None
@@ -221,6 +236,25 @@ def _partition_day(directory) -> date | None:
         return None
 
 
+def _dependency_identity(config) -> dict:
+    from pathlib import Path
+
+    from cnequity.domain import option_pricing
+    from cnequity.storage.derivative_evidence import fingerprint
+    from cnequity.storage.read_context import read_root
+
+    return {
+        "contracts": fingerprint(read_root(config, "option_contracts")),
+        "rates": fingerprint(read_root(config, "macro_indicators")),
+        "model": fingerprint(Path(option_pricing.__file__)),
+        "derivation": fingerprint(Path(__file__)),
+    }
+
+
+def _receipt(config, day):
+    return config.meta_root / "derivatives" / "greeks_dependencies" / f"{day}.json"
+
+
 def stale_sessions(config) -> list[date]:
     """Sessions whose Greeks are missing or older than the bars they come from.
 
@@ -230,11 +264,17 @@ def stale_sessions(config) -> list[date]:
     refilled exchange day — makes the session stale. A watermark alone misses
     exactly those: it only ever moves forward.
     """
-    options_root = config.curated_root / "option_bars"
-    futures_root = config.curated_root / "futures_bars"
-    greeks_root = config.derived_root / "option_greeks"
+    from cnequity.storage.read_context import read_root
+
+    options_root = read_root(config, "option_bars")
+    futures_root = read_root(config, "futures_bars")
+    greeks_root = read_root(config, "option_greeks")
     if not options_root.is_dir():
         return []
+    from cnequity.storage.derivative_evidence import fingerprint, read_json
+
+    dependencies = _dependency_identity(config)
+    month_identity: dict[str, str] = {}
     month_mtime: dict[str, float | None] = {}
     stale: list[date] = []
     for directory in options_root.glob("trade_date=*"):
@@ -247,12 +287,30 @@ def stale_sessions(config) -> list[date]:
             month_mtime[month] = _newest_mtime(futures_root / f"trade_date={month}")
         source = max(source, month_mtime[month] or 0.0)
         derived = _newest_mtime(greeks_root / f"trade_date={day.isoformat()}")
-        if derived is None or derived < source:
+        if month not in month_identity:
+            month_identity[month] = fingerprint(futures_root / f"trade_date={month}")
+        receipt = read_json(_receipt(config, day))
+        matches = (
+            receipt.get("dependencies") == dependencies
+            and receipt.get("options") == fingerprint(directory)
+            and receipt.get("futures") == month_identity[month]
+            and receipt.get("output") == fingerprint(greeks_root / f"trade_date={day}")
+        )
+        if derived is None or derived < source or not matches:
             stale.append(day)
     return sorted(stale)
 
 
 def derive_option_greeks(
+    config, *, start: date | None = None, end: date | None = None, full: bool = False
+) -> dict:
+    from cnequity.file_lock import lake_mutation_lock
+
+    with lake_mutation_lock(config.meta_root, blocking=True):
+        return _derive_option_greeks(config, start=start, end=end, full=full)
+
+
+def _derive_option_greeks(
     config, *, start: date | None = None, end: date | None = None, full: bool = False
 ) -> dict:
     """Compute and write ``option_greeks``.
@@ -273,7 +331,10 @@ def derive_option_greeks(
     if start is None and not full:
         sessions = [d for d in stale_sessions(config) if end is None or d <= end]
         if not sessions:
-            return {"rows": 0, "note": "option_greeks is current: no session has newer bars"}
+            return {
+                "rows": 0,
+                "note": "option_greeks is current: input, model and output fingerprints match",
+            }
         start, end = sessions[0], sessions[-1]
     start = start or date(2017, 1, 1)
     end = end or shanghai_today()
@@ -289,6 +350,7 @@ def derive_option_greeks(
     rates = _curated(config, "macro_indicators")
     if rates is not None:
         rates = rates.filter(pl.col("indicator_id") == RATE_INDICATOR)
+    dependencies = _dependency_identity(config)
     frame = compute_option_greeks(
         options,
         contracts=contracts,
@@ -305,6 +367,23 @@ def derive_option_greeks(
         for (day,), group in frame.partition_by("trade_date", as_dict=True).items():
             writer.write_partition(
                 "option_greeks", "trade_date", day.isoformat(), group, "part-000.parquet"
+            )
+            from cnequity.storage.atomic import write_json_atomic
+            from cnequity.storage.derivative_evidence import fingerprint
+            from cnequity.storage.read_context import read_root
+
+            write_json_atomic(
+                _receipt(config, day),
+                {
+                    "dependencies": dependencies,
+                    "options": fingerprint(read_root(config, "option_bars") / f"trade_date={day}"),
+                    "futures": fingerprint(
+                        read_root(config, "futures_bars") / f"trade_date={day:%Y-%m}"
+                    ),
+                    "output": fingerprint(
+                        config.derived_root / "option_greeks" / f"trade_date={day}"
+                    ),
+                },
             )
         # Rewriting an earlier window must not pull the watermark back.
         latest = frame["trade_date"].max()

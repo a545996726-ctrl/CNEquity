@@ -7,18 +7,24 @@ historical rows use ``classification_system=sw``.
 
 from __future__ import annotations
 
+import base64
 import functools
+import hashlib
 import io
+import json
 import logging
 import ssl
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
 import polars as pl
 
+from cnequity.domain.http_policy import record_cache_reuse, record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, infer_exchange_from_code, is_all_a_symbol
+from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,7 @@ SW_INDUSTRY_XLS_URL = (
 )
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; cnequity/0.1)"}
+_HISTORY_CACHE_SECONDS = 86400
 
 # swsresearch.com serves its leaf certificate and nothing else — measured over
 # six handshakes, the chain is one cert deep every time. Browsers and macOS
@@ -96,21 +103,63 @@ def fetch_sw_industry_intervals(*, client: httpx.Client | None = None, config=No
             "(or `pip install -e .` from a source checkout)."
         ) from exc
 
-    owns = client is None
-    if client is None:
-        client = sw_client()
-    try:
-        with source_request(config, "sw"):
-            resp = client.get(SW_INDUSTRY_XLS_URL, headers=_HEADERS)
-        resp.raise_for_status()
-    finally:
-        if owns:
-            client.close()
+    def parse(content: bytes) -> pl.DataFrame:
+        pdf = pd.read_excel(
+            io.BytesIO(content),
+            dtype={"股票代码": str, "行业代码": str},
+        )
+        return _intervals_from_sheet(pdf, pd)
 
-    pdf = pd.read_excel(
-        io.BytesIO(resp.content),
-        dtype={"股票代码": str, "行业代码": str},
-    )
+    def download() -> bytes:
+        session = client if client is not None else sw_client()
+        try:
+            with source_request(config, "sw"):
+                resp = session.get(SW_INDUSTRY_XLS_URL, headers=_HEADERS)
+                record_http_response(config, "sw", resp)
+            resp.raise_for_status()
+            return resp.content
+        finally:
+            if client is None:
+                session.close()
+
+    # Caller-owned transports are isolated test/integration boundaries. For
+    # configured production fetches, lock through validation so simultaneous
+    # consumers cannot each download the same large file.
+    if config is None or client is not None:
+        return parse(download())
+    url_hash = hashlib.sha256(SW_INDUSTRY_XLS_URL.encode()).hexdigest()[:16]
+    path = config.meta_root / "source_cache" / "sw" / f"history-{url_hash}.json"
+    with exclusive_lock(path.with_suffix(".lock")):
+        if path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(saved["captured_at"])
+                raw = base64.b64decode(saved["content_b64"], validate=True)
+                if (
+                    saved["url"] == SW_INDUSTRY_XLS_URL
+                    and 0 <= age.total_seconds() < _HISTORY_CACHE_SECONDS
+                    and hashlib.sha256(raw).hexdigest() == saved["sha256"]
+                ):
+                    intervals = parse(raw)
+                    record_cache_reuse(config, "sw", "industry_history")
+                    return intervals
+            except Exception as exc:
+                logger.warning("Shenwan cached history invalid; refreshing: %s", exc)
+        content = download()
+        intervals = parse(content)
+        write_json_atomic(
+            path,
+            {
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "url": SW_INDUSTRY_XLS_URL,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "content_b64": base64.b64encode(content).decode("ascii"),
+            },
+        )
+        return intervals
+
+
+def _intervals_from_sheet(pdf, pd) -> pl.DataFrame:
     if pdf.empty:
         raise RuntimeError("Shenwan industry XLS returned no rows")
 

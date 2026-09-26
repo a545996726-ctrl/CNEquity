@@ -27,37 +27,28 @@ read absence as "not listed".
 
 from __future__ import annotations
 
-import io
 import logging
-import warnings
 from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
 
+from cnequity.adapters.exchange.board_snapshot import sse_snapshot, szse_report
 from cnequity.adapters.exchange.daily_quotes import (
-    _SSE_HEADERS,
-    _SZSE_HEADERS,
-    _TIMEOUT_SECONDS,
-    SSE_CLOSE_TIME,
-    SZSE_URL,
+    SSE_SELECT,
+    SSE_URL,
     _client,
     _keep_symbol,
 )
 from cnequity.adapters.exchange.st_lists import is_st_name
-from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol
 from cnequity.domain.trading_status import STATUS_NORMAL, STATUS_SUSPENDED
 
 logger = logging.getLogger(__name__)
 
-_SOURCE = "exchange"
 #: `name` is the addition over the daily-bar route; the rest is the same board.
-SSE_STATUS_SELECT = ("code", "name", "open", "high", "low", "last")
-SSE_STATUS_URL = (
-    "http://yunhq.sse.com.cn:32041/v1/sh1/list/exchange/equity"
-    f"?select={','.join(SSE_STATUS_SELECT)}&begin=0&end=6000"
-)
+SSE_STATUS_SELECT = SSE_SELECT
+SSE_STATUS_URL = SSE_URL
 _SZSE_STATUS_COLUMNS = ("证券代码", "证券简称", "开盘", "最高", "最低", "今收")
 
 
@@ -100,12 +91,7 @@ def _float(value: object) -> float:
 
 
 def _fetch_sse(trade_date: date, *, config=None) -> list[dict]:
-    with source_request(config, _SOURCE):
-        response = _client().get(
-            SSE_STATUS_URL, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
-        )
-    response.raise_for_status()
-    payload = response.json()
+    payload = sse_snapshot(trade_date, config=config, client_factory=_client)
     raw_date = payload.get("date")
     try:
         snapshot_day = date(
@@ -118,7 +104,7 @@ def _fetch_sse(trade_date: date, *, config=None) -> list[dict]:
         # point-in-time fact the exchange never published.
         raise ValueError(f"SSE snapshot serves {snapshot_day}, not {trade_date}")
     snapshot_time = payload.get("time")
-    if not isinstance(snapshot_time, int) or snapshot_time < SSE_CLOSE_TIME:
+    if not isinstance(snapshot_time, int) or snapshot_time < 150000:
         raise ValueError(f"SSE snapshot is mid-session (time={snapshot_time})")
 
     rows = []
@@ -135,21 +121,7 @@ def _fetch_sse(trade_date: date, *, config=None) -> list[dict]:
 
 
 def _fetch_szse(trade_date: date, *, config=None) -> list[dict]:
-    import pandas as pd
-
-    with source_request(config, _SOURCE):
-        response = _client().get(
-            SZSE_URL.format(day=trade_date.isoformat()),
-            headers=_SZSE_HEADERS,
-            impersonate="chrome",
-            timeout=_TIMEOUT_SECONDS,
-        )
-    response.raise_for_status()
-    if not response.content:
-        raise ValueError(f"SZSE published no report for {trade_date}")
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Workbook contains no default style")
-        frame = pd.read_excel(io.BytesIO(response.content), dtype=str)
+    frame = szse_report(trade_date, config=config, client_factory=_client)
     missing = [column for column in _SZSE_STATUS_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"SZSE report is missing {missing}")

@@ -1339,6 +1339,9 @@ _SPECS = [
         partition_col="publish_date",
         partition_granularity="month",
         fetch_semantics="snapshot",
+        watermark=False,
+        required=False,
+        empty_severity="info",
         # A news wire does not close for the weekend.
         session_scope="calendar",
     ),

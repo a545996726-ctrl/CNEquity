@@ -75,12 +75,12 @@ def _history(vantage: str, key: str, *, ok: int, down: int) -> list[HealthReport
 
 
 def test_the_same_numbers_pass_overseas_and_fail_from_the_mainland():
-    """94% is a healthy overseas baostock and a broken mainland one."""
-    history = _history("overseas-eu", "baostock", ok=16, down=1)
+    """The same active core probe uses the target for its own vantage."""
+    history = _history("overseas-eu", "bse", ok=16, down=1)
     overseas = evaluate_source_slo(history, now=NOW, minimum_observations=10)
 
     mainland = evaluate_source_slo(
-        _history("cn-sh", "baostock", ok=16, down=1), now=NOW, minimum_observations=10
+        _history("cn-sh", "bse", ok=16, down=1), now=NOW, minimum_observations=10
     )
 
     assert overseas.results[0].passed is True
@@ -104,7 +104,7 @@ def test_a_source_that_is_simply_not_served_there_still_fails():
 def test_an_explicit_target_pair_overrides_every_vantage():
     """Release evidence pins its own numbers; they must not drift with a label."""
     report = evaluate_source_slo(
-        _history("overseas-eu", "baostock", ok=16, down=1),
+        _history("overseas-eu", "bse", ok=16, down=1),
         now=NOW,
         minimum_observations=10,
         core_target=0.99,
@@ -113,6 +113,17 @@ def test_an_explicit_target_pair_overrides_every_vantage():
 
     assert report.results[0].target == 0.99
     assert report.results[0].passed is False
+
+
+def test_manual_only_baostock_is_advisory_not_a_required_active_sample():
+    report = evaluate_source_slo(
+        _history("overseas-eu", "baostock", ok=16, down=1),
+        now=NOW,
+        minimum_observations=10,
+    )
+    row = next(item for item in report.results if item.key == "baostock")
+    assert row.critical is False
+    assert row.target == 0.80
 
 
 def test_an_unreachable_source_is_reported_but_not_gated():

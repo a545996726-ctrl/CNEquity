@@ -7,10 +7,63 @@ from threading import Barrier, Event, Lock
 import pytest
 
 from cnequity.config import Config
-from cnequity.domain.rate_limit import RateLimiter, SourceConcurrencyLimiter, wait_source
+from cnequity.domain.rate_limit import (
+    RateLimiter,
+    RateLimitSpec,
+    SourceConcurrencyLimiter,
+    source_request_slot_spec,
+    wait_source,
+)
 from cnequity.file_lock import LockUnavailable
 
 INTERVAL = 0.1
+
+
+def test_meter_counts_admitted_scope_once_but_not_local_rejection(tmp_path):
+    cfg = Config(data_root=tmp_path / "lake")
+    with cfg.source_request("bse"):
+        with cfg.source_request("bse"):
+            pass
+    meter = cfg.rate_limit_root / "meter-bse.json"
+    assert json.loads(meter.read_text())["aliases"] == {"bse": 1}
+
+    cfg.sources["bse"] = False
+    with pytest.raises(RuntimeError, match="disabled"):
+        with cfg.source_request("bse"):
+            pass
+    assert json.loads(meter.read_text())["total"] == 1
+    from cnequity.diagnostics.source_limits import build_source_limits
+
+    assert build_source_limits(cfg)["sources"]["bse"]["metered_attempts_today"] == {
+        "count": 1,
+        "aliases": {"bse": 1},
+    }
+
+
+def test_futures_host_attempts_are_visible_in_offline_limits(tmp_path):
+    from cnequity.diagnostics.source_limits import build_source_limits
+
+    cfg = Config(data_root=tmp_path, source_intervals={"futures_exchange": 0})
+    lane = "futures_exchange_www.shfe.com.cn"
+    with cfg.source_request(lane):
+        pass
+    row = build_source_limits(cfg)["sources"][lane]
+    assert row["metered_attempts_today"]["aliases"] == {lane: 1}
+    cfg.sources["futures_exchange"] = False
+    assert build_source_limits(cfg)["sources"][lane]["enabled"] is False
+
+
+def test_low_level_wire_spec_is_in_the_same_meter(tmp_path):
+    spec = RateLimitSpec(
+        state_dir=str(tmp_path),
+        source="tdx_protocol",
+        min_interval=0,
+        concurrency_limit=1,
+    )
+    with source_request_slot_spec(spec):
+        pass
+    assert json.loads((tmp_path / "meter-tdx_protocol.json").read_text())["total"] == 1
+
 
 # What the wait must clear. Not `INTERVAL`, because two clocks disagree by a
 # little: the limiter computes its sleep from `time.time()` (it has to — the
@@ -61,6 +114,38 @@ def test_rate_limiter_defer_persists_a_shared_cooldown(tmp_path, monkeypatch):
 
     state = json.loads((state_dir / "sina_bars.json").read_text(encoding="utf-8"))
     assert state["next_allowed_at"] == 130.0
+
+
+def test_shared_egress_keeps_stricter_interval_from_another_config(tmp_path, monkeypatch):
+    now = [100.0]
+    slept = []
+    monkeypatch.setattr("cnequity.domain.rate_limit.time.time", lambda: now[0])
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("cnequity.domain.rate_limit.time.sleep", sleep)
+    RateLimiter("sina", 2.0, tmp_path).wait()
+    RateLimiter("sina", 0.0, tmp_path).wait()
+    assert slept == [2.0]
+    state = json.loads((tmp_path / "sina.json").read_text())
+    assert state["min_interval"] == 2.0
+
+
+def test_shared_egress_keeps_stricter_concurrency_cap(tmp_path):
+    narrow = SourceConcurrencyLimiter("sina", 1, tmp_path)
+    wide = SourceConcurrencyLimiter("sina", 8, tmp_path)
+    token = narrow.acquire()
+    with pytest.raises(TimeoutError):
+        wide.acquire(timeout=0)
+    narrow.release(token)
+    token = wide.acquire(timeout=0)
+    try:
+        state = json.loads((tmp_path / "concurrency-sina.json").read_text())
+        assert state["limit"] == 1
+    finally:
+        wide.release(token)
 
 
 def _worker_wait(state_dir: str) -> float:
@@ -313,6 +398,53 @@ def test_source_aliases_share_the_narrowest_configured_vendor_cap(tmp_path):
             (cfg.meta_root / "rate_limits" / "concurrency-ths.json").read_text(encoding="utf-8")
         )
         assert state["limit"] == 1
+
+
+def test_source_aliases_share_one_vendor_request_spacing(tmp_path):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        source_intervals={"ths_pages": 0.01, "ths_bonus": 0.02},
+    )
+    with cfg.source_request("ths_pages"):
+        pass
+    path = cfg.rate_limit_root / "ths.json"
+    first = json.loads(path.read_text())["next_allowed_at"]
+    with cfg.source_request("ths_bonus"):
+        pass
+    second = json.loads(path.read_text())["next_allowed_at"]
+    assert second - first >= 0.019
+    assert json.loads(path.read_text())["min_interval"] == 0.02
+    from cnequity.diagnostics.source_limits import effective_source_policy
+
+    report = effective_source_policy(cfg, "ths_pages")
+    assert report["pacing_seconds"]["ths"]["effective_seconds"] == 0.02
+
+
+@pytest.mark.parametrize(
+    ("family", "slow_alias"),
+    [("ths", "ths_pages"), ("sina", "sina_bars")],
+)
+def test_explicit_family_spacing_does_not_inherit_slow_endpoint(tmp_path, family, slow_alias):
+    cfg = Config(
+        data_root=tmp_path / family,
+        source_intervals={family: 0.001, slow_alias: 0.003},
+    )
+
+    with cfg.source_request(family):
+        pass
+    with cfg.source_request(slow_alias):
+        pass
+
+    family_state = json.loads((cfg.rate_limit_root / f"{family}.json").read_text())
+    alias_state = json.loads((cfg.rate_limit_root / f"{slow_alias}.json").read_text())
+    assert family_state["min_interval"] == 0.001
+    assert alias_state["min_interval"] == 0.003
+
+    from cnequity.diagnostics.source_limits import effective_source_policy
+
+    report = effective_source_policy(cfg, slow_alias)["pacing_seconds"]
+    assert report[family]["configured_seconds"] == 0.001
+    assert report[slow_alias]["configured_seconds"] == 0.003
 
 
 def test_sina_endpoint_aliases_share_one_vendor_cap(tmp_path):

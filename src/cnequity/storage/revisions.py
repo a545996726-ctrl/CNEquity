@@ -131,6 +131,8 @@ class RevisionStore:
         meta_root: Path,
         curated_root: Path,
         derived_root: Path | None = None,
+        *,
+        create: bool = True,
     ):
         self.meta_root = Path(meta_root).expanduser()
         # ``root.mkdir`` below is the first filesystem mutation performed by
@@ -151,8 +153,15 @@ class RevisionStore:
         _reject_symlink_path(self.meta_root / "state", label="state root")
         self.root = self.meta_root / "revisions"
         _reject_symlink_path(self.root, label="revision root")
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.state = StateStore(self.meta_root)
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True)
+        self._state = StateStore(self.meta_root) if create else None
+
+    @property
+    def state(self) -> StateStore:
+        if self._state is None:
+            self._state = StateStore(self.meta_root)
+        return self._state
 
     def _layer_root(self, dataset: str) -> Path:
         """Return the mutable layer root for *dataset*.
@@ -816,7 +825,7 @@ def resolve_committed_root(
         # boundary check.  Resolving first would turn a user-controlled
         # metadata symlink into an apparently ordinary directory.
         meta = Path(meta_root).expanduser()
-    store = RevisionStore(meta, logical.parent)
+    store = RevisionStore(meta, logical.parent, create=False)
     resolved = store.current_root(name, revision=revision)
     if resolved is None and revision is not None:
         raise RevisionConsistencyError(f"no retained revision {revision!r} for {name}")
@@ -838,7 +847,7 @@ def committed_revision(
         # Keep the configured spelling so RevisionStore can reject a symlink
         # before it is canonicalised.
         meta = Path(meta_root).expanduser()
-    store = RevisionStore(meta, logical.parent)
+    store = RevisionStore(meta, logical.parent, create=False)
     pointer = store.current_pointer(name)
     if pointer is None:
         return None

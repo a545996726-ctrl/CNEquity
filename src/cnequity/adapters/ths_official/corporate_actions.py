@@ -33,12 +33,17 @@ absent from the dump and stay unarbitrated.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 import polars as pl
+
+from cnequity.domain.http_policy import record_http_response
+from cnequity.domain.rate_limit import source_request
 
 if TYPE_CHECKING:
     from cnequity.adapters.ths_official.client import ThsOfficialClient
@@ -79,14 +84,26 @@ def download_adjustment_factor_dump(
     url, ttl = client.download_url(DUMP_KIND)
     logger.info("ths_official %s dump: link valid for %ss", DUMP_KIND, ttl)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
-        if response.status_code != 200:
-            raise ThsOfficialDumpError(
-                f"{DUMP_KIND} dump download failed: HTTP {response.status_code}"
-            )
-        with destination.open("wb") as handle:
-            for chunk in response.iter_bytes():
-                handle.write(chunk)
+    config = getattr(client, "_config", None)
+    temporary = None
+    try:
+        with source_request(config, "ths_official"):
+            with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
+                record_http_response(config, "ths_official", response)
+                if response.status_code != 200:
+                    raise ThsOfficialDumpError(
+                        f"{DUMP_KIND} dump download failed: HTTP {response.status_code}"
+                    )
+                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
+                    temporary = Path(handle.name)
+                    for chunk in response.iter_bytes():
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return destination
 
 

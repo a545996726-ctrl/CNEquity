@@ -64,7 +64,7 @@ def test_candidate_audit_precedes_pointer_switch(tmp_path, monkeypatch, mode, ex
         "daily_bars", "candidate", "one", _bar(20.0, "2024-06-28T01:00:00Z")
     )
     result = step_compact(cfg, date(2024, 6, 28), "candidate", {})
-    assert calls == [10.0, 20.0]
+    assert calls == ([10.0, 20.0, 10.0] if mode == "block" else [10.0, 20.0])
     assert load("daily_bars", config=cfg)["close"].to_list() == [expected]
     assert Path(result["publication_audit"]).exists()
     if mode == "block":
@@ -97,3 +97,42 @@ def test_audit_failure_cannot_publish_in_block_mode(tmp_path, monkeypatch):
     )
     assert report["blocked"]
     assert report["new_errors"][0]["check"] == "candidate_audit_failed"
+
+
+def test_publication_blocks_only_the_candidate_that_causes_the_error(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "lake", publication_gate="block")
+    writer = StagingWriter(cfg.staging_root)
+    writer.write_batch("daily_bars", "mixed", "bars", _bar(20.0, "2024-06-28T01:00:00Z"))
+    writer.write_batch(
+        "fund_flow",
+        "mixed",
+        "flow",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "trade_date": [date(2024, 6, 28)],
+                "main_net_inflow": [1.0],
+                "super_large_net_inflow": [0.0],
+                "large_net_inflow": [0.0],
+                "medium_net_inflow": [0.0],
+                "small_net_inflow": [0.0],
+                "source": ["eastmoney"],
+                "data_version": ["v1"],
+                "fetched_at": ["2024-06-28T01:00:00Z"],
+            }
+        ),
+    )
+
+    def errors(view, day):
+        bars = view.curated_root / "daily_bars"
+        files = list(bars.rglob("*.parquet")) if bars.exists() else []
+        if files and pl.read_parquet(files[0])["close"].item() == 20.0:
+            return [{"dataset": "daily_bars", "severity": "error", "check": "bad_bar"}]
+        return []
+
+    monkeypatch.setattr("cnequity.quality.publication._errors", errors)
+    result = step_compact(cfg, date(2024, 6, 28), "mixed", {})
+
+    assert not list((cfg.curated_root / "daily_bars").rglob("*.parquet"))
+    assert load("fund_flow", config=cfg).height == 1
+    assert result["context_updates"]["compact_skipped_datasets"][0]["dataset"] == "daily_bars"
