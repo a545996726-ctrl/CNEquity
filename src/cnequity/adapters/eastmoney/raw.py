@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from cnequity.storage.raw_archive import RawArchiveError, RawPayloadArchive, begin_capture
@@ -80,8 +81,13 @@ def archive_response(
     pagination: Mapping[str, Any] | None = None,
     request_scope: str | None = None,
     source: str = "eastmoney",
+    captured_at: datetime | None = None,
 ) -> None:
-    """Persist one exact response, failing closed when bytes are unavailable."""
+    """Persist one exact response, failing closed when bytes are unavailable.
+
+    *captured_at* is for replaying bytes captured earlier (the shared push2
+    snapshot); a live response leaves it unset and is stamped now.
+    """
     if archive is None or not archive.enabled:
         return
     wire = exact_response_bytes(response)
@@ -122,4 +128,5 @@ def archive_response(
         pagination=pagination,
         observation_id=observation_id,
         request_scope=request_scope,
+        captured_at=captured_at,
     )

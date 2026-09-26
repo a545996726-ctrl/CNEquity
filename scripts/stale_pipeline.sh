@@ -19,6 +19,10 @@ LOG_DIR="${CNE_LOG_DIR:-$REPO_ROOT/data/cnequity/logs}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/stale-$(date +%Y%m%d).log"
 TRADE_DATE="${1:-${CNE_TRADE_DATE:-}}"
+# The late pass never touches EastMoney push2: a second daily round against a
+# host that bans IPs for volume is what the push2 budget exists to prevent.
+# Snapshot datasets it cannot repair wait for the next daily run.
+export CNE_PUSH2_PAUSED="${CNE_PUSH2_PAUSED:-1}"
 
 # Bash 3.2 raises an unbound-variable error for an empty `${arr[@]}` under
 # `set -u`; use the guarded expansion used by daily_pipeline.sh.

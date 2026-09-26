@@ -18,6 +18,10 @@ def _source_family(source: str) -> str:
         return "tdx_protocol"
     if text.startswith("cninfo"):
         return "cninfo"
+    if text.startswith("eastmoney_push2"):
+        # push2 bans an IP that crawls it; it gets its own (narrow) in-flight
+        # cap instead of sharing datacenter's.
+        return "eastmoney_push2"
     if text.startswith("eastmoney") or text in {"em", "datacenter"}:
         return "eastmoney"
     if text.startswith("sina"):

@@ -535,7 +535,7 @@ PROBES: tuple[SourceProbe, ...] = (
         host="push2his.eastmoney.com",
         powers=("daily_bars", "commodity_bars", "sector_bars"),
         run=_probe_em_push2his,
-        note="对非大陆出口最敏感的一个；可用 [sources.eastmoney].proxy 为整组东财主机配置出口。",
+        note="与 push2 同一套按 IP 的封禁；被封时用 [sources.eastmoney].push2_paused 停请求冷却，或用 proxy 换出口 IP。",
         blast_radius="eastmoney",
         config_key="eastmoney",
     ),

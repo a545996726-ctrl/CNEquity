@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
+from cnequity.adapters.eastmoney import push2_guard, push2_snapshot
 from cnequity.adapters.eastmoney.common import (
     ALL_A_FS,
     PUSH2_CLIST_HOSTS,
@@ -42,6 +45,7 @@ def _fetch_clist_page(
     archive: RawPayloadArchive | None = None,
     archive_dataset: str | None = None,
     archive_run_id: str | None = None,
+    recorder: list[dict] | None = None,
 ) -> tuple[list[dict], int | None]:
     params = urlencode(
         {
@@ -107,10 +111,23 @@ def _fetch_clist_page(
                 raise RuntimeError(
                     "EastMoney clist response data.diff contains rows without a reported total"
                 )
+            if recorder is not None:
+                recorder.append(
+                    {
+                        "host": host,
+                        "page": page,
+                        "url": url,
+                        "status": resp.status_code,
+                        "content_type": resp.headers.get("content-type"),
+                        "content_b64": base64.b64encode(resp.content).decode("ascii"),
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "total": total,
+                    }
+                )
             return diff, total
-        except RawArchiveError:
-            # Missing exact bytes are an archive integrity failure, not a
-            # transient source failure that can be hidden by a retry.
+        except (RawArchiveError, push2_guard.Push2BlockedError):
+            # Missing exact bytes are an archive integrity failure, and a local
+            # push2 refusal is final for the day: neither is hidden by a retry.
             raise
         except Exception as exc:
             last_exc = exc
@@ -121,6 +138,19 @@ def _fetch_clist_page(
             if attempt + 1 < max_retries:
                 time.sleep(retry_backoff_seconds * (attempt + 1))
     raise RuntimeError(f"EastMoney clist page {page} failed on {host}: {last_exc}") from last_exc
+
+
+def _clist_hosts(client: EastMoneyClient) -> tuple[str, ...]:
+    """Hosts one page may be tried on.
+
+    With the push2 breaker on (the default) only the primary: when push2
+    refuses this IP, asking push2delay / 40.push2 the same thing is exactly how
+    the 2026-09 ban spread to them. The failover list survives for an operator
+    who turns the breaker off.
+    """
+    if push2_guard.breaker_enabled(getattr(client, "config", None)):
+        return PUSH2_CLIST_HOSTS[:1]
+    return PUSH2_CLIST_HOSTS
 
 
 def fetch_clist_pages(
@@ -135,6 +165,45 @@ def fetch_clist_pages(
     archive_dataset: str | None = None,
     archive_run_id: str | None = None,
 ) -> list[dict]:
+    config = getattr(client, "config", None)
+    if (
+        fs == ALL_A_FS
+        and config is not None
+        and getattr(config, "eastmoney_push2_shared_snapshot", False)
+        and push2_snapshot.covers(fields)
+    ):
+        return push2_snapshot.shared_all_a_rows(
+            client,
+            fs=fs,
+            page_size=page_size,
+            fetch_pages=_fetch_clist_pages_uncached,
+            archive=archive,
+            archive_dataset=archive_dataset,
+            archive_run_id=archive_run_id,
+        )
+    return _fetch_clist_pages_uncached(
+        client,
+        fields=fields,
+        fs=fs,
+        page_size=page_size,
+        archive=archive,
+        archive_dataset=archive_dataset,
+        archive_run_id=archive_run_id,
+    )
+
+
+def _fetch_clist_pages_uncached(
+    client: EastMoneyClient,
+    *,
+    fields: str,
+    fs: str = ALL_A_FS,
+    page_size: int = 100,
+    archive: RawPayloadArchive | None = None,
+    archive_dataset: str | None = None,
+    archive_run_id: str | None = None,
+    recorder: list[dict] | None = None,
+) -> list[dict]:
+    hosts = _clist_hosts(client)
     rows_by_key: dict[tuple[str, str], dict] = {}
     active_host: str | None = None
     page = 1
@@ -143,7 +212,7 @@ def fetch_clist_pages(
     while True:
         if active_host is None:
             page_rows: list[dict] = []
-            for host in PUSH2_CLIST_HOSTS:
+            for host in hosts:
                 try:
                     page_rows, page_total = _fetch_clist_page(
                         client,
@@ -155,8 +224,9 @@ def fetch_clist_pages(
                         archive=archive,
                         archive_dataset=archive_dataset,
                         archive_run_id=archive_run_id,
+                        recorder=recorder,
                     )
-                except RawArchiveError:
+                except (RawArchiveError, push2_guard.Push2BlockedError):
                     raise
                 except Exception as exc:
                     logger.warning("EastMoney clist page %s failed on %s: %s", page, host, exc)
@@ -181,8 +251,9 @@ def fetch_clist_pages(
                     archive=archive,
                     archive_dataset=archive_dataset,
                     archive_run_id=archive_run_id,
+                    recorder=recorder,
                 )
-            except RawArchiveError:
+            except (RawArchiveError, push2_guard.Push2BlockedError):
                 raise
             except Exception as exc:
                 # Mid-pagination: try remaining hosts before fail-loud (push2
@@ -195,7 +266,7 @@ def fetch_clist_pages(
                 )
                 page_rows = []
                 recovered = False
-                for host in PUSH2_CLIST_HOSTS:
+                for host in hosts:
                     if host == active_host:
                         continue
                     try:
@@ -209,11 +280,12 @@ def fetch_clist_pages(
                             archive=archive,
                             archive_dataset=archive_dataset,
                             archive_run_id=archive_run_id,
+                            recorder=recorder,
                         )
                         active_host = host
                         recovered = True
                         break
-                    except RawArchiveError:
+                    except (RawArchiveError, push2_guard.Push2BlockedError):
                         raise
                     except Exception as host_exc:
                         logger.warning(

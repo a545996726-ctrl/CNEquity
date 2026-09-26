@@ -5,6 +5,7 @@ import os
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -230,6 +231,10 @@ class Config:
     futures_minute_products: list[str] = field(default_factory=list)
     futures_minute_contracts: list[str] = field(default_factory=list)
     futures_minute_max_contracts: int = 100
+    # `[research] holdout_start`: evidence inventories (`cne decision-data`)
+    # refuse any window reaching this date, keeping an out-of-sample period
+    # unseen. Unset, every window is allowed.
+    research_holdout_start: date | None = None
     failover_enabled: bool = True
     # Backfill source snapshots are an optional audit artifact. Keeping them
     # off the canonical backfill path prevents a slow backup vendor from
@@ -295,10 +300,10 @@ class Config:
     # Probe keys this deployment's network cannot reach at all. They are still
     # measured and reported, but under `not_applicable` rather than as SLO
     # failures: a source that is absent is not a source that is degraded, and a
-    # gate held open on one never closes. EastMoney's WAF refuses non-mainland
-    # traffic, so an overseas egress without a proxy lists its probes here —
-    # the same host behind a mainland proxy does not, which is exactly why this
-    # is declared rather than inferred.
+    # gate held open on one never closes. An egress whose IP EastMoney push2 has
+    # banned lists its probes here while the ban lasts — the same host behind a
+    # proxy onto an unbanned IP does not, which is exactly why this is declared
+    # rather than inferred.
     slo_unreachable_sources: tuple[str, ...] = ()
     # "off" | "shadow" | "block".  The audit runs after compact, so it has
     # never been able to stop bad data reaching curated; "shadow" records what
@@ -310,6 +315,23 @@ class Config:
     # proxy/environment routing; default-off avoids bypassing mandatory proxy
     # policies in existing deployments.
     eastmoney_direct_fallback: bool = False
+    # Refuse every push2 / push2his / push2delay request before it is sent.
+    # push2 bans an egress IP that crawls it too hard, and a daily run that
+    # keeps knocking may keep the ban alive; this lets the IP rest while the
+    # affected datasets fail fast exactly as they do under the ban.
+    eastmoney_push2_paused: bool = False
+    # After the first push2 refusal (403/429/5xx, a dropped connection, a
+    # timeout), refuse every push2 request, on every host, until local
+    # midnight. A failover to the backup hosts is what spread the 2026-09 ban.
+    eastmoney_push2_breaker: bool = True
+    # Hard cap on push2 requests per local day, across processes; 0 = no cap.
+    # A normal day needs ~100 (one ~60-page full-market sweep, the ETF and ST
+    # boards, sector boards, probes).
+    eastmoney_push2_daily_budget: int = 150
+    # Serve every full-market clist caller (instruments list_date, valuation,
+    # fund_flow, the clist bar fallback) from one union-field sweep per
+    # closed market session instead of one sweep each.
+    eastmoney_push2_shared_snapshot: bool = True
 
     def __post_init__(self) -> None:
         """Normalize path-like fields for programmatic configurations.
@@ -583,6 +605,15 @@ def _parse_tdx_host_pool(hosts_raw: object) -> list[str]:
     return pool
 
 
+def _optional_date(value) -> date | None:
+    """A TOML date (bare `2025-01-01`) or its quoted string form."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
 def load_config(path: str | Path) -> Config:
     config_path = Path(path).expanduser().resolve()
     with open(config_path, "rb") as f:
@@ -634,6 +665,14 @@ def load_config(path: str | Path) -> Config:
     source_intervals: dict[str, float] = {}
     eastmoney_proxy: str | None = None
     eastmoney_direct_fallback = False
+    eastmoney_push2_paused = False
+    eastmoney_push2_breaker = True
+    eastmoney_push2_daily_budget = 150
+    eastmoney_push2_shared_snapshot = True
+    # push2's own pacing lane (source "eastmoney_push2"): one request in flight,
+    # one every few seconds. A ~60-page sweep takes ~4 minutes this way.
+    push2_interval = 4.0
+    push2_concurrency: object = 1
     eastmoney_timeout_sec = 15.0
     baostock_batch_size = 20
     baostock_batch_rest_seconds = 120.0
@@ -663,6 +702,18 @@ def load_config(path: str | Path) -> Config:
                 eastmoney_proxy = str(val["proxy"]).strip() or None
             if name == "eastmoney" and val.get("direct_fallback") is not None:
                 eastmoney_direct_fallback = bool(val["direct_fallback"])
+            if name == "eastmoney" and val.get("push2_paused") is not None:
+                eastmoney_push2_paused = bool(val["push2_paused"])
+            if name == "eastmoney" and val.get("push2_breaker") is not None:
+                eastmoney_push2_breaker = bool(val["push2_breaker"])
+            if name == "eastmoney" and val.get("push2_daily_budget") is not None:
+                eastmoney_push2_daily_budget = int(val["push2_daily_budget"])
+            if name == "eastmoney" and val.get("push2_shared_snapshot") is not None:
+                eastmoney_push2_shared_snapshot = bool(val["push2_shared_snapshot"])
+            if name == "eastmoney" and val.get("push2_min_interval_seconds") is not None:
+                push2_interval = float(val["push2_min_interval_seconds"])
+            if name == "eastmoney" and val.get("push2_max_concurrency") is not None:
+                push2_concurrency = val["push2_max_concurrency"]
             if name == "eastmoney" and val.get("timeout_sec") is not None:
                 eastmoney_timeout_sec = float(val["timeout_sec"])
             # No eastmoney batch_size / batch_rest_seconds: the batch cool-down
@@ -690,6 +741,12 @@ def load_config(path: str | Path) -> Config:
                     ths_official_backfill_enabled = bool(val["backfill"])
         else:
             sources[name] = bool(val)
+    # An explicit [sources.eastmoney_push2] or source_concurrency entry wins.
+    source_intervals.setdefault("eastmoney_push2", push2_interval)
+    source_concurrency.setdefault("eastmoney_push2", push2_concurrency)  # type: ignore[arg-type]
+    # The scheduler's late stale-only pass sets this so it never touches push2.
+    if os.environ.get("CNE_PUSH2_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        eastmoney_push2_paused = True
 
     daily_waves: list[WaveConfig] = []
     for wave in raw.get("job", {}).get("daily", {}).get("waves", []):
@@ -818,6 +875,10 @@ def load_config(path: str | Path) -> Config:
         source_intervals=source_intervals,
         eastmoney_proxy=eastmoney_proxy,
         eastmoney_direct_fallback=eastmoney_direct_fallback,
+        eastmoney_push2_paused=eastmoney_push2_paused,
+        eastmoney_push2_breaker=eastmoney_push2_breaker,
+        eastmoney_push2_daily_budget=eastmoney_push2_daily_budget,
+        eastmoney_push2_shared_snapshot=eastmoney_push2_shared_snapshot,
         eastmoney_timeout_sec=eastmoney_timeout_sec,
         baostock_batch_size=baostock_batch_size,
         baostock_batch_rest_seconds=baostock_batch_rest_seconds,
@@ -870,6 +931,7 @@ def load_config(path: str | Path) -> Config:
             str(x).strip().upper() for x in futures_raw.get("minute_contracts", [])
         ],
         futures_minute_max_contracts=int(futures_raw.get("minute_max_contracts", 100)),
+        research_holdout_start=_optional_date(raw.get("research", {}).get("holdout_start")),
         failover_enabled=bool(failover_raw.get("enabled", True)),
         failover_backfill_snapshots=bool(failover_raw.get("backfill_snapshots", False)),
         failover_datasets=failover_datasets,

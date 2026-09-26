@@ -30,6 +30,7 @@ env/
 configs/*.local.toml
 configs/cnequity.toml
 configs/cnequity.demo.toml
+configs/*.bak*
 
 # Data lake artifacts (never commit generated data)
 data/
@@ -53,3 +54,6 @@ frontend/node_modules/
 
 # Local agent instructions, not part of the project.
 AGENTS.md
+
+# Operator journals, campaign scripts and private research notes (see private/README.md).
+/private/

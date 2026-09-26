@@ -29,6 +29,13 @@ from urllib.parse import urlparse
 
 import httpx
 
+from cnequity.adapters.eastmoney import push2_guard
+from cnequity.adapters.eastmoney.push2_guard import (  # noqa: F401 — re-exported
+    Push2BlockedError,
+    Push2BreakerOpenError,
+    Push2BudgetExhaustedError,
+    Push2PausedError,
+)
 from cnequity.domain.rate_limit import source_request
 
 if TYPE_CHECKING:
@@ -156,6 +163,11 @@ def build_eastmoney_headers(
 
 def is_push2_url(url: str) -> bool:
     return any(d in url for d in _PUSH2_DOMAINS)
+
+
+def _request_source(url: str) -> str:
+    """push2 paces on its own lane, so datacenter never waits behind it."""
+    return "eastmoney_push2" if push2_guard.is_push2_url(url) else "eastmoney"
 
 
 def apply_push2_token(url: str, params) -> dict | None:
@@ -288,9 +300,24 @@ class EastMoneyClient:
         return self._direct_client
 
     def _get_direct(self, url: str, *, headers: dict[str, str], **kwargs) -> httpx.Response:
+        # A second route is a second request: the breaker and the budget apply.
+        push2_guard.admit(self.config, url)
         logger.warning("EastMoney push2his proxy route failed; retrying once via direct route")
-        with source_request(self.config, "eastmoney"):
-            return self._get_direct_client().get(url, headers=headers, **kwargs)
+        try:
+            with source_request(self.config, _request_source(url)):
+                response = self._get_direct_client().get(url, headers=headers, **kwargs)
+        except Exception as exc:
+            self._note_push2_refusal(url, exc=exc)
+            raise
+        self._note_push2_refusal(url, status_code=response.status_code)
+        return response
+
+    def _note_push2_refusal(
+        self, url: str, *, status_code: int | None = None, exc: BaseException | None = None
+    ) -> None:
+        reason = push2_guard.refusal_reason(status_code=status_code, exc=exc)
+        if reason is not None:
+            push2_guard.trip(self.config, url, reason)
 
     def _throttle(self) -> None:
         if self.config is not None:
@@ -307,6 +334,7 @@ class EastMoneyClient:
         self._last_request = time.time()
 
     def get(self, url: str, **kwargs) -> httpx.Response:
+        push2_guard.admit(self.config, url)
         if self.config is None:
             # Bare clients retain their historical per-instance pacing. A
             # configured client gets both pacing and the shared lease from the
@@ -334,7 +362,7 @@ class EastMoneyClient:
             "direct_succeeded": False,
         }
         try:
-            with source_request(self.config, "eastmoney"):
+            with source_request(self.config, _request_source(url)):
                 response = self._client.get(url, headers=headers, **kwargs)
         except (
             httpx.TimeoutException,
@@ -343,6 +371,7 @@ class EastMoneyClient:
             httpx.RemoteProtocolError,
         ) as exc:
             self.last_route_outcome["primary_error"] = type(exc).__name__
+            self._note_push2_refusal(url, exc=exc)
             if not self._can_fallback_direct(url):
                 raise
             self.last_route_outcome["proxy_failed"] = True
@@ -355,6 +384,11 @@ class EastMoneyClient:
             self.last_route_outcome["direct_succeeded"] = True
             self.last_route_outcome["status_code"] = direct.status_code
             return direct
+        except httpx.TransportError as exc:
+            # ReadError / WriteError and friends: still push2 dropping us.
+            self._note_push2_refusal(url, exc=exc)
+            raise
+        self._note_push2_refusal(url, status_code=response.status_code)
         if response.status_code in _DIRECT_FALLBACK_STATUS_CODES and self._can_fallback_direct(url):
             self.last_route_outcome["proxy_failed"] = True
             self.last_route_outcome["primary_status_code"] = response.status_code
@@ -371,12 +405,19 @@ class EastMoneyClient:
         return response
 
     def post(self, url: str, **kwargs) -> httpx.Response:
+        push2_guard.admit(self.config, url)
         if self.config is None:
             self._throttle()
         headers = kwargs.pop("headers", {})
         headers.update(build_eastmoney_headers(url, self._client, config=self.config))
-        with source_request(self.config, "eastmoney"):
-            return self._client.post(url, headers=headers, **kwargs)
+        try:
+            with source_request(self.config, _request_source(url)):
+                response = self._client.post(url, headers=headers, **kwargs)
+        except Exception as exc:
+            self._note_push2_refusal(url, exc=exc)
+            raise
+        self._note_push2_refusal(url, status_code=response.status_code)
+        return response
 
     def close(self) -> None:
         self._client.close()

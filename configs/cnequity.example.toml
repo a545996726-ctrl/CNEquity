@@ -103,20 +103,39 @@ timeout_sec = 30
 # No batch_size / batch_rest_seconds here: EastMoney sweeps pace on
 # min_interval_seconds alone. The batch cool-down is a baostock mechanism —
 # see [sources.baostock], where it guards against the IP blacklist.
-# Optional HTTP(S) proxy for every EastMoney host. Only needed without a
-# mainland route: overseas and some cloud egress get 502s or dropped TLS from
-# push2/push2his. Point it at any proxy that has one (Clash, ssh -D, a China
-# VPS). When unset, httpx still honors HTTPS_PROXY / HTTP_PROXY env vars.
+# Optional HTTP(S) proxy for every EastMoney host. Overseas egress does not
+# need one: push2/push2his/push2delay ban an egress IP that requests too hard
+# (502 or dropped reply), and serve other overseas IPs normally (measured
+# 2026-09-26). A proxy only swaps the IP. When unset, httpx still honors
+# HTTPS_PROXY / HTTP_PROXY env vars.
 # proxy = "http://127.0.0.1:7890"
+# Refuse every push2/push2his/push2delay request locally, before it is sent,
+# so a banned IP can rest. The affected datasets fail fast as under the ban;
+# datacenter and the other EastMoney hosts are untouched.
+push2_paused = false
+# push2 IP protection (see docs/operations/troubleshooting.md). After the first
+# refusal (403/429/5xx, a dropped connection, a timeout) refuse every push2
+# host until local midnight — no backup-host failover.
+push2_breaker = true
+# Hard cap on push2 requests per local day, all processes together; 0 = none.
+# A normal day needs ~100.
+push2_daily_budget = 150
+# One union-field full-market sweep shared by instruments / valuation /
+# fund_flow / the clist bar fallback, reused while the market is closed.
+push2_shared_snapshot = true
+# push2's own pacing lane, separate from datacenter: one request every
+# push2_min_interval_seconds, push2_max_concurrency in flight (~4 min per sweep).
+push2_min_interval_seconds = 4.0
+push2_max_concurrency = 1
 # Optional failover for proxy instability: only push2his historical K-lines
-# retry once with trust_env=false. Keep false where policy requires all traffic
+# retry once with trust_env=false, and never after the push2 breaker trips. Keep false where policy requires all traffic
 # to use the proxy.
 direct_fallback = false
 
 [sources.ths]
 # 同花顺 — primary source for sector_bars (board index OHLC), history and daily.
-# push2his (EastMoney's kline host) refuses non-mainland egress at the WAF layer,
-# and mixing sources put two index bases in one series; see docs.
+# push2his (EastMoney's kline host) refused this project's egress IP, and mixing
+# sources put two index bases in one series; see docs.
 enabled = true
 # d.10jqka.com.cn (kline). Measured safe: ~1300 sequential requests at this pace
 # with zero failures, which is a full 432-board sweep in ~8 min. Do not lower it —
@@ -181,9 +200,9 @@ min_interval_seconds = 1.0
 # but under `not_applicable` instead of failing the availability gate: an absent
 # source is not a degraded one, and a gate held open on it never closes.
 #
-# EastMoney's WAF refuses non-mainland traffic, so an overseas egress *without a
-# mainland proxy* belongs here. With a proxy configured it does not — which is
-# why this is declared, not inferred. Leave empty on a mainland host.
+# An egress whose IP EastMoney push2 has banned belongs here while the ban lasts
+# (the ban is per IP, not on overseas traffic as a whole). A proxy onto an
+# unbanned IP does not — which is why this is declared, not inferred.
 #
 #   unreachable = ["eastmoney_push2", "eastmoney_push2his", "eastmoney_datacenter"]
 unreachable = []
@@ -632,3 +651,8 @@ datasets = ["stock_news", "research_reports"]
 path = "{data.root}/duckdb/cnequity.duckdb"
 memory_limit = "2GB"
 threads = 4
+
+# Optional. `cne decision-data` refuses any window reaching this date, so a
+# research holdout stays unseen by evidence inventories. Unset: no limit.
+# [research]
+# holdout_start = 2025-01-01

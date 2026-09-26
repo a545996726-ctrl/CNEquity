@@ -238,7 +238,7 @@ _PROFILES: dict[str, UniverseProfile] = {
         evidence_requirements=(),
         legacy_universe="all_a",
         strict_research=False,
-        # Existing EquityLab workspaces are governed by the historical all_a
+        # Existing downstream research workspaces are governed by the historical all_a
         # contract.  Keep that readiness behavior while the Reader emits a
         # deprecation warning and manifests expose this compatibility identity.
         research_eligible=True,

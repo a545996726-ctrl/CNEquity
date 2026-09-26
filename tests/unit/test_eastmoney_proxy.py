@@ -55,6 +55,9 @@ def test_push2his_proxy_protocol_failure_retries_direct_once(tmp_path, monkeypat
         data_root=tmp_path / "data",
         eastmoney_proxy="http://127.0.0.1:7890",
         eastmoney_direct_fallback=True,
+        # These exercise the fallback route itself; the breaker would (by
+        # design) refuse the second route after the first push2 refusal.
+        eastmoney_push2_breaker=False,
         source_intervals={"eastmoney": 0.0},
     )
     client = EastMoneyClient(config=cfg)
@@ -89,6 +92,9 @@ def test_push2his_records_when_proxy_and_direct_both_fail(tmp_path, monkeypatch)
         data_root=tmp_path / "data",
         eastmoney_proxy="http://127.0.0.1:7890",
         eastmoney_direct_fallback=True,
+        # These exercise the fallback route itself; the breaker would (by
+        # design) refuse the second route after the first push2 refusal.
+        eastmoney_push2_breaker=False,
         source_intervals={"eastmoney": 0.0},
     )
     client = EastMoneyClient(config=cfg)
@@ -119,6 +125,9 @@ def test_direct_fallback_does_not_bypass_proxy_for_other_hosts(tmp_path, monkeyp
         data_root=tmp_path / "data",
         eastmoney_proxy="http://127.0.0.1:7890",
         eastmoney_direct_fallback=True,
+        # These exercise the fallback route itself; the breaker would (by
+        # design) refuse the second route after the first push2 refusal.
+        eastmoney_push2_breaker=False,
         source_intervals={"eastmoney": 0.0},
     )
     client = EastMoneyClient(config=cfg)
@@ -151,3 +160,99 @@ def test_direct_fallback_is_opt_in(tmp_path, monkeypatch):
         client.get("https://push2his.eastmoney.com/api/qt/stock/kline/get")
     assert client._direct_client is None
     client.close()
+
+
+def test_push2_paused_config_is_read(tmp_path):
+    path = tmp_path / "cnequity.toml"
+    path.write_text(
+        f'''[data]
+root = "{path_for_toml(tmp_path / "data")}"
+[sources.eastmoney]
+push2_paused = true
+''',
+        encoding="utf-8",
+    )
+
+    assert load_config(path).eastmoney_push2_paused is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://push2.eastmoney.com/api/qt/clist/get?pn=1",
+        "https://40.push2.eastmoney.com/api/qt/clist/get",
+        "https://push2delay.eastmoney.com/api/qt/clist/get",
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+        "https://91.push2his.eastmoney.com/api/qt/stock/kline/get",
+    ],
+)
+def test_paused_push2_is_refused_before_anything_is_sent(tmp_path, monkeypatch, url):
+    from cnequity.adapters.eastmoney.em_auth import Push2PausedError, is_transport_fail_fast
+
+    cfg = Config(data_root=tmp_path / "data", eastmoney_push2_paused=True)
+    client = EastMoneyClient(config=cfg)
+    sent: list[str] = []
+    monkeypatch.setattr(client._client, "get", lambda u, **kw: sent.append(u))
+    monkeypatch.setattr(client._client, "post", lambda u, **kw: sent.append(u))
+
+    with pytest.raises(Push2PausedError) as exc:
+        client.get(url)
+    with pytest.raises(Push2PausedError):
+        client.post(url)
+    client.close()
+
+    assert sent == []
+    # Callers must see a dead route: fail fast, no retry.
+    assert is_transport_fail_fast(exc.value)
+
+
+def test_paused_push2_leaves_datacenter_alone(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        eastmoney_push2_paused=True,
+        source_intervals={"eastmoney": 0.0},
+    )
+    client = EastMoneyClient(config=cfg)
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
+    monkeypatch.setattr(
+        client._client,
+        "get",
+        lambda u, **kw: httpx.Response(200, request=httpx.Request("GET", u), text="ok"),
+    )
+
+    assert client.get(url).status_code == 200
+    client.close()
+
+
+def test_breaker_blocks_the_direct_retry_after_a_push2his_refusal(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        eastmoney_proxy="http://127.0.0.1:7890",
+        eastmoney_direct_fallback=True,
+        source_intervals={"eastmoney": 0.0, "eastmoney_push2": 0.0},
+    )
+    client = EastMoneyClient(config=cfg)
+    direct_calls: list[str] = []
+
+    class _Direct:
+        def get(self, url, **kwargs):
+            direct_calls.append(url)
+            return httpx.Response(200, request=httpx.Request("GET", url), text="ok")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        client._client,
+        "get",
+        lambda url, **kwargs: (_ for _ in ()).throw(httpx.RemoteProtocolError("dropped")),
+    )
+    client._direct_client = _Direct()
+
+    from cnequity.adapters.eastmoney.em_auth import Push2BreakerOpenError
+
+    with pytest.raises(Push2BreakerOpenError):
+        client.get("https://push2his.eastmoney.com/api/qt/stock/kline/get")
+    client.close()
+    assert direct_calls == []
