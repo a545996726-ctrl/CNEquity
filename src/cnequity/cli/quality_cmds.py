@@ -904,7 +904,7 @@ def status(
             if retired is not None and mark is not None and mark >= retired:
                 return "retired"
             # Per-dataset tolerance (T+1, quarterly …) — inherent lag is not STALE.
-            return "STALE" if is_stale(row["dataset"], mark, anchor) else "fresh"
+            return "STALE" if is_stale(row["dataset"], mark, anchor, cfg) else "fresh"
 
         df = df.with_columns(
             pl_mod.Series("freshness", [_freshness(r) for r in df.iter_rows(named=True)])

@@ -246,7 +246,7 @@ class LakeView:
         if not row["watermarked"]:
             return "n/a"
         mark = row["watermark"] or row["coverage_end"]
-        return "stale" if is_stale(row["dataset"], mark, anchor) else "fresh"
+        return "stale" if is_stale(row["dataset"], mark, anchor, self.config) else "fresh"
 
     def _rows(self) -> list[dict]:
         """One enriched dict per registered dataset."""

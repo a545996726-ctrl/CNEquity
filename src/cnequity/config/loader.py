@@ -35,6 +35,11 @@ class ScheduleGroup:
     # parallel so a group invocation does not silently discard independent
     # source lanes; callers may opt out for a particularly fragile source.
     parallel: bool = True
+    # "daily" or "weekly" (see orchestrator/cadence.py): a weekly group fetches
+    # its history datasets on the last session of each week up to ISO
+    # ``weekday``; its snapshot datasets still run every session.
+    cadence: str = "daily"
+    weekday: int = 5
 
 
 @dataclass
@@ -795,6 +800,8 @@ def load_config(path: str | Path) -> Config:
             at=group.get("at", "16:00"),
             steps=list(group.get("steps", [])),
             parallel=bool(group.get("parallel", True)),
+            cadence=str(group.get("cadence", "daily")).strip().lower(),
+            weekday=int(group.get("weekday", 5)),
         )
 
     events_groups: dict[str, ScheduleGroup] = {}
@@ -1017,6 +1024,16 @@ def validate_config(cfg: Config) -> list[str]:
         "processpool",
     }:
         errors.append("orchestrator.tdx_daily_backend must be 'auto', 'thread', or 'process'")
+    for name, group in (getattr(cfg, "schedule_groups", None) or {}).items():
+        if getattr(group, "cadence", "daily") not in {"daily", "weekly"}:
+            errors.append(
+                f"job.daily.groups.{name}.cadence must be 'daily' or 'weekly'; "
+                f"got {group.cadence!r}"
+            )
+        if not 1 <= int(getattr(group, "weekday", 5)) <= 7:
+            errors.append(
+                f"job.daily.groups.{name}.weekday must be an ISO weekday 1-7; got {group.weekday!r}"
+            )
     for field_name, limits in (
         ("source_concurrency", cfg.source_concurrency),
         ("http_workers", cfg.http_workers),

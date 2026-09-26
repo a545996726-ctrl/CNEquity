@@ -1553,7 +1553,7 @@ def _trading_session_lag(mark: date, anchor: date) -> int:
     return lag
 
 
-def is_stale(dataset: str, mark, anchor) -> bool:
+def is_stale(dataset: str, mark, anchor, config=None) -> bool:
     """Whether *dataset*'s freshest date (*mark*) lags *anchor* beyond tolerance.
 
     *mark* and *anchor* are ``datetime.date`` (or None). A dataset with no mark
@@ -1569,6 +1569,12 @@ def is_stale(dataset: str, mark, anchor) -> bool:
     """
     if mark is None or anchor is None:
         return False
+    if config is not None:
+        # A history dataset fetched by a weekly group is due through that
+        # group's last scheduled session, not today (orchestrator/cadence.py).
+        from cnequity.orchestrator.cadence import freshness_anchor
+
+        anchor = freshness_anchor(config, dataset, anchor)
     spec = DATASETS.get(dataset)
     if spec is not None and spec.source_retired_date is not None:
         if mark >= spec.source_retired_date:

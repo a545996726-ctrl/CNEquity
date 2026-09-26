@@ -532,6 +532,12 @@ steps = [
 # A mainland Linux box with workers=8 finishes core in minutes and will find
 # this schedule far roomier than it needs. That is the intended asymmetry —
 # starting late costs nothing, being skipped costs a day of data.
+# Per-group fetch frequency (docs/getting-started/configuration.md, 取数频率):
+#   cadence = "daily"   (default) or "weekly"
+#   weekday = 5         weekly: run on the last session of the week up to this ISO weekday
+# A weekly group rests only its history datasets (they catch up by date on the
+# next run); its snapshot datasets (fund_flow, hot_rank, trading_status, …)
+# still run every session, since a missed snapshot day is lost for good.
 [job.daily.groups.core]
 at = "16:00"
 parallel = true

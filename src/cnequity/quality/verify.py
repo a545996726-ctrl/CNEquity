@@ -362,7 +362,7 @@ def verify_dataset(
 
     # --- stale head ---------------------------------------------------------
     mark = watermark or last
-    if mark is not None and is_stale(spec.name, mark, anchor):
+    if mark is not None and is_stale(spec.name, mark, anchor, config):
         gaps.append(
             Gap(
                 dataset=spec.name,

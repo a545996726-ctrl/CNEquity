@@ -109,6 +109,9 @@ for g in $GROUP_LIST; do
     if grep -Eq '"status"[[:space:]]*:[[:space:]]*"skipped_non_trading_day"' "$group_output"; then
       log "group $g SKIPPED (non-trading day)"
       summary_status+=("SKIPPED")
+    elif grep -Eq '"status"[[:space:]]*:[[:space:]]*"skipped_not_scheduled"' "$group_output"; then
+      log "group $g SKIPPED (weekly cadence, not its day)"
+      summary_status+=("SKIPPED")
     else
       log "group $g OK"
       summary_status+=("OK")

@@ -166,7 +166,7 @@ def stale_fetch_plan(cfg, anchor: date, *, groups: set[str] | None = None) -> li
             if not row["has_data"] or not row["watermarked"]:
                 continue
             mark = row["watermark"] or row["coverage_end"]
-            stale = is_stale(name, mark, anchor)
+            stale = is_stale(name, mark, anchor, cfg)
         if stale:
             priority = _stale_priority(spec, row, anchor)
             out.append(
@@ -544,6 +544,24 @@ def run_daily(
                     f"`cne init --profile demo|sample` 写的配置故意不带，"
                     f"因为 demo 湖不是一个市场。"
                 )
+            from cnequity.orchestrator.cadence import due_steps
+
+            steps = group.steps
+            if not backfill:
+                steps = due_steps(group, td or _last_trading_day(cfg, shanghai_today()))
+            if not steps:
+                click.echo(
+                    json.dumps(
+                        {
+                            "run_id": None,
+                            "status": "skipped_not_scheduled",
+                            "group": group_name,
+                            "cadence": group.cadence,
+                        },
+                        indent=2,
+                    )
+                )
+                return
             result = engine.run_job(
                 f"daily:{group_name}",
                 trade_date=td,
@@ -551,7 +569,7 @@ def run_daily(
                     WaveConfig(
                         name=f"group:{group_name}",
                         parallel=getattr(group, "parallel", True),
-                        steps=group.steps,
+                        steps=steps,
                     )
                 ],
                 backfill=backfill,

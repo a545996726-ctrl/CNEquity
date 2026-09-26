@@ -238,7 +238,7 @@ def _stale_dataset_names(config: Config, trade_date: date) -> set[str]:
         if not is_dataset_enabled(name, config):
             continue
         mark = row.get("watermark") or row.get("coverage_end")
-        if mark is not None and is_stale(name, mark, anchor):
+        if mark is not None and is_stale(name, mark, anchor, config):
             out.add(name)
     return out
 
@@ -704,7 +704,7 @@ def lake_health(
         ):
             continue
         mark = row["watermark"] or row["coverage_end"]
-        if is_stale(row["dataset"], mark, anchor):
+        if is_stale(row["dataset"], mark, anchor, config):
             stale.append(row["dataset"])
 
     historical_validity = historical_universe_validity(
