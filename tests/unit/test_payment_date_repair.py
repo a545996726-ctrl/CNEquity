@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timezone
 
 import polars as pl
@@ -706,6 +707,48 @@ def test_fund_gap_retained_without_stock_endpoint_or_archive_claim(tmp_path, mon
     assert result["rows_written"] == 0
     assert report["unresolved"][0]["reason"] == "fund_payment_source_required"
     assert report["acquisition"]["network_requests"] == 0
+
+
+def test_sse_fund_correction_does_not_fall_through_to_cninfo(tmp_path, monkeypatch):
+    from cnequity.adapters.cninfo import fund_payment_notices
+    from cnequity.adapters.exchange import fund_payment_notices as sse_fund_payment_notices
+    from cnequity.config import Config
+    from cnequity.steps import payment_dates
+
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        sources={"exchange": True, "cninfo": True},
+        raw_archive_enabled=False,
+    )
+    cfg._backfill_symbols = ["510720.SH"]
+    cfg._backfill_start, cfg._backfill_end = date(2024, 1, 1), date(2024, 12, 31)
+    old = event()
+    old.update(symbol="510720.SH", ex_date=date(2024, 6, 13), payment_date=None)
+    monkeypatch.setattr(payment_dates, "load", lambda *a, **kw: pl.DataFrame([old]))
+    monkeypatch.setattr(
+        sse_fund_payment_notices,
+        "repair_sse_fund_payment_notices",
+        lambda *a, **kw: (
+            [],
+            [
+                {
+                    "symbol": "510720.SH",
+                    "ex_date": "2024-06-13",
+                    "reason": "sse_fund_correction_chain_requires_review",
+                }
+            ],
+        ),
+    )
+
+    def no_cninfo_fallback(config, run_id, pending, **kwargs):
+        assert pending.is_empty()
+        return [], []
+
+    monkeypatch.setattr(fund_payment_notices, "repair_fund_payment_notices", no_cninfo_fallback)
+    payment_dates.repair_payment_dates(cfg, date(2024, 12, 31), "correction-test", {})
+    report = json.loads((cfg.meta_root / "payment_date_repairs/correction-test.json").read_text())
+    assert report["matched_events"] == 0
+    assert report["unresolved"][0]["reason"] == "sse_fund_correction_chain_requires_review"
 
 
 def test_cninfo_notice_parser_requires_code_ex_date_pretax_cash_and_payment_date():

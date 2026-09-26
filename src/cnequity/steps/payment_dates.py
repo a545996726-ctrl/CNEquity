@@ -93,20 +93,57 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
         existing = clear_invalid_payment_evidence(existing).filter(pl.col("payment_date").is_null())
     if existing.is_empty():
         return stock_terms
-    unsupported = {
+    fund_symbols = {
         symbol
         for symbol in existing["symbol"].unique().to_list()
         if is_etf_symbol(parse_symbol(symbol).code, parse_symbol(symbol).exchange)
     }
-    diagnostics = [
-        {
-            "symbol": row["symbol"],
-            "ex_date": str(row["ex_date"]),
-            "reason": "fund_payment_source_required",
-        }
-        for row in existing.filter(pl.col("symbol").is_in(unsupported)).to_dicts()
+    fund_pending = existing.filter(pl.col("symbol").is_in(fund_symbols))
+    pending = existing.filter(~pl.col("symbol").is_in(fund_symbols))
+    metrics = {
+        "network_requests": 0,
+        "replayed_requests": 0,
+        "cninfo_network_responses": 0,
+    }
+    from cnequity.adapters.cninfo.fund_payment_notices import repair_fund_payment_notices
+    from cnequity.adapters.exchange.fund_payment_notices import repair_sse_fund_payment_notices
+
+    sse_fund_keys, sse_fund_diagnostics = repair_sse_fund_payment_notices(
+        config, run_id, fund_pending, metrics=metrics
+    )
+    sse_correction_blocked = [
+        (issue["symbol"], date.fromisoformat(issue["ex_date"]))
+        for issue in sse_fund_diagnostics
+        if issue["reason"] == "sse_fund_correction_chain_requires_review"
     ]
-    pending = existing.filter(~pl.col("symbol").is_in(unsupported))
+    if sse_fund_keys or sse_correction_blocked:
+        fund_pending = fund_pending.filter(
+            ~pl.struct("symbol", "ex_date").is_in(
+                [
+                    {"symbol": symbol, "ex_date": day}
+                    for symbol, day in [*sse_fund_keys, *sse_correction_blocked]
+                ]
+            )
+        )
+    cninfo_fund_keys, cninfo_fund_diagnostics = repair_fund_payment_notices(
+        config, run_id, fund_pending, metrics=metrics
+    )
+    fund_keys = [*sse_fund_keys, *cninfo_fund_keys]
+    repaired_fund_keys = {(symbol, str(day)) for symbol, day in fund_keys}
+    diagnostics = [
+        issue
+        for issue in [*sse_fund_diagnostics, *cninfo_fund_diagnostics]
+        if (issue["symbol"], issue["ex_date"]) not in repaired_fund_keys
+    ]
+    if not config.sources.get("cninfo", False):
+        diagnostics.extend(
+            {
+                "symbol": row["symbol"],
+                "ex_date": str(row["ex_date"]),
+                "reason": "fund_payment_source_required",
+            }
+            for row in fund_pending.to_dicts()
+        )
 
     def remove_keys(frame: pl.DataFrame, keys: list[tuple[str, date]]) -> pl.DataFrame:
         if not keys:
@@ -128,11 +165,6 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
 
     reviewed_keys = repair_reviewed_notices(config, run_id, pending)
     pending = remove_keys(pending, reviewed_keys)
-    metrics = {
-        "network_requests": 0,
-        "replayed_requests": 0,
-        "cninfo_network_responses": 0,
-    }
     bj_keys, bj_diagnostics = repair_bj_payment_notices(
         config, run_id, pending, all_actions=all_actions, metrics=metrics
     )
@@ -200,6 +232,7 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
     unresolved = [issues.get((r["symbol"], r["ex_date"]), r) for r in unresolved]
     repaired = [
         *reviewed_keys,
+        *fund_keys,
         *bj_keys,
         *cninfo_keys,
         *(
@@ -216,12 +249,13 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
         json.dumps(
             {
                 "run_id": run_id,
-                "symbols": sorted(windows),
+                "symbols": sorted(existing["symbol"].unique().to_list()),
                 "start": str(start),
                 "end": str(end),
                 "requested_events": existing.height,
                 "matched_events": enriched.height
                 + len(reviewed_keys)
+                + len(fund_keys)
                 + len(bj_keys)
                 + len(cninfo_keys),
                 "failed_symbols": failed,
@@ -240,6 +274,9 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
                     [*unresolved, *[r for r in diagnostics if r.get("ex_date")]]
                 ),
                 "reviewed_notice_events": len(reviewed_keys),
+                "fund_notice_events": len(fund_keys),
+                "sse_fund_notice_events": len(sse_fund_keys),
+                "cninfo_fund_notice_events": len(cninfo_fund_keys),
                 "bj_issuer_notice_events": len(bj_keys),
                 "cninfo_notice_events": len(cninfo_keys),
             },
@@ -260,10 +297,12 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
     result = {
         "rows_read": fetched.height
         + len(reviewed_keys)
+        + len(fund_keys)
         + len(bj_keys)
         + len(cninfo_keys)
         + stock_terms["rows_read"],
         "rows_written": len(reviewed_keys)
+        + len(fund_keys)
         + len(bj_keys)
         + len(cninfo_keys)
         + stock_terms["rows_written"],
