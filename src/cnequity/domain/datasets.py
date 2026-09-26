@@ -243,10 +243,12 @@ def _default_unit_contract(name: str) -> UnitContract:
 
 # Research-use classification, orthogonal to ``Layer`` (which is a storage
 # location). L0 is the reference spine everything joins on and L8 the risk
-# overlay; the ordering is roughly "how far from the price series".
-Tier = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
+# overlay; the ordering is roughly "how far from the price series". L9 holds
+# futures and options, which live beside the equity universe rather than in it
+# (ADR-0013), so their contracts, bars and derivations are managed as one family.
+Tier = Literal["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"]
 
-TIERS: tuple[Tier, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8")
+TIERS: tuple[Tier, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9")
 
 TIER_LABELS: dict[Tier, str] = {
     "L0": "基础参考",
@@ -258,6 +260,7 @@ TIER_LABELS: dict[Tier, str] = {
     "L6": "宏观",
     "L7": "舆情 / 轮动",
     "L8": "风险合规",
+    "L9": "衍生品",
 }
 
 
@@ -266,7 +269,7 @@ class DatasetSpec:
     """Orchestration/query metadata for one dataset.
 
     tier:
-        L0–L8 research classification (see ``Tier``). Mandatory and without a
+        L0–L9 research classification (see ``Tier``). Mandatory and without a
         default: an unclassified dataset would silently fall into whichever
         bucket the default named, and this is what groups the catalog docs and
         the lake dashboard. ``layer`` is where the parquet lives; this is what
@@ -877,7 +880,7 @@ _SPECS = [
         "commodity_bars",
         primary_source="sina",
         backup_source="eastmoney",
-        tier="L1",
+        tier="L9",
         partition_col="trade_date",
         partition_granularity="year",
         fetch_semantics="by_date",
@@ -894,7 +897,7 @@ _SPECS = [
         primary_source="futures_exchange",
         # DCE's contracts, while its own endpoints stay behind a challenge.
         supplementary_sources=("sina",),
-        tier="L0",
+        tier="L9",
         partition_col=None,
         date_col="list_date",
         watermark=False,
@@ -903,7 +906,7 @@ _SPECS = [
     DatasetSpec(
         "option_contracts",
         primary_source="futures_exchange",
-        tier="L0",
+        tier="L9",
         partition_col=None,
         date_col="list_date",
         watermark=False,
@@ -920,7 +923,7 @@ _SPECS = [
         primary_source="futures_exchange",
         # DCE, from mid-2018: no turnover, no-trade sessions absent (ADR-0013).
         supplementary_sources=("sina",),
-        tier="L1",
+        tier="L9",
         partition_col="trade_date",
         partition_granularity="month",
         required=False,
@@ -938,7 +941,7 @@ _SPECS = [
     DatasetSpec(
         "futures_minute_bars",
         primary_source="sina",
-        tier="L1",
+        tier="L9",
         partition_col="trade_date",
         partition_granularity="day",
         required=False,
@@ -948,7 +951,7 @@ _SPECS = [
     DatasetSpec(
         "option_bars",
         primary_source="futures_exchange",
-        tier="L1",
+        tier="L9",
         partition_col="trade_date",
         partition_granularity="day",
         required=False,
@@ -1388,7 +1391,7 @@ _SPECS = [
     DatasetSpec(
         "futures_continuous",
         primary_source="derived",
-        tier="L1",
+        tier="L9",
         layer="derived",
         partition_col="trade_date",
         partition_granularity="month",
@@ -1400,7 +1403,7 @@ _SPECS = [
     DatasetSpec(
         "option_greeks",
         primary_source="derived",
-        tier="L1",
+        tier="L9",
         layer="derived",
         partition_col="trade_date",
         partition_granularity="day",

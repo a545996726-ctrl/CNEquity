@@ -587,7 +587,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L1",
+        "tier": "L9",
         "unit_contract": {
           "amount": "source_native",
           "open_interest": "contract",
@@ -641,7 +641,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L1",
+      "tier": "L9",
       "unit_contract": {
         "amount": "source_native",
         "open_interest": "contract",
@@ -1893,7 +1893,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L1",
+        "tier": "L9",
         "unit_contract": {
           "amount": "CNY",
           "open_interest": "contract_single_sided",
@@ -1951,7 +1951,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L1",
+      "tier": "L9",
       "unit_contract": {
         "amount": "CNY",
         "open_interest": "contract_single_sided",
@@ -2039,7 +2039,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L1",
+        "tier": "L9",
         "unit_contract": {
           "adj_diff": "source_native",
           "adj_ratio": "unitless",
@@ -2102,7 +2102,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L1",
+      "tier": "L9",
       "unit_contract": {
         "adj_diff": "source_native",
         "adj_ratio": "unitless",
@@ -2190,7 +2190,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L0",
+        "tier": "L9",
         "unit_contract": {
           "multiplier": "quote_unit_to_CNY",
           "tick_size": "source_native"
@@ -2243,7 +2243,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L0",
+      "tier": "L9",
       "unit_contract": {
         "multiplier": "quote_unit_to_CNY",
         "tick_size": "source_native"
@@ -2324,7 +2324,7 @@
         "row_grain": "1m",
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L1",
+        "tier": "L9",
         "unit_contract": {
           "open_interest": "contract_single_sided",
           "price": "source_native",
@@ -2377,7 +2377,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L1",
+      "tier": "L9",
       "unit_contract": {
         "open_interest": "contract_single_sided",
         "price": "source_native",
@@ -4327,7 +4327,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L1",
+        "tier": "L9",
         "unit_contract": {
           "amount": "CNY",
           "delta": "unitless",
@@ -4397,7 +4397,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L1",
+      "tier": "L9",
       "unit_contract": {
         "amount": "CNY",
         "delta": "unitless",
@@ -4492,7 +4492,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L0",
+        "tier": "L9",
         "unit_contract": {
           "multiplier": "quote_unit_to_CNY",
           "strike": "source_native",
@@ -4550,7 +4550,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L0",
+      "tier": "L9",
       "unit_contract": {
         "multiplier": "quote_unit_to_CNY",
         "strike": "source_native",
@@ -4637,7 +4637,7 @@
         "row_grain": null,
         "schema_version": 1,
         "source_retired_date": null,
-        "tier": "L1",
+        "tier": "L9",
         "unit_contract": {
           "delta": "unitless",
           "gamma": "per_quote_unit",
@@ -4701,7 +4701,7 @@
       },
       "schema_version": 1,
       "source_retired_date": null,
-      "tier": "L1",
+      "tier": "L9",
       "unit_contract": {
         "delta": "unitless",
         "gamma": "per_quote_unit",
@@ -6395,7 +6395,7 @@
       "watermark": true
     }
   },
-  "fingerprint": "ac2482db8e2242e94b283e6d6670b8a5df0063435da567365770d5883d46c7e2",
+  "fingerprint": "cd7004f118297a9319ba61ad205cf43ed1f014cfd526e3229e47fecd31825db2",
   "format": "cnequity.dataset-contract",
   "pit_contract": {
     "modes": [

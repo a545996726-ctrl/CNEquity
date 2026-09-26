@@ -344,6 +344,15 @@ def test_heatmap_cells_are_one_char_per_day(client):
         assert set(row["cells"]) <= set(body["legend"])
 
 
+def test_heatmap_rows_are_grouped_by_tier(client):
+    """A family such as L9 derivatives reads as one block, not scattered."""
+    from cnequity.domain.datasets import TIERS
+
+    rows = client.get("/api/heatmap").json()["rows"]
+    keys = [(TIERS.index(r["tier"]), r["dataset"]) for r in rows]
+    assert keys == sorted(keys)
+
+
 def test_heatmap_marks_unpartitioned_datasets_apart_from_gaps(client):
     """instruments has no per-day notion; that is not the same as missing."""
     rows = {r["dataset"]: r for r in client.get("/api/heatmap").json()["rows"]}

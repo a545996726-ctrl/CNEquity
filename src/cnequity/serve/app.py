@@ -474,7 +474,7 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
     @app.get("/api/datasets", response_model=list[Dataset])
     def datasets(
         view: View,
-        tier: Annotated[str | None, Query(description="Restrict to one L0–L8 tier.")] = None,
+        tier: Annotated[str | None, Query(description="Restrict to one L0–L9 tier.")] = None,
     ) -> list[Dataset]:
         return [Dataset(**row) for row in view.datasets(tier=tier)]
 

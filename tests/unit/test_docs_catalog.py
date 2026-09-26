@@ -16,7 +16,7 @@ from cnequity.domain.datasets import DATASETS, datasets_by_tier
 
 CATALOG = Path(__file__).resolve().parents[2] / "docs" / "datasets" / "catalog.md"
 
-_SECTION = re.compile(r"^##\s+(L[0-8])\b")
+_SECTION = re.compile(r"^##\s+(L[0-9])\b")
 _ROW = re.compile(r"^\|\s*([a-z][a-z0-9_]*)\s*\|")
 
 

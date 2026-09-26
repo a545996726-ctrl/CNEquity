@@ -154,6 +154,23 @@ def test_every_dataset_lands_in_exactly_one_tier():
     assert len(placed) == len(set(placed))
 
 
+def test_futures_and_options_are_one_tier_beside_the_equity_spine():
+    """ADR-0013: derivatives sit beside the equity universe, so they are one family."""
+    family = {
+        "futures_contracts",
+        "option_contracts",
+        "futures_bars",
+        "option_bars",
+        "futures_continuous",
+        "option_greeks",
+        "futures_minute_bars",
+        "commodity_bars",
+    }
+    assert set(datasets_by_tier()["L9"]) == family
+    assert TIER_LABELS["L9"] == "衍生品"
+    assert all(not DATASETS[name].required for name in family)
+
+
 def test_report_period_datasets_are_partitioned_by_quarter():
     """The directories are ``2016Q1``, so anything else makes audit cry wolf.
 

@@ -145,7 +145,8 @@ export function heatmap(el, data) {
     },
     yAxis: {
       type: "category",
-      data: rows.map((r) => r.dataset),
+      // Rows arrive grouped by tier; the tag keeps the groups visible.
+      data: rows.map((r) => (r.tier ? `${r.tier} ${r.dataset}` : r.dataset)),
       inverse: true,
       axisLine: { show: false },
       axisTick: { show: false },

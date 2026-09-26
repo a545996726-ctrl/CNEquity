@@ -1007,6 +1007,9 @@ class LakeView:
                 }
             )
 
+        # Grouped by tier, so a family such as L9 衍生品 reads as one block
+        # rather than scattered through an alphabetical list.
+        rows.sort(key=lambda r: (TIERS.index(r["tier"]), r["dataset"]))
         return {
             "days": trading_days,
             "legend": {

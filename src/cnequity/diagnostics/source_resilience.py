@@ -164,7 +164,8 @@ def _level_for_dataset(
     tier = str(getattr(spec, "tier", "L8"))
     if tier in {"L0", "L1", "L2"}:
         return "core"
-    if tier in {"L3", "L4", "L5"}:
+    if tier in {"L3", "L4", "L5", "L9"}:
+        # Futures and options are optional research data, not the equity spine.
         return "research"
     if tier in {"L6", "L7"}:
         return "advisory"
