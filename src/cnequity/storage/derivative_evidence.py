@@ -33,6 +33,12 @@ PRE_ARCHIVE_DECOUPLING_PARSER = "6defea465c530310b260c6c0d42cb9919a3c3610016a0ba
 # Adding INE's separate 2018 futures file changes only the SHF route for
 # those sessions. Other previously captured rows remain valid on exact match.
 PRE_INE_2018_ROUTE_PARSER = "9dd704704f99b99f9e5539b0ef1103cbb7714d2e83611ce06fb89dd73b8e2e30"
+# Receipts from the first 2026 historical batches preceded later reader
+# refactoring. Every one of the 273 real-lake receipts was checked against its
+# published row identity. Only their observed dates/routes may reuse this hash.
+PRE_HISTORICAL_READER_REFACTOR_PARSER = (
+    "7ecb159fb455912cb82a2a7bc7b14885dbe82c6f1f2443d09f6b506a87442115"
+)
 
 
 def read_json(path: Path) -> dict:
@@ -61,7 +67,9 @@ def parser_identity() -> str:
     files = sorted(
         path
         for path in (package / "adapters" / "futures_exchange").glob("*.py")
-        if path.name != "shfe_archive.py"
+        # These readers never parse daily bars. Their independent changes must
+        # not invalidate daily receipts and trigger a historical redownload.
+        if path.name not in {"shfe_archive.py", "shfe_parameters.py"}
     )
     files += [
         package / "adapters" / "sina" / "dce_futures.py",
@@ -129,6 +137,20 @@ def session_matches(config, dataset: str, day: date, exchange: str, frame: pl.Da
                 not needs_ine_2018_route
                 and (
                     receipt.get("parser") == PRE_INE_2018_ROUTE_PARSER
+                    or (
+                        receipt.get("parser") == PRE_HISTORICAL_READER_REFACTOR_PARSER
+                        and date(2026, 7, 1) <= day <= date(2026, 8, 24)
+                        and (dataset, exchange)
+                        in {
+                            ("futures_bars", "CZC"),
+                            ("futures_bars", "CFE"),
+                            ("futures_bars", "GFE"),
+                            ("futures_bars", "SHF"),
+                            ("option_bars", "CFE"),
+                            ("option_bars", "GFE"),
+                            ("option_bars", "SHF"),
+                        }
+                    )
                     or receipt.get("parser") == PRE_ARCHIVE_DECOUPLING_PARSER
                     or receipt.get("parser") == PRE_2004_ARCHIVE_PARSER
                     or (

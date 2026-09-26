@@ -96,6 +96,57 @@ def test_prior_receipts_survive_transport_change_but_czce_options_reparse(tmp_pa
         assert session_matches(cfg, dataset, day, exchange, frame)
 
 
+def test_historical_reader_receipts_require_observed_route_date_and_rows(tmp_path):
+    from cnequity.storage.derivative_evidence import (
+        PRE_HISTORICAL_READER_REFACTOR_PARSER,
+        receipt_path,
+        record_session,
+        session_matches,
+    )
+
+    cfg = Config(data_root=tmp_path / "lake")
+    frame = pl.DataFrame({"symbol": ["CU2607.SHF"], "trade_date": [date(2026, 7, 6)]})
+    for day, dataset, exchange, expected in [
+        (date(2026, 7, 6), "futures_bars", "SHF", True),
+        (date(2026, 7, 6), "option_bars", "CZC", False),
+        (date(2026, 9, 1), "futures_bars", "SHF", False),
+    ]:
+        record_session(cfg, dataset, day, exchange, frame)
+        path = receipt_path(cfg, dataset, day, exchange)
+        receipt = json.loads(path.read_text())
+        receipt["parser"] = PRE_HISTORICAL_READER_REFACTOR_PARSER
+        path.write_text(json.dumps(receipt))
+        assert session_matches(cfg, dataset, day, exchange, frame) is expected
+        assert not session_matches(
+            cfg,
+            dataset,
+            day,
+            exchange,
+            pl.DataFrame({"symbol": ["CU2608.SHF"], "trade_date": [date(2026, 7, 6)]}),
+        )
+
+
+def test_parameter_parser_is_not_part_of_daily_receipt_fingerprint(monkeypatch):
+    from cnequity.storage import derivative_evidence as evidence
+
+    called = []
+    original = evidence.fingerprint
+
+    def observed(path):
+        called.append(path.name)
+        return original(path)
+
+    monkeypatch.setattr(evidence, "fingerprint", observed)
+    evidence.parser_identity.cache_clear()
+    try:
+        evidence.parser_identity()
+    finally:
+        evidence.parser_identity.cache_clear()
+    assert "shfe_parameters.py" not in called
+    assert "shfe_archive.py" not in called
+    assert "shfe.py" in called
+
+
 def test_empty_live_contract_cache_expires_and_does_not_hide_a_new_listing(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path / "lake")
     calls = []
