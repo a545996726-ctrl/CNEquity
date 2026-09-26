@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
-from cnequity.adapters.eastmoney import push2_guard, push2_snapshot
+from cnequity.adapters.eastmoney import host_guard, push2_snapshot
 from cnequity.adapters.eastmoney.common import (
     ALL_A_FS,
     PUSH2_CLIST_HOSTS,
@@ -125,7 +125,7 @@ def _fetch_clist_page(
                     }
                 )
             return diff, total
-        except (RawArchiveError, push2_guard.Push2BlockedError):
+        except (RawArchiveError, host_guard.Push2BlockedError):
             # Missing exact bytes are an archive integrity failure, and a local
             # push2 refusal is final for the day: neither is hidden by a retry.
             raise
@@ -148,7 +148,7 @@ def _clist_hosts(client: EastMoneyClient) -> tuple[str, ...]:
     the 2026-09 ban spread to them. The failover list survives for an operator
     who turns the breaker off.
     """
-    if push2_guard.breaker_enabled(getattr(client, "config", None)):
+    if host_guard.breaker_enabled(getattr(client, "config", None)):
         return PUSH2_CLIST_HOSTS[:1]
     return PUSH2_CLIST_HOSTS
 
@@ -226,7 +226,7 @@ def _fetch_clist_pages_uncached(
                         archive_run_id=archive_run_id,
                         recorder=recorder,
                     )
-                except (RawArchiveError, push2_guard.Push2BlockedError):
+                except (RawArchiveError, host_guard.Push2BlockedError):
                     raise
                 except Exception as exc:
                     logger.warning("EastMoney clist page %s failed on %s: %s", page, host, exc)
@@ -253,7 +253,7 @@ def _fetch_clist_pages_uncached(
                     archive_run_id=archive_run_id,
                     recorder=recorder,
                 )
-            except (RawArchiveError, push2_guard.Push2BlockedError):
+            except (RawArchiveError, host_guard.Push2BlockedError):
                 raise
             except Exception as exc:
                 # Mid-pagination: try remaining hosts before fail-loud (push2
@@ -285,7 +285,7 @@ def _fetch_clist_pages_uncached(
                         active_host = host
                         recovered = True
                         break
-                    except (RawArchiveError, push2_guard.Push2BlockedError):
+                    except (RawArchiveError, host_guard.Push2BlockedError):
                         raise
                     except Exception as host_exc:
                         logger.warning(

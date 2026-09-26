@@ -140,7 +140,7 @@ from cnequity.orchestrator.engine import JobEngine
     "--fill-em-outage",
     is_flag=True,
     help=(
-        "仅 valuation_metrics：东财快照中断时，用 Baostock 补东财最后一个完整日之后、"
+        "仅 valuation_metrics：东财快照中断时，用东财 datacenter 估值报表补东财最后一个完整日之后、"
         "今天之前的 --start/--end 窗口；全市场取全才写入。"
     ),
 )

@@ -334,6 +334,15 @@ class Config:
     # fund_flow, the clist bar fallback) from one union-field sweep per
     # closed market session instead of one sweep each.
     eastmoney_push2_shared_snapshot: bool = True
+    # datacenter-web: breaker trips after this many refusals in a row (403/429/
+    # 5xx, a refused/reset/dropped connection; not a slow-report timeout), or at
+    # once on "busy" through every backoff. It serves most EastMoney datasets.
+    eastmoney_datacenter_breaker: bool = True
+    eastmoney_datacenter_breaker_strikes: int = 3
+    # Requests per local day; 0 counts them (meta/state/eastmoney_guard.json)
+    # without a cap. Set a cap from measured usage, not a guess: backfills of the
+    # large reports legitimately need thousands.
+    eastmoney_datacenter_daily_budget: int = 0
 
     def __post_init__(self) -> None:
         """Normalize path-like fields for programmatic configurations.
@@ -671,6 +680,13 @@ def load_config(path: str | Path) -> Config:
     eastmoney_push2_breaker = True
     eastmoney_push2_daily_budget = 150
     eastmoney_push2_shared_snapshot = True
+    eastmoney_datacenter_breaker = True
+    eastmoney_datacenter_breaker_strikes = 3
+    eastmoney_datacenter_daily_budget = 0
+    # datacenter's own lane (source "eastmoney_dc"). It ran at 0.5 s / 4 in
+    # flight for months without a busy reply; this halves the peak rate.
+    datacenter_interval = 1.0
+    datacenter_concurrency: object = 2
     # push2's own pacing lane (source "eastmoney_push2"): one request in flight,
     # one every few seconds. A ~60-page sweep takes ~4 minutes this way.
     push2_interval = 4.0
@@ -716,6 +732,16 @@ def load_config(path: str | Path) -> Config:
                 push2_interval = float(val["push2_min_interval_seconds"])
             if name == "eastmoney" and val.get("push2_max_concurrency") is not None:
                 push2_concurrency = val["push2_max_concurrency"]
+            if name == "eastmoney" and val.get("datacenter_breaker") is not None:
+                eastmoney_datacenter_breaker = bool(val["datacenter_breaker"])
+            if name == "eastmoney" and val.get("datacenter_breaker_strikes") is not None:
+                eastmoney_datacenter_breaker_strikes = int(val["datacenter_breaker_strikes"])
+            if name == "eastmoney" and val.get("datacenter_daily_budget") is not None:
+                eastmoney_datacenter_daily_budget = int(val["datacenter_daily_budget"])
+            if name == "eastmoney" and val.get("datacenter_min_interval_seconds") is not None:
+                datacenter_interval = float(val["datacenter_min_interval_seconds"])
+            if name == "eastmoney" and val.get("datacenter_max_concurrency") is not None:
+                datacenter_concurrency = val["datacenter_max_concurrency"]
             if name == "eastmoney" and val.get("timeout_sec") is not None:
                 eastmoney_timeout_sec = float(val["timeout_sec"])
             # No eastmoney batch_size / batch_rest_seconds: the batch cool-down
@@ -746,6 +772,8 @@ def load_config(path: str | Path) -> Config:
     # An explicit [sources.eastmoney_push2] or source_concurrency entry wins.
     source_intervals.setdefault("eastmoney_push2", push2_interval)
     source_concurrency.setdefault("eastmoney_push2", push2_concurrency)  # type: ignore[arg-type]
+    source_intervals.setdefault("eastmoney_dc", datacenter_interval)
+    source_concurrency.setdefault("eastmoney_dc", datacenter_concurrency)  # type: ignore[arg-type]
     # The scheduler's late stale-only pass sets this so it never touches push2.
     if os.environ.get("CNE_PUSH2_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}:
         eastmoney_push2_paused = True
@@ -881,6 +909,9 @@ def load_config(path: str | Path) -> Config:
         eastmoney_push2_breaker=eastmoney_push2_breaker,
         eastmoney_push2_daily_budget=eastmoney_push2_daily_budget,
         eastmoney_push2_shared_snapshot=eastmoney_push2_shared_snapshot,
+        eastmoney_datacenter_breaker=eastmoney_datacenter_breaker,
+        eastmoney_datacenter_breaker_strikes=eastmoney_datacenter_breaker_strikes,
+        eastmoney_datacenter_daily_budget=eastmoney_datacenter_daily_budget,
         eastmoney_timeout_sec=eastmoney_timeout_sec,
         baostock_batch_size=baostock_batch_size,
         baostock_batch_rest_seconds=baostock_batch_rest_seconds,

@@ -340,7 +340,9 @@ def last_complete_em_valuation_tip(
         return None
     em_days = (
         scan_parquet_root(val_root, partition_col="trade_date")
-        .filter(pl.col("source") == "eastmoney")
+        # datacenter's RPT_VALUEANALYSIS_DET is EastMoney's own copy of the
+        # same session (the push2 fallback), so its days count as EM days.
+        .filter(pl.col("source").is_in(["eastmoney", "eastmoney_datacenter"]))
         .select("trade_date")
         .unique()
         .collect()["trade_date"]

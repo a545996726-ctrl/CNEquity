@@ -320,6 +320,12 @@ def fetch_datacenter(
                     time.sleep(retry_backoff_seconds * (attempt + 1))
         if last_exc is not None:
             if isinstance(last_exc, _ServerBusy):
+                # "Busy" arrives as HTTP 200, so the client never counts it as a
+                # refusal. Busy through every backoff is datacenter throttling
+                # this IP outright: stop asking for the day before it escalates.
+                from cnequity.adapters.eastmoney import host_guard
+
+                host_guard.trip(getattr(client, "config", None), url, f"busy: {last_exc}")
                 raise EastMoneyDatacenterError(
                     f"EastMoney datacenter {report} still busy after {max_retries} attempts "
                     f"({last_exc}); this is throttling, not a schema break — retry later or "

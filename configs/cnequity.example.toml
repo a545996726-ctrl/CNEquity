@@ -131,6 +131,18 @@ push2_shared_snapshot = true
 # push2_min_interval_seconds, push2_max_concurrency in flight (~4 min per sweep).
 push2_min_interval_seconds = 4.0
 push2_max_concurrency = 1
+# datacenter-web: it serves most EastMoney datasets and (since 2026-09-26)
+# valuation. Breaker after datacenter_breaker_strikes refusals in a row
+# (403/429/5xx, refused/reset/dropped connection; a slow-report timeout is not
+# a refusal), or at once when "busy" survives every backoff.
+datacenter_breaker = true
+datacenter_breaker_strikes = 3
+# 0 = count requests per day (meta/state/eastmoney_guard.json) without a cap;
+# set a cap from the measured count.
+datacenter_daily_budget = 0
+# datacenter's own lane, separate from the other EastMoney hosts.
+datacenter_min_interval_seconds = 1.0
+datacenter_max_concurrency = 2
 # Optional failover for proxy instability: only push2his historical K-lines
 # retry once with trust_env=false, and never after the push2 breaker trips. Keep false where policy requires all traffic
 # to use the proxy.

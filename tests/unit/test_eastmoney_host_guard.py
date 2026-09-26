@@ -1,4 +1,4 @@
-"""push2 IP protection: breaker, daily budget, own pacing lane, shared sweep."""
+"""EastMoney IP protection: push2 and datacenter breakers, budgets, lanes, shared sweep."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import httpx
 import polars as pl
 import pytest
 
-from cnequity.adapters.eastmoney import push2_guard, push2_snapshot
+from cnequity.adapters.eastmoney import host_guard, push2_snapshot
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient, is_transport_fail_fast
 from cnequity.config import Config, load_config
 from cnequity.config.bootstrap import path_for_toml
@@ -55,17 +55,17 @@ def _ok(url, payload=None):
         (None, httpx.RemoteProtocolError("empty reply"), True),
         (None, httpx.ReadTimeout("slow"), True),
         (None, httpx.ProxyError("clash down"), False),
-        (None, push2_guard.Push2PausedError("local"), False),
+        (None, host_guard.Push2PausedError("local"), False),
     ],
 )
 def test_what_counts_as_push2_refusing_this_ip(status, exc, trips):
-    reason = push2_guard.refusal_reason(status_code=status, exc=exc)
+    reason = host_guard.refusal_reason(status_code=status, exc=exc)
     assert (reason is not None) is trips
 
 
 def test_one_refusal_closes_every_push2_host_until_tomorrow(tmp_path, monkeypatch):
     today = [date(2026, 9, 22)]
-    monkeypatch.setattr(push2_guard, "_today", lambda: today[0])
+    monkeypatch.setattr(host_guard, "_today", lambda: today[0])
     cfg = _cfg(tmp_path)
     client, sent = _client(cfg, lambda url: httpx.Response(502, request=httpx.Request("GET", url)))
 
@@ -76,7 +76,7 @@ def test_one_refusal_closes_every_push2_host_until_tomorrow(tmp_path, monkeypatc
         "https://40.push2.eastmoney.com/api/qt/clist/get",
         "https://push2his.eastmoney.com/api/qt/stock/kline/get",
     ):
-        with pytest.raises(push2_guard.Push2BreakerOpenError) as exc:
+        with pytest.raises(host_guard.Push2BreakerOpenError) as exc:
             client.get(url)
         assert is_transport_fail_fast(exc.value)
     assert len(sent) == 1
@@ -88,7 +88,7 @@ def test_one_refusal_closes_every_push2_host_until_tomorrow(tmp_path, monkeypatc
 
 
 def test_a_dropped_connection_trips_the_breaker(tmp_path, monkeypatch):
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     cfg = _cfg(tmp_path)
 
     def _drop(url):
@@ -97,19 +97,19 @@ def test_a_dropped_connection_trips_the_breaker(tmp_path, monkeypatch):
     client, sent = _client(cfg, _drop)
     with pytest.raises(httpx.RemoteProtocolError):
         client.get(_CLIST)
-    with pytest.raises(push2_guard.Push2BreakerOpenError):
+    with pytest.raises(host_guard.Push2BreakerOpenError):
         client.get(_CLIST)
     assert len(sent) == 1
-    state = json.loads((cfg.meta_root / "state" / "push2_guard.json").read_text())
-    assert state["breaker"]["reason"] == "RemoteProtocolError"
+    state = json.loads((cfg.meta_root / "state" / "eastmoney_guard.json").read_text())
+    assert state["push2"]["breaker"]["reason"] == "RemoteProtocolError"
     client.close()
 
 
 def test_breaker_leaves_datacenter_alone(tmp_path, monkeypatch):
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
     cfg = _cfg(tmp_path)
-    push2_guard.trip(cfg, _CLIST, "HTTP 502")
+    host_guard.trip(cfg, _CLIST, "HTTP 502")
     client, sent = _client(cfg, _ok)
     assert client.get(_DATACENTER).status_code == 200
     assert sent == [_DATACENTER]
@@ -117,7 +117,7 @@ def test_breaker_leaves_datacenter_alone(tmp_path, monkeypatch):
 
 
 def test_breaker_can_be_turned_off(tmp_path, monkeypatch):
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     cfg = _cfg(tmp_path, eastmoney_push2_breaker=False, eastmoney_push2_daily_budget=0)
     client, sent = _client(cfg, lambda url: httpx.Response(502, request=httpx.Request("GET", url)))
     client.get(_CLIST)
@@ -131,12 +131,12 @@ def test_breaker_can_be_turned_off(tmp_path, monkeypatch):
 
 def test_daily_budget_is_a_hard_cap_that_resets_at_midnight(tmp_path, monkeypatch):
     today = [date(2026, 9, 22)]
-    monkeypatch.setattr(push2_guard, "_today", lambda: today[0])
+    monkeypatch.setattr(host_guard, "_today", lambda: today[0])
     cfg = _cfg(tmp_path, eastmoney_push2_daily_budget=3)
     client, sent = _client(cfg, _ok)
     for _ in range(3):
         client.get(_CLIST)
-    with pytest.raises(push2_guard.Push2BudgetExhaustedError) as exc:
+    with pytest.raises(host_guard.Push2BudgetExhaustedError) as exc:
         client.get(_CLIST)
     assert is_transport_fail_fast(exc.value)
     assert len(sent) == 3
@@ -149,13 +149,13 @@ def test_daily_budget_is_a_hard_cap_that_resets_at_midnight(tmp_path, monkeypatc
 
 def test_budget_is_shared_across_clients(tmp_path, monkeypatch):
     """Separate processes each build their own client; the ledger is on disk."""
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     cfg = _cfg(tmp_path, eastmoney_push2_daily_budget=2)
     first, _ = _client(cfg, _ok)
     second, _ = _client(_cfg(tmp_path, eastmoney_push2_daily_budget=2), _ok)
     first.get(_CLIST)
     second.get(_CLIST)
-    with pytest.raises(push2_guard.Push2BudgetExhaustedError):
+    with pytest.raises(host_guard.Push2BudgetExhaustedError):
         first.get(_CLIST)
     first.close()
     second.close()
@@ -188,12 +188,13 @@ def test_push2_requests_use_the_push2_source(tmp_path, monkeypatch):
 
     monkeypatch.setattr(em_auth, "source_request", lambda config, source, **k: _Ctx(source))
     monkeypatch.setattr(em_auth, "get_nid", lambda *a, **k: "")
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     client, _ = _client(_cfg(tmp_path), _ok)
     client.get(_CLIST)
     client.get(_DATACENTER)
+    client.get("https://np-listapi.eastmoney.com/comm/web/getFastNewsList")
     client.close()
-    assert seen == ["eastmoney_push2", "eastmoney"]
+    assert seen == ["eastmoney_push2", "eastmoney_dc", "eastmoney"]
 
 
 def test_config_gives_push2_a_slow_single_lane_by_default(tmp_path, monkeypatch):
@@ -252,7 +253,7 @@ def test_the_late_stale_pass_pauses_push2():
 def test_clist_does_not_fail_over_to_backup_hosts_under_the_breaker(tmp_path, monkeypatch):
     from cnequity.adapters.eastmoney.clist import fetch_clist_pages
 
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     cfg = _cfg(tmp_path)
     client, sent = _client(cfg, lambda url: httpx.Response(502, request=httpx.Request("GET", url)))
     with pytest.raises(RuntimeError, match="failed on all hosts"):
@@ -285,7 +286,7 @@ def _paged_market(rows_total: int):
 def test_full_market_callers_share_one_sweep(tmp_path, monkeypatch):
     from cnequity.adapters.eastmoney.clist import fetch_clist_pages
 
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     closed = datetime(2026, 9, 22, 9, 0, tzinfo=timezone.utc)  # 17:00 Beijing
     monkeypatch.setattr(push2_snapshot, "_now", lambda: closed)
     cfg = _cfg(tmp_path)
@@ -307,7 +308,7 @@ def test_full_market_callers_share_one_sweep(tmp_path, monkeypatch):
 def test_a_board_outside_the_snapshot_is_paged_on_its_own(tmp_path, monkeypatch):
     from cnequity.adapters.eastmoney.clist import fetch_clist_pages
 
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     cfg = _cfg(tmp_path)
     client, sent = _client(cfg, _paged_market(50))
     fetch_clist_pages(client, fields="f12,f13,f14", fs="m:0+f:4")  # f14 not in the union
@@ -341,7 +342,7 @@ def test_snapshot_is_reused_only_while_the_market_cannot_have_moved(captured, no
 def test_a_stale_snapshot_is_fetched_again(tmp_path, monkeypatch):
     from cnequity.adapters.eastmoney.clist import fetch_clist_pages
 
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     clock = [datetime(2026, 9, 21, 8, 15, tzinfo=timezone.utc)]
     monkeypatch.setattr(push2_snapshot, "_now", lambda: clock[0])
     cfg = _cfg(tmp_path)
@@ -359,7 +360,7 @@ def test_fund_flow_archives_the_replayed_wire_bytes(tmp_path, monkeypatch):
     from cnequity.adapters.eastmoney.clist import fetch_clist_pages
     from cnequity.storage.raw_archive import captured_records
 
-    monkeypatch.setattr(push2_guard, "_today", lambda: date(2026, 9, 22))
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 22))
     monkeypatch.setattr(
         push2_snapshot, "_now", lambda: datetime(2026, 9, 22, 9, 0, tzinfo=timezone.utc)
     )
@@ -465,3 +466,104 @@ def test_a_baostock_failure_falls_through_to_eastmoney(tmp_path, monkeypatch):
     )
     out = em_inst.enrich_instrument_list_dates(cfg, _instruments([("600519.SH", "stock", None)]))
     assert out["list_date"].to_list() == [date(2001, 8, 27)]
+
+
+# ---- datacenter --------------------------------------------------------------------
+
+
+def _status(url, code):
+    return httpx.Response(code, request=httpx.Request("GET", url))
+
+
+def test_datacenter_trips_after_three_refusals_in_a_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
+    client, sent = _client(_cfg(tmp_path), lambda url: _status(url, 403))
+    for _ in range(3):
+        assert client.get(_DATACENTER).status_code == 403
+    with pytest.raises(host_guard.DatacenterBreakerOpenError) as exc:
+        client.get(_DATACENTER)
+    assert is_transport_fail_fast(exc.value)
+    assert len(sent) == 3
+    # push2 has its own breaker; datacenter's does not close it.
+    client._client.get = lambda url, **k: _ok(url)  # type: ignore[method-assign]
+    assert client.get(_CLIST).status_code == 200
+    client.close()
+
+
+def test_a_datacenter_success_clears_the_strikes(tmp_path, monkeypatch):
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
+    codes = iter([502, 502, 200, 502, 502, 200])
+    client, sent = _client(_cfg(tmp_path), lambda url: _status(url, next(codes)))
+    for _ in range(6):
+        client.get(_DATACENTER)
+    client.close()
+    assert len(sent) == 6  # never three in a row, never tripped
+
+
+def test_a_slow_datacenter_report_is_not_a_refusal(tmp_path, monkeypatch):
+    """RPT_SHAREBONUS_DET timed out on 2026-09-17; that must not close datacenter."""
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
+
+    def _slow(url):
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    client, sent = _client(_cfg(tmp_path), _slow)
+    for _ in range(5):
+        with pytest.raises(httpx.ReadTimeout):
+            client.get(_DATACENTER)
+    client.close()
+    assert len(sent) == 5
+
+
+def test_datacenter_busy_through_every_backoff_trips_at_once(tmp_path, monkeypatch):
+    from cnequity.adapters.eastmoney.datacenter import EastMoneyDatacenterError, fetch_datacenter
+
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
+    busy = {"success": False, "message": "请求过于频繁，请稍后再试", "result": None}
+    client, sent = _client(_cfg(tmp_path), lambda url: _ok(url, busy))
+    with pytest.raises(EastMoneyDatacenterError, match="busy"):
+        fetch_datacenter(client, "RPT_X", "A", max_retries=2, retry_backoff_seconds=0)
+    with pytest.raises(host_guard.DatacenterBreakerOpenError):
+        client.get(_DATACENTER)
+    client.close()
+    assert len(sent) == 2
+
+
+def test_datacenter_budget_counts_and_caps(tmp_path, monkeypatch):
+    monkeypatch.setattr(host_guard, "_today", lambda: date(2026, 9, 28))
+    monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.get_nid", lambda *a, **k: "")
+    counted = _cfg(tmp_path)  # default: count only
+    client, _ = _client(counted, _ok)
+    for _ in range(4):
+        client.get(_DATACENTER)
+    client.close()
+    assert host_guard.status(counted)["datacenter"]["requests"] == 4
+
+    capped = _cfg(tmp_path, eastmoney_datacenter_daily_budget=5)
+    client, _ = _client(capped, _ok)
+    client.get(_DATACENTER)
+    with pytest.raises(host_guard.DatacenterBudgetExhaustedError):
+        client.get(_DATACENTER)
+    client.close()
+
+
+def test_config_gives_datacenter_its_own_lane_and_breaker(tmp_path, monkeypatch):
+    monkeypatch.delenv("CNE_PUSH2_PAUSED", raising=False)
+    path = tmp_path / "cnequity.toml"
+    path.write_text(
+        f'[data]\nroot = "{path_for_toml(tmp_path / "data")}"\n[sources.eastmoney]\nenabled = true\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.source_intervals["eastmoney_dc"] == 1.0
+    assert cfg.source_concurrency_for("eastmoney_dc") == 2
+    assert (cfg.eastmoney_datacenter_breaker, cfg.eastmoney_datacenter_breaker_strikes) == (True, 3)
+    assert cfg.eastmoney_datacenter_daily_budget == 0
+
+    from cnequity.adapters.throttle import _source_family
+
+    assert _source_family("eastmoney_dc") == "eastmoney_dc"

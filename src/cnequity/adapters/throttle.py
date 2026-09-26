@@ -22,6 +22,10 @@ def _source_family(source: str) -> str:
         # push2 bans an IP that crawls it; it gets its own (narrow) in-flight
         # cap instead of sharing datacenter's.
         return "eastmoney_push2"
+    if text.startswith("eastmoney_dc"):
+        # datacenter serves most EastMoney datasets; a ban there would cost the
+        # most, so it gets its own cap rather than the shared EastMoney one.
+        return "eastmoney_dc"
     if text.startswith("eastmoney") or text in {"em", "datacenter"}:
         return "eastmoney"
     if text.startswith("sina"):

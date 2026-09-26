@@ -27,6 +27,54 @@ def fetch_valuation_metrics(
     client: EastMoneyClient | None = None,
     config=None,
 ) -> pl.DataFrame:
+    """datacenter's valuation for *trade_date*, or push2's snapshot as a fallback.
+
+    datacenter (``RPT_VALUEANALYSIS_DET``, rows labelled ``eastmoney_datacenter``)
+    is primary: its P/E is true TTM like baostock's history, it is keyed by
+    date, covers Beijing, and its host is not the one that bans for volume.
+    push2's clist snapshot is the fallback for a session datacenter has not
+    published yet or cannot serve; its rows stay ``eastmoney`` because its f9
+    is the dynamic P/E, not TTM (see ``valuation_datacenter``).
+
+    A bare call (no config) keeps the historical push2-only behaviour.
+    """
+    if config is None:
+        return _fetch_valuation_push2(trade_date, client=client, config=config)
+    from cnequity.adapters.eastmoney.valuation_datacenter import (
+        SOURCE,
+        fetch_valuation_datacenter,
+    )
+
+    try:
+        primary = fetch_valuation_datacenter(trade_date, client=client, config=config)
+        if not primary.is_empty():
+            return primary.with_columns(pl.lit(SOURCE).alias("source"))
+        failure: Exception = RuntimeError(
+            f"datacenter has no valuation for {trade_date.isoformat()} yet"
+        )
+    except Exception as exc:  # noqa: BLE001 — every datacenter failure gets the fallback
+        failure = exc
+    logger.warning(
+        "valuation_metrics: datacenter failed (%s); trying push2 for %s",
+        failure,
+        trade_date.isoformat(),
+    )
+    try:
+        fallback = _fetch_valuation_push2(trade_date, client=client, config=config)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("valuation_metrics: push2 fallback failed too: %s", exc)
+        raise failure from exc
+    if fallback.is_empty():
+        raise failure
+    return fallback
+
+
+def _fetch_valuation_push2(
+    trade_date: date,
+    *,
+    client: EastMoneyClient | None = None,
+    config=None,
+) -> pl.DataFrame:
     owns = client is None
     if client is None:
         client = EastMoneyClient(config=config)

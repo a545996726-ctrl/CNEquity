@@ -3,6 +3,7 @@
 from datetime import date
 
 import polars as pl
+import pytest
 
 from cnequity.config import Config
 from cnequity.domain.schemas import DAILY_BARS_SCHEMA, VALUATION_METRICS_SCHEMA
@@ -275,24 +276,231 @@ def test_an_outage_fill_needs_an_end_and_an_eastmoney_anchor(tmp_path):
         _em_outage_window(_lake(tmp_path), date(2026, 9, 26), date(2026, 9, 22), date(2026, 9, 24))
 
 
-def test_an_incomplete_outage_fill_publishes_nothing(tmp_path, monkeypatch):
-    import pytest
+def _outage_lake(tmp_path, symbols: list[str], sessions: list[date]):
+    cfg = _em_tip_lake(tmp_path, date(2026, 9, 21), symbols)
+    for d in sessions:
+        _write_day(
+            cfg.curated_root, "daily_bars", d, symbols, source="tdx", schema=DAILY_BARS_SCHEMA
+        )
+    cfg._backfill_start = sessions[0]
+    cfg._backfill_end = sessions[-1]
+    cfg._valuation_fill_em_outage = True
+    return cfg
 
+
+def _dc_frame(symbols: list[str], sessions: list[date]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": [s for d in sessions for s in symbols],
+            "trade_date": [d for d in sessions for _ in symbols],
+            "pe_ttm": 20.0,
+            "pb": 2.0,
+            "ps_ttm": 3.0,
+            "total_mv": 1e9,
+            "float_mv": 5e8,
+        }
+    )
+
+
+_OUTAGE = [date(2026, 9, 22), date(2026, 9, 23), date(2026, 9, 24)]
+
+
+def test_an_outage_fill_reads_datacenter_including_beijing(tmp_path, monkeypatch):
     from cnequity.steps import fundamentals
 
-    symbols = [f"{i:06d}.SH" for i in range(600000, 600003)]
+    symbols = ["600000.SH", "000001.SZ", "920571.BJ"]
+    cfg = _outage_lake(tmp_path, symbols, _OUTAGE)
+    monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
+    monkeypatch.setattr(
+        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+    )
+    asked: list[tuple] = []
+
+    def _dc(start, end=None, *, client=None, config=None):
+        asked.append((start, end))
+        return _dc_frame(symbols + ["300999.SZ"], _OUTAGE)  # an extra name is ignored
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter", _dc
+    )
+    written: list[pl.DataFrame] = []
+
+    def _write(config, run_id, dataset, df, **kwargs):
+        written.append(df)
+        assert kwargs["source"] == "eastmoney_datacenter"
+        return {"rows_read": df.height, "rows_written": df.height}
+
+    monkeypatch.setattr(fundamentals, "write_fetched", _write)
+    monkeypatch.setattr(
+        "cnequity.adapters.baostock.valuation.fetch_valuation_history",
+        lambda *a, **k: pytest.fail("the outage fill must not ask baostock"),
+    )
+
+    out = fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-dc")
+    assert asked == [(date(2026, 9, 22), date(2026, 9, 24))]
+    assert out["rows_written"] == 9 and out["source"] == "eastmoney_datacenter"
+    frame = written[0]
+    assert set(frame["symbol"]) == set(symbols)
+    assert set(frame["source"]) == {"eastmoney_datacenter"}
+
+
+def test_an_incomplete_outage_fill_publishes_nothing(tmp_path, monkeypatch):
+    from cnequity.steps import fundamentals
+
+    symbols = ["600000.SH", "920571.BJ"]
+    cfg = _outage_lake(tmp_path, symbols, _OUTAGE)
+    monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
+    monkeypatch.setattr(
+        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+    )
+    # datacenter has not published the last session for one name yet.
+    partial = _dc_frame(symbols, _OUTAGE).filter(
+        ~((pl.col("symbol") == "920571.BJ") & (pl.col("trade_date") == date(2026, 9, 24)))
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",
+        lambda *a, **k: partial,
+    )
+    monkeypatch.setattr(
+        fundamentals, "write_fetched", lambda *a, **k: pytest.fail("nothing may be staged")
+    )
+
+    with pytest.raises(RuntimeError, match=r"920571\.BJ@2026-09-24.*nothing will be published"):
+        fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-dc")
+
+
+def test_the_ordinary_backfill_does_not_ask_baostock_for_beijing_names(tmp_path, monkeypatch):
+    """baostock has no BJ data; asking fails every BJ symbol after retries."""
+    from cnequity.steps import fundamentals
+
+    symbols = ["600000.SH", "000001.SZ", "920229.BJ"]
     cfg = _em_tip_lake(tmp_path, date(2026, 9, 21), symbols)
-    cfg._backfill_start = date(2026, 9, 22)
-    cfg._backfill_end = date(2026, 9, 24)
-    cfg._valuation_fill_em_outage = True
+    cfg._backfill_start = date(2026, 9, 14)
+    cfg._backfill_end = date(2026, 9, 18)
+    monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
+    monkeypatch.setattr(
+        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+    )
+    asked: list[str] = []
+
+    def _fetch(batch, start, end, config=None):
+        asked.extend(batch)
+        return _dc_frame(batch, [date(2026, 9, 14)]), []
+
+    monkeypatch.setattr("cnequity.adapters.baostock.valuation.fetch_valuation_history", _fetch)
+    monkeypatch.setattr(
+        fundamentals, "write_fetched", lambda *a, **k: {"rows_read": 2, "rows_written": 2}
+    )
+
+    out = fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-bj")
+    assert sorted(asked) == ["000001.SZ", "600000.SH"]
+    assert out["baostock_unserved"] == 1
+    assert "failed_symbols" not in out
+
+
+# ---- daily push2 → datacenter fallback -----------------------------------------
+
+
+def test_daily_valuation_reads_datacenter_first(tmp_path, monkeypatch):
+    from cnequity.adapters.eastmoney import valuation
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",
+        lambda d, *a, **k: _dc_frame(["600000.SH", "920571.BJ"], [d]),
+    )
+    monkeypatch.setattr(
+        valuation,
+        "_fetch_valuation_push2",
+        lambda *a, **k: pytest.fail("push2 must not be asked while datacenter answers"),
+    )
+    df = valuation.fetch_valuation_metrics(date(2026, 9, 28), config=_lake(tmp_path))
+    assert df.height == 2
+    assert set(df["source"]) == {"eastmoney_datacenter"}
+
+
+def test_daily_valuation_falls_back_to_push2_when_datacenter_has_nothing(tmp_path, monkeypatch):
+    """datacenter may not have published the session yet at run time."""
+    from cnequity.adapters.eastmoney import valuation
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",
+        lambda *a, **k: _dc_frame([], []),
+    )
+    monkeypatch.setattr(
+        valuation, "_fetch_valuation_push2", lambda d, **k: _dc_frame(["600000.SH"], [d])
+    )
+    df = valuation.fetch_valuation_metrics(date(2026, 9, 28), config=_lake(tmp_path))
+    assert df["symbol"].to_list() == ["600000.SH"]
+    assert "source" not in df.columns  # the step stamps push2 rows "eastmoney"
+
+
+def test_daily_valuation_keeps_datacenter_error_when_push2_fails_too(tmp_path, monkeypatch):
+    from cnequity.adapters.eastmoney import valuation
+    from cnequity.adapters.eastmoney.em_auth import Push2PausedError
+
+    def _dc(*a, **k):
+        raise RuntimeError("datacenter 502")
+
+    def _push2(*a, **k):
+        raise Push2PausedError("paused")
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter", _dc
+    )
+    monkeypatch.setattr(valuation, "_fetch_valuation_push2", _push2)
+    with pytest.raises(RuntimeError, match="datacenter 502"):
+        valuation.fetch_valuation_metrics(date(2026, 9, 28), config=_lake(tmp_path))
+
+
+def test_a_datacenter_day_counts_as_an_eastmoney_day(tmp_path):
+    symbols = [f"{i:06d}.SH" for i in range(600000, 600005)]
+    cfg = _em_tip_lake(tmp_path, date(2026, 9, 21), symbols)
+    d = date(2026, 9, 22)
+    _write_day(cfg.curated_root, "daily_bars", d, symbols, source="tdx", schema=DAILY_BARS_SCHEMA)
+    _write_day(
+        cfg.curated_root,
+        "valuation_metrics",
+        d,
+        symbols,
+        source="eastmoney_datacenter",
+        schema=VALUATION_METRICS_SCHEMA,
+    )
+    assert last_complete_em_valuation_tip(cfg) == d
+
+
+def test_an_outage_fill_only_fills_sessions_the_lake_lacks(tmp_path, monkeypatch):
+    """Rows already held for the window stay put, whatever their history looks like."""
+    from cnequity.steps import fundamentals
+
+    symbols = ["600000.SH", "920571.BJ"]
+    cfg = _outage_lake(tmp_path, symbols, _OUTAGE)
+    for d in _OUTAGE:  # baostock already filled SH/SZ for the window
+        _write_day(
+            cfg.curated_root,
+            "valuation_metrics",
+            d,
+            ["600000.SH"],
+            source="baostock",
+            schema=VALUATION_METRICS_SCHEMA,
+        )
     monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
     monkeypatch.setattr(
         "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
     )
     monkeypatch.setattr(
-        "cnequity.adapters.baostock.valuation.fetch_valuation_history",
-        lambda batch, start, end, config=None: (pl.DataFrame(), [batch[0]]),
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",
+        lambda *a, **k: _dc_frame(symbols, _OUTAGE),
+    )
+    written: list[pl.DataFrame] = []
+    monkeypatch.setattr(
+        fundamentals,
+        "write_fetched",
+        lambda config, run_id, dataset, df, **k: (
+            written.append(df) or {"rows_read": df.height, "rows_written": df.height}
+        ),
     )
 
-    with pytest.raises(RuntimeError, match="nothing will be published"):
-        fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-outage")
+    out = fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-dc")
+    assert out["symbols_todo"] == 1
+    assert set(written[0]["symbol"]) == {"920571.BJ"}
+    assert written[0].height == 3

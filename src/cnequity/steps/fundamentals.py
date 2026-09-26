@@ -141,6 +141,106 @@ def _em_outage_window(
     )
 
 
+def _keys_in_window(
+    config: Config, dataset: str, universe: list[str], start: date, end: date
+) -> set[tuple[str, date]]:
+    """(symbol, trade_date) keys *dataset* holds for *universe* in the window."""
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    root = config.curated_root / dataset
+    if not dataset_has_parquet(root):
+        return set()
+    keys = (
+        scan_parquet_root(root, partition_col="trade_date")
+        .filter(
+            pl.col("trade_date").cast(pl.Date).is_between(start, end)
+            & pl.col("symbol").is_in(universe)
+        )
+        .select("symbol", pl.col("trade_date").cast(pl.Date))
+        .unique()
+        .collect()
+    )
+    return set(keys.iter_rows())
+
+
+def _fill_em_outage_from_datacenter(
+    config: Config,
+    run_id: str,
+    universe: list[str],
+    start: date,
+    end: date,
+    purge_summary: dict,
+) -> dict:
+    """Fill the outage window from datacenter's copy of EastMoney's valuation.
+
+    ``RPT_VALUEANALYSIS_DET`` is keyed by date and served by a host push2's bans
+    do not reach, so the sessions push2 missed can be read back whole: every
+    A-share including Beijing (which baostock never had), two requests a day.
+    The first outage fill ran baostock instead — 14 hours, and 347 Beijing
+    names it could never answer.
+
+    Publishes whole sessions or nothing: every (symbol, session) that has a
+    price bar in the window must come back with a valuation row, or the step
+    fails and its staged rows are never compacted — a partial window is the
+    sparse tip ``_valuation_history_end`` exists to prevent. Sessions the lake
+    already holds a valuation row for, from any source, are left alone.
+    """
+    from cnequity.adapters.eastmoney.valuation_datacenter import (
+        SOURCE,
+        fetch_valuation_datacenter,
+    )
+
+    base = {
+        "orphan_purge": purge_summary,
+        "history_start": start.isoformat(),
+        "history_end": end.isoformat(),
+        "source": SOURCE,
+    }
+    if end < start:
+        return {"rows_read": 0, "rows_written": 0, "note": "empty outage window", **base}
+    # Not `_symbols_needing_backfill`: that judges a symbol's whole baostock
+    # history (market-cap density since 2016) and so re-fetched ~1,050 names
+    # whose window was already complete. The outage question is per session.
+    expected = _keys_in_window(config, "daily_bars", universe, start, end)
+    held = _keys_in_window(config, "valuation_metrics", universe, start, end)
+    gaps = expected - held
+    todo = sorted({symbol for symbol, _ in gaps})
+    if not todo:
+        return {"rows_read": 0, "rows_written": 0, "note": "all sessions already filled", **base}
+
+    df = fetch_valuation_datacenter(start, end, config=config)
+    wanted = pl.DataFrame(
+        sorted(gaps), schema={"symbol": pl.Utf8, "trade_date": pl.Date}, orient="row"
+    )
+    df = df.join(wanted, on=["symbol", "trade_date"], how="semi")
+    expected = gaps
+    got = set(df.select("symbol", "trade_date").iter_rows())
+    missing = sorted(expected - got)
+    if missing or df.is_empty():
+        sample = ", ".join(f"{s}@{d.isoformat()}" for s, d in missing[:5])
+        raise RuntimeError(
+            "valuation_metrics EastMoney-outage fill incomplete: datacenter lacks "
+            f"{len(missing)} of {len(expected)} barred session(s) for {len(todo)} "
+            f"symbol(s){f' (e.g. {sample})' if sample else ''}; nothing will be "
+            "published — re-run the same command once datacenter has them"
+        )
+    df = _validate_valuation_history_batch(df, todo, start, end)
+    written = write_fetched(
+        config,
+        run_id,
+        "valuation_metrics",
+        df.with_columns(pl.lit(SOURCE).alias("source")),
+        source=SOURCE,
+        batch_id="datacenter-outage",
+    )
+    return {
+        "rows_read": int(written.get("rows_read", 0)),
+        "rows_written": int(written.get("rows_written", 0)),
+        "symbols_todo": len(todo),
+        **base,
+    }
+
+
 def _backfill_valuation_metrics(config: Config, trade_date: date, run_id: str) -> dict:
     """Historical PE/PB/PS + market cap from baostock over the requested window.
 
@@ -198,13 +298,16 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
         _VALUATION_BACKFILL_START,
     )
     requested_end = getattr(config, "_backfill_end", None)
-    outage = bool(getattr(config, "_valuation_fill_em_outage", False))
-    if outage:
-        history_start, history_end = _em_outage_window(
-            config, trade_date, history_start, requested_end
-        )
-    elif requested_end is not None:
+    if getattr(config, "_valuation_fill_em_outage", False):
+        start, end = _em_outage_window(config, trade_date, history_start, requested_end)
+        return _fill_em_outage_from_datacenter(config, run_id, universe, start, end, purge_summary)
+    if requested_end is not None:
         history_end = min(history_end, requested_end)
+    # baostock carries no Beijing names: every BJ query fails after its retries
+    # (347 of them cost ~2 h of the 2026-09-26 outage fill, then failed the
+    # sweep). They are not a gap this source can close, so they are not asked.
+    baostock_unserved = sorted(s for s in universe if s.endswith(".BJ"))
+    universe = [s for s in universe if not s.endswith(".BJ")]
     if history_end < history_start:
         return {
             "rows_read": 0,
@@ -256,21 +359,12 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
             rows_written += int(chunk.get("rows_written", 0))
         report(offset + len(batch))
 
-    if outage and (all_failed or aborted_reason):
-        # An outage fill publishes whole sessions or nothing: a partial sweep
-        # is exactly the sparse tip `_valuation_history_end` exists to prevent.
-        # Failing the step keeps its batches from being compacted.
-        raise RuntimeError(
-            f"valuation_metrics EastMoney-outage fill incomplete: "
-            f"{len(set(all_failed))} of {len(todo)} symbol(s) failed"
-            f"{f' ({aborted_reason})' if aborted_reason else ''}; nothing will be "
-            "published — re-run the same command"
-        )
     result: dict = {
         "rows_read": rows_read,
         "rows_written": rows_written,
         "orphan_purge": purge_summary,
         "symbols_todo": len(todo),
+        "baostock_unserved": len(baostock_unserved),
         "history_start": history_start.isoformat(),
         "history_end": history_end.isoformat(),
     }
