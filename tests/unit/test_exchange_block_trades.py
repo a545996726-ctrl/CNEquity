@@ -248,3 +248,47 @@ def test_a_day_no_exchange_answered_is_still_dataset_shaped(monkeypatch):
 
     assert frame.is_empty()
     assert "premium_ratio" in frame.columns
+
+
+def test_the_vendor_is_reached_through_the_step_call_path(tmp_path):
+    """From 2026-09-18 the wrapper's bare ``**kwargs`` let ``call_with_run_id``
+    pass ``run_id`` to a vendor function that takes none; every daily read
+    raised into the fallback and Beijing never arrived."""
+    from cnequity.config import Config
+    from cnequity.steps.http_common import call_with_run_id
+
+    called: list[str] = []
+    good = pl.DataFrame({"symbol": ["920491.BJ"], "trade_date": [DAY], "price": [1.0]})
+
+    def _vendor(day, *, client=None, config=None):
+        called.append("vendor")
+        return good
+
+    def _exchange(day, config=None):
+        called.append("exchange")
+        return bt.EMPTY.clone()
+
+    cfg = Config(data_root=tmp_path / "lake", raw_archive_enabled=False)
+    frame = call_with_run_id(
+        cap._with_exchange_fallback("block_trades", _vendor, _exchange),
+        DAY,
+        pipeline_config=cfg,
+        dataset="block_trades",
+        run_id="run-1",
+        config=cfg,
+    )
+
+    assert called == ["vendor"]
+    assert frame["symbol"].to_list() == ["920491.BJ"]
+
+
+def test_rows_the_exchanges_served_say_so(monkeypatch):
+    def _boom(day, **kwargs):
+        raise RuntimeError("EastMoney datacenter down")
+
+    def _exchange(day, config=None):
+        return pl.DataFrame({"symbol": ["600000.SH"], "trade_date": [day], "price": [1.0]})
+
+    frame = cap._with_exchange_fallback("block_trades", _boom, _exchange)(DAY, config=None)
+
+    assert frame["source"].to_list() == ["exchange"]

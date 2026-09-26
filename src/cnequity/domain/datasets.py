@@ -187,10 +187,12 @@ _UNIT_CONTRACT_DEFAULTS: dict[str, UnitContract] = {
         "total_mv": "CNY",
         "float_mv": "CNY",
     },
+    # EastMoney's report is in 万股 / 万元 and the exchange backup keeps that
+    # scale; declared as stored, not as the other bar datasets are.
     "block_trades": {
         "price": "CNY/share",
-        "volume": "share",
-        "amount": "CNY",
+        "volume": "10k_share",
+        "amount": "10k_CNY",
         "premium_ratio": "fraction",
     },
     "index_constituents": {"weight": "fraction"},
@@ -1185,6 +1187,8 @@ _SPECS = [
     ),
     DatasetSpec(
         "block_trades",
+        # v2: the declared volume/amount units now say 万股/万元, as stored.
+        schema_version=2,
         primary_source="eastmoney",
         # SSE `COMMON_SSE_XXPL_JYXXPL_DZJYXX_L_1` and SZSE `CATALOGID=1265`,
         # both per-transaction and both current. Verified against 2026-09-15:

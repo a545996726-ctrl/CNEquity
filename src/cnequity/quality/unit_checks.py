@@ -151,6 +151,63 @@ IMPLIED_PRICE_LOT_SLACK = 99
 IMPLIED_PRICE_SAMPLE = 6
 
 
+# 万股 / 万元: the scale `block_trades` stores, as EastMoney reports it.
+_BLOCK_TRADE_SCALE = 10_000
+
+
+def _net_of_beijing_block_trades(
+    config: Config, broken: pl.DataFrame, start: date, end: date
+) -> pl.DataFrame:
+    """Drop Beijing rows that agree with themselves once block trades are out.
+
+    Beijing's daily volume and turnover include the session's block trades —
+    every Beijing source does it (TDX, the BSE site, 同花顺) — and a block
+    printed at a discount drags the implied price under the low. Shanghai and
+    Shenzhen bars leave block trades out. Measured on 2026-09-27: of 831
+    Beijing rows this check raised that had a block trade on record, 830
+    fell inside their range once it was netted out.
+    """
+    beijing = broken.filter(pl.col("symbol").str.ends_with(".BJ"))
+    root = config.curated_root / "block_trades"
+    if beijing.is_empty() or not dataset_has_parquet(root):
+        return broken
+    blocks = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(root, partition_col="trade_date", start=start, end=end),
+            "block_trades",
+        )
+        .filter(pl.col("symbol").str.ends_with(".BJ"))
+        .group_by("symbol", "trade_date")
+        .agg(
+            (pl.col("volume").sum() * _BLOCK_TRADE_SCALE).alias("_block_volume"),
+            (pl.col("amount").sum() * _BLOCK_TRADE_SCALE).alias("_block_amount"),
+        )
+        .collect()
+    )
+    if blocks.is_empty():
+        return broken
+    netted = beijing.join(blocks, on=["symbol", "trade_date"], how="inner").with_columns(
+        (pl.col("volume") - pl.col("_block_volume")).alias("_vol"),
+        (pl.col("amount") - pl.col("_block_amount")).alias("_amt"),
+    )
+    explained = netted.filter(
+        (pl.col("_vol") > 0)
+        & (
+            pl.col("_amt")
+            >= pl.col("low")
+            * (pl.col("_vol") - IMPLIED_PRICE_LOT_SLACK).clip(lower_bound=0)
+            * (1 - IMPLIED_PRICE_SLACK)
+        )
+        & (
+            pl.col("_amt")
+            <= pl.col("high")
+            * (pl.col("_vol") + IMPLIED_PRICE_LOT_SLACK)
+            * (1 + IMPLIED_PRICE_SLACK)
+        )
+    ).select("symbol", "trade_date")
+    return broken.join(explained, on=["symbol", "trade_date"], how="anti")
+
+
 def daily_bars_implied_price_findings(
     config: Config,
     trade_date: date,
@@ -210,6 +267,7 @@ def daily_bars_implied_price_findings(
         .select("symbol", "trade_date", "low", "high", "volume", "amount", "_px", "source")
         .collect(engine="streaming")
     )
+    broken = _net_of_beijing_block_trades(config, broken, start, trade_date)
     if broken.is_empty():
         return findings
 

@@ -449,14 +449,14 @@
         "reconciliation_lookback_mode": "calendar",
         "required": true,
         "row_grain": null,
-        "schema_version": 1,
+        "schema_version": 2,
         "source_retired_date": null,
         "tier": "L4",
         "unit_contract": {
-          "amount": "CNY",
+          "amount": "10k_CNY",
           "premium_ratio": "fraction",
           "price": "CNY/share",
-          "volume": "share"
+          "volume": "10k_share"
         },
         "watermark": true
       },
@@ -502,14 +502,14 @@
         "trade_date": "date",
         "volume": "float64"
       },
-      "schema_version": 1,
+      "schema_version": 2,
       "source_retired_date": null,
       "tier": "L4",
       "unit_contract": {
-        "amount": "CNY",
+        "amount": "10k_CNY",
         "premium_ratio": "fraction",
         "price": "CNY/share",
-        "volume": "share"
+        "volume": "10k_share"
       },
       "watermark": true
     },
@@ -6671,7 +6671,7 @@
       "watermark": true
     }
   },
-  "fingerprint": "a9c8e8521c131af4795be75c95e6e379ba7b59eef81d08c8902a6d6a9b99da90",
+  "fingerprint": "fc40e8af6b479bf7810817ed06dff3e7ede2d1bb64f1eb868668767956d301ce",
   "format": "cnequity.dataset-contract",
   "pit_contract": {
     "modes": [

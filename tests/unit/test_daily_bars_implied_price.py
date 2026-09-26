@@ -150,3 +150,52 @@ def test_an_untraded_day_is_not_a_break(tmp_path):
     )
 
     assert daily_bars_implied_price_findings(cfg, DAY) == []
+
+
+def _blocks(cfg: Config, rows: list[tuple[str, float, float]]) -> None:
+    part = cfg.curated_root / "block_trades" / f"trade_date={DAY.strftime('%Y-%m')}"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "trade_date": DAY,
+                "price": amount / volume,
+                "volume": volume,
+                "amount": amount,
+                "premium_ratio": None,
+                "source": "eastmoney",
+                "data_version": "v1",
+                "fetched_at": FETCHED,
+            }
+            for symbol, volume, amount in rows
+        ],
+        schema_overrides={"premium_ratio": pl.Float64},
+    ).write_parquet(part / "part-merged.parquet")
+
+
+def test_a_beijing_day_is_judged_net_of_its_block_trades(tmp_path):
+    """920491.BJ on 2026-09-16: 307,000 shares crossed as a block at 14.77, and
+    Beijing bars count them. Net of the block the day averages 21.30."""
+    cfg = _lake(
+        tmp_path,
+        [_bar("920491.BJ", volume=1552253, amount=31_057_000.0, low=20.85, high=21.64)],
+        {"920491.BJ": "stock"},
+    )
+    _blocks(cfg, [("920491.BJ", 30.6995, 453.431615)])
+
+    assert daily_bars_implied_price_findings(cfg, DAY) == []
+
+
+def test_a_block_trade_does_not_excuse_a_shanghai_row(tmp_path):
+    """Shanghai and Shenzhen bars leave block trades out; netting would hide a
+    real break there."""
+    cfg = _lake(
+        tmp_path,
+        [_bar("600491.SH", volume=1552253, amount=31_057_000.0, low=20.85, high=21.64)],
+        {"600491.SH": "stock"},
+    )
+    _blocks(cfg, [("600491.SH", 30.6995, 453.431615)])
+
+    (finding,) = daily_bars_implied_price_findings(cfg, DAY)
+    assert finding["rows"] == 1

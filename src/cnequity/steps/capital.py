@@ -7,6 +7,7 @@ what it costs.
 
 from __future__ import annotations
 
+import functools
 import logging
 from datetime import date, timedelta
 
@@ -680,8 +681,15 @@ def _with_exchange_fallback(dataset: str, primary_fn, exchange_fn):
     Block trades are genuinely sparse, so this can mean a second request on a
     quiet day — cheap, and the alternative is treating an outage as a quiet
     market, which is the mistake that makes a gap permanent.
+
+    The wrapper carries the vendor function's signature. A bare ``**kwargs``
+    told ``call_with_run_id`` it accepted ``run_id``, the vendor function did
+    not, and from 2026-09-18 every daily read raised ``TypeError`` into the
+    fallback: both datasets were served by the exchanges alone, without
+    Beijing, and stamped ``eastmoney``.
     """
 
+    @functools.wraps(primary_fn)
     def _fetch(day: date, **kwargs) -> pl.DataFrame:
         try:
             frame = primary_fn(day, **kwargs)
@@ -703,7 +711,8 @@ def _with_exchange_fallback(dataset: str, primary_fn, exchange_fn):
             dataset,
             day,
         )
-        return fallback
+        # The writer stamps the step's source only on rows that carry none.
+        return fallback.with_columns(pl.lit("exchange").alias("source"))
 
     return _fetch
 
