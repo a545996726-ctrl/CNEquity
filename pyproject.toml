@@ -135,6 +135,9 @@ cnequity = [
     "py.typed",
     "adapters/calendar/seeds/*.csv",
     "adapters/ths/seeds/*.json",
+    # hexin-v token generator for 同花顺 data pages (vendored from AKShare, MIT);
+    # run under Deno with no permissions — see adapters/ths/hexin.py.
+    "adapters/ths/js/*.js",
     # Public DigiCert intermediate that swsresearch.com fails to send. Without
     # it in the wheel every Shenwan fetch fails TLS verification on a fresh
     # install — see adapters/sw/industry_history.py.

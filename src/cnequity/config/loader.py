@@ -348,6 +348,9 @@ class Config:
     # without a cap. Set a cap from measured usage, not a guess: backfills of the
     # large reports legitimately need thousands.
     eastmoney_datacenter_daily_budget: int = 0
+    # Deno binary for the 同花顺 hexin-v token (adapters/ths/hexin.py); None
+    # finds it on PATH or in the usual install locations.
+    ths_js_runtime: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize path-like fields for programmatic configurations.
@@ -692,6 +695,7 @@ def load_config(path: str | Path) -> Config:
     # flight for months without a busy reply; this halves the peak rate.
     datacenter_interval = 1.0
     datacenter_concurrency: object = 2
+    ths_js_runtime: str | None = None
     # push2's own pacing lane (source "eastmoney_push2"): one request in flight,
     # one every few seconds. A ~60-page sweep takes ~4 minutes this way.
     push2_interval = 4.0
@@ -747,6 +751,8 @@ def load_config(path: str | Path) -> Config:
                 datacenter_interval = float(val["datacenter_min_interval_seconds"])
             if name == "eastmoney" and val.get("datacenter_max_concurrency") is not None:
                 datacenter_concurrency = val["datacenter_max_concurrency"]
+            if name == "ths" and val.get("js_runtime"):
+                ths_js_runtime = str(val["js_runtime"]).strip() or None
             if name == "eastmoney" and val.get("timeout_sec") is not None:
                 eastmoney_timeout_sec = float(val["timeout_sec"])
             # No eastmoney batch_size / batch_rest_seconds: the batch cool-down
@@ -779,6 +785,10 @@ def load_config(path: str | Path) -> Config:
     source_concurrency.setdefault("eastmoney_push2", push2_concurrency)  # type: ignore[arg-type]
     source_intervals.setdefault("eastmoney_dc", datacenter_interval)
     source_concurrency.setdefault("eastmoney_dc", datacenter_concurrency)  # type: ignore[arg-type]
+    # 同花顺 data pages (money-flow fallback): one page every 3 s. Its list pages
+    # have returned 401 after ~20 quick requests; the lane shares the `ths`
+    # in-flight cap, which ths_pages keeps at 1.
+    source_intervals.setdefault("ths_data", 3.0)
     # The scheduler's late stale-only pass sets this so it never touches push2.
     if os.environ.get("CNE_PUSH2_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}:
         eastmoney_push2_paused = True
@@ -919,6 +929,7 @@ def load_config(path: str | Path) -> Config:
         eastmoney_datacenter_breaker=eastmoney_datacenter_breaker,
         eastmoney_datacenter_breaker_strikes=eastmoney_datacenter_breaker_strikes,
         eastmoney_datacenter_daily_budget=eastmoney_datacenter_daily_budget,
+        ths_js_runtime=ths_js_runtime,
         eastmoney_timeout_sec=eastmoney_timeout_sec,
         baostock_batch_size=baostock_batch_size,
         baostock_batch_rest_seconds=baostock_batch_rest_seconds,

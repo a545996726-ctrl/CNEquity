@@ -14,5 +14,6 @@ from cnequity.steps import (  # noqa: F401
     research,
     rotation,
     structure,
+    ths_fallback,
     ticks,
 )

@@ -218,6 +218,22 @@ _UNIT_CONTRACT_DEFAULTS: dict[str, UnitContract] = {
         "change_pct": "percent",
         "turnover_pct": "percent",
     },
+    "fund_flow_ths": {
+        "inflow": "CNY",
+        "outflow": "CNY",
+        "net_inflow": "CNY",
+        "amount": "CNY",
+        "change_pct": "percent",
+        "turnover_pct": "percent",
+    },
+    "sector_fund_flow_ths": {
+        "sector_index": "index_point",
+        "change_pct": "percent",
+        "inflow": "CNY",
+        "outflow": "CNY",
+        "net_inflow": "CNY",
+        "company_count": "count",
+    },
     "economic_calendar": {"value": "source_native"},
     "industry_index": {"ret": "fraction", "amount": "source_native"},
     "delisting_events": {
@@ -1275,6 +1291,32 @@ _SPECS = [
         partition_col="trade_date",
         partition_granularity="month",
         fetch_semantics="snapshot",
+    ),
+    # 同花顺 money flow, written only when push2 cannot deliver the EastMoney
+    # tables above (the `fund_flow` / `sector_fund_flow` steps fall back to it).
+    # A different measure, so separate tables; sporadic by design, so an empty
+    # or old table is not a finding.
+    DatasetSpec(
+        "fund_flow_ths",
+        primary_source="ths",
+        tier="L4",
+        partition_col="trade_date",
+        partition_granularity="month",
+        fetch_semantics="snapshot",
+        required=False,
+        empty_severity="info",
+        max_staleness_days=36500,
+    ),
+    DatasetSpec(
+        "sector_fund_flow_ths",
+        primary_source="ths",
+        tier="L7",
+        partition_col="trade_date",
+        partition_granularity="month",
+        fetch_semantics="snapshot",
+        required=False,
+        empty_severity="info",
+        max_staleness_days=36500,
     ),
     DatasetSpec(
         "news_headlines",

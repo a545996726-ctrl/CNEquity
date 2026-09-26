@@ -79,6 +79,8 @@ def test_legacy_tables_match_registry():
         "hot_rank",
         "sector_bars",
         "sector_fund_flow",
+        "fund_flow_ths",
+        "sector_fund_flow_ths",
         "news_headlines",
         "flash_news_wire",
         "economic_calendar",

@@ -25,7 +25,7 @@ from cnequity.domain.contracts import (
 
 def test_every_registered_dataset_has_machine_readable_contract_fields():
     contract = build_contract()
-    assert len(contract["datasets"]) == 49
+    assert len(contract["datasets"]) == 51
     assert validate_contract() == []
     for name, record in contract["datasets"].items():
         assert record["schema_version"] >= 1

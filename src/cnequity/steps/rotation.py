@@ -336,6 +336,17 @@ def _backfill_sector_bars(config: Config, trade_date: date, run_id: str) -> dict
 
 @register_step("sector_fund_flow", group="research", depends_on=["instruments"])
 def step_sector_fund_flow(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
+    try:
+        return _step_sector_fund_flow(config, trade_date, run_id)
+    except Exception:
+        # See step_fund_flow: 同花顺's board money flow, in its own table.
+        from cnequity.steps.ths_fallback import stage_ths_fallback
+
+        stage_ths_fallback(config, trade_date, run_id, "sector_fund_flow_ths")
+        raise
+
+
+def _step_sector_fund_flow(config: Config, trade_date: date, run_id: str) -> dict:
     return _run_rotation_step(
         config,
         trade_date,

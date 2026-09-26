@@ -711,6 +711,39 @@ SECTOR_BARS_SCHEMA = {
     "fetched_at": FETCHED_AT_DTYPE,
 }
 
+# 同花顺 money flow (adapters/ths/fund_flow.py): a different measure from
+# EastMoney's — total inflow / outflow / net, no main-force split — so its own
+# tables. Fetched only on days push2 cannot deliver `fund_flow`.
+FUND_FLOW_THS_SCHEMA = {
+    "symbol": pl.Utf8,
+    "trade_date": pl.Date,
+    "inflow": pl.Float64,
+    "outflow": pl.Float64,
+    "net_inflow": pl.Float64,
+    "amount": pl.Float64,
+    "change_pct": pl.Float64,
+    "turnover_pct": pl.Float64,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
+SECTOR_FUND_FLOW_THS_SCHEMA = {
+    "sector_code": pl.Utf8,
+    "sector_name": pl.Utf8,
+    "board_type": pl.Utf8,
+    "trade_date": pl.Date,
+    "sector_index": pl.Float64,
+    "change_pct": pl.Float64,
+    "inflow": pl.Float64,
+    "outflow": pl.Float64,
+    "net_inflow": pl.Float64,
+    "company_count": pl.Int64,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
 SECTOR_FUND_FLOW_SCHEMA = {
     "sector_code": pl.Utf8,
     "sector_name": pl.Utf8,
@@ -862,6 +895,8 @@ DATASET_SCHEMAS = {
     "hot_rank": HOT_RANK_SCHEMA,
     "sector_bars": SECTOR_BARS_SCHEMA,
     "sector_fund_flow": SECTOR_FUND_FLOW_SCHEMA,
+    "fund_flow_ths": FUND_FLOW_THS_SCHEMA,
+    "sector_fund_flow_ths": SECTOR_FUND_FLOW_THS_SCHEMA,
     "news_headlines": NEWS_HEADLINES_SCHEMA,
     "flash_news_wire": FLASH_NEWS_WIRE_SCHEMA,
     "economic_calendar": ECONOMIC_CALENDAR_SCHEMA,
@@ -945,6 +980,8 @@ PRIMARY_KEYS = {
     "hot_rank": ["symbol", "trade_date"],
     "sector_bars": ["sector_code", "trade_date"],
     "sector_fund_flow": ["sector_code", "trade_date"],
+    "fund_flow_ths": ["symbol", "trade_date"],
+    "sector_fund_flow_ths": ["board_type", "sector_code", "trade_date"],
     "news_headlines": ["news_id"],
     "flash_news_wire": ["wire_id", "wire_source"],
     "economic_calendar": ["event_id"],
