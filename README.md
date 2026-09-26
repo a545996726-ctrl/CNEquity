@@ -1,0 +1,222 @@
+# CNEquity · 把 A 股数据留在自己的研究底座里
+
+**采集一次，持续更新，用同一份可溯源的本地数据做研究。**
+
+CNEquity 将行情、财报、公司事件和资金面等多源数据整理为本地 Parquet 数据湖，提供增量采集、失败续跑、质量审计与统一查询。适合反复回测、积累历史数据，以及让 Python、SQL 和 AI agent 共用数据的个人研究者与小团队。
+
+[![CI](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg)](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/cnequity?logo=pypi&logoColor=white)](https://pypi.org/project/cnequity/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/getting-started/installation.md)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+[English](README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [数据集目录](docs/datasets/catalog.md) · [更新日志](CHANGELOG.md)
+
+## 先拿到第一份数据
+
+需要 **Python 3.10+**，支持 macOS、Linux 和 Windows。基础体验无需账号或 token，也不必克隆仓库。
+
+```bash
+pip install cnequity
+cne init --profile demo
+```
+
+默认抓取 **5 只股票、最近约 30 个交易日**的真实日线，写入独立的 `data/cnequity-demo/`，并生成 `configs/cnequity.demo.toml`。耗时取决于 TDX 行情主机的可达性。
+
+接着在 Python 里读出结果：
+
+```python
+from cnequity.query import load
+
+bars = load("daily_bars", data_root="data/cnequity-demo")
+print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
+```
+
+或者打开本地控制台：
+
+```bash
+cne serve --config configs/cnequity.demo.toml
+# 浏览器访问 http://127.0.0.1:8787
+```
+
+<details>
+<summary>网络受限？先用离线样例验证安装</summary>
+
+```bash
+cne doctor
+cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
+cne query --config configs/cnequity.sample.toml --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
+```
+
+`sample` 不访问数据源，合成行标记为 `source=mock`，只能验证链路，不能用于研究。这里单独指定目录和配置，方便与真实 demo 并存。更多问题见[排障指南](docs/operations/troubleshooting.md)。
+
+</details>
+
+## 为什么值得把数据管起来
+
+- **少写重复的数据工程。** 代码、字段、分区和增量窗口由数据层管理；中断后保留成功批次，按失败范围续跑。22 条源探针路由帮助诊断可达性（高成本端点需显式选择）。
+- **把研究口径说清楚。** 原始价与复权因子分开存；历史股票池保留退市身份；财报查询区分严格 PIT 与事后重建。
+- **结果有来源，也有版本。** 行级 `source`、`data_version`、`fetched_at` 配合不可变数据版本与研究快照，支持复查和重现。
+- **数据留在自己手里。** 开放的 Parquet 文件，通过 Python、DuckDB、Polars、只读 MCP 和控制台消费。
+
+![CNEquity 只读控制台：健康状态、数据覆盖与待处理问题](docs/assets/cne-serve-hero-demo.png)
+
+*控制台示意截图（标有 ILLUSTRATIVE DEMO），用于展示界面；实际覆盖和审计结果以你的数据湖为准。*
+
+如果这正是你一直在重复搭建的数据底座，欢迎给 [CNEquity 一个 ⭐ Star](https://github.com/rootSunc/CNEquity)，方便找回，也帮助更多研究者发现它。
+
+## 能用它研究什么
+
+| 你的问题 | 数据与入口 | 需要确认的口径 |
+|---|---|---|
+| 跨分红、送转后的历史收益 | `daily_bars` + `adj_factors` · [复权示例](docs/recipes/research-baseline.md) | `adjust="hfq"`，研究时开启 `strict_adj=True` |
+| 某个调仓日已经知道哪些财报信息 | `financial_statement_items` · [PIT 示例](docs/recipes/pit-rebalance.md) | 显式 `as_of` + `pit_mode="strict"`；新回填不等于当时可见 |
+| 历史股票池、退市前行情 | `instruments`、`trading_status`、`delisting_events` · [股票池画像](docs/reference/universe-profiles.md) | 历史 ST、退市和行情覆盖需另行核验 |
+| 估值、资金流、行业轮动 | `valuation_metrics`、资金面与结构数据 · [查询指南](docs/datasets/query-guide.md) | 分清可回补历史与启用后积累的快照 |
+| 期货期限结构、期权链与 Greeks | 逐合约行情和派生数据 · [衍生品指南](docs/recipes/derivatives.md) | 默认关闭，按交易所、合约生命周期与覆盖证据验收 |
+
+当前开发树注册 **51 个数据集：46 个 curated + 5 个 derived**，按用途分为 L0–L9。注册数量包括兼容入口、可选数据集和停用源占位，**不等于开箱即有 51 张完整历史表**。完整字段、主键、历史起点和来源集中在[数据集目录](docs/datasets/catalog.md)与[数据源说明](docs/datasets/sources.md)。
+
+<details>
+<summary>展开注册表的主备来源速查（实际路由与历史限制见数据集目录）</summary>
+
+| 数据集 | 层次 | 登记主源 | 登记备源 |
+|---|---|---|---|
+| `instruments` | L0 | tdx_protocol | baostock |
+| `trading_calendar` | L0 | tdx_protocol | exchange |
+| `trading_status` | L0 | eastmoney | exchange |
+| `adj_factors` | L1 | sina | baostock |
+| `daily_bars` | L1 | tdx_protocol | eastmoney |
+| `delisting_events` | L1 | derived | — |
+| `index_bars` | L1 | tdx_protocol | eastmoney |
+| `minute_bars` | L1 | tdx_protocol | — |
+| `minute_bars_5m` | L1 | tdx_protocol | — |
+| `trade_ticks` | L1 | tdx_protocol | — |
+| `announcement_index` | L2 | cninfo | — |
+| `corporate_actions` | L2 | eastmoney | tdx_protocol |
+| `earnings_disclosure_schedule` | L2 | eastmoney | — |
+| `analyst_consensus` | L3 | eastmoney | — |
+| `financial_statement_items` | L3 | eastmoney | — |
+| `share_structure` | L3 | eastmoney | — |
+| `shareholder_counts` | L3 | eastmoney | — |
+| `top_holders` | L3 | eastmoney | — |
+| `valuation_metrics` | L3 | eastmoney | — |
+| `block_trades` | L4 | eastmoney | exchange |
+| `dragon_tiger` | L4 | eastmoney | exchange |
+| `fund_flow` | L4 | eastmoney | — |
+| `fund_flow_ths` | L4 | ths | — |
+| `institutional_holdings` | L4 | eastmoney | — |
+| `margin_trading` | L4 | exchange | — |
+| `northbound_flows` | L4 | eastmoney | — |
+| `northbound_holdings` | L4 | eastmoney | — |
+| `index_constituents` | L5 | eastmoney | — |
+| `industry_index` | L5 | derived | — |
+| `industry_members` | L5 | eastmoney | — |
+| `sector_members` | L5 | eastmoney | — |
+| `macro_indicators` | L6 | eastmoney | pboc |
+| `market_breadth` | L6 | derived | — |
+| `economic_calendar` | L7 | eastmoney | — |
+| `flash_news_wire` | L7 | eastmoney | — |
+| `hot_rank` | L7 | eastmoney | — |
+| `news_headlines` | L7 | eastmoney | — |
+| `sector_bars` | L7 | ths | — |
+| `sector_fund_flow` | L7 | eastmoney | — |
+| `sector_fund_flow_ths` | L7 | ths | — |
+| `sentiment_scores` | L7 | derived | eastmoney |
+| `regulatory_events` | L8 | cninfo | — |
+| `share_unlock_schedule` | L8 | eastmoney | — |
+| `commodity_bars` | L9 | sina | eastmoney |
+| `futures_bars` | L9 | futures_exchange | — |
+| `futures_continuous` | L9 | derived | — |
+| `futures_contracts` | L9 | futures_exchange | — |
+| `futures_minute_bars` | L9 | sina | — |
+| `option_bars` | L9 | futures_exchange | — |
+| `option_contracts` | L9 | futures_exchange | — |
+| `option_greeks` | L9 | derived | — |
+
+登记主备源是数据集元数据；日更 tip、历史回填和显式修复可能走不同路径。请结合[来源说明](docs/datasets/sources.md)使用。
+
+</details>
+
+## 从体验到自己的长期数据湖
+
+在准备长期使用的工作目录执行：
+
+```bash
+cne config create
+cne config validate
+cne init
+
+# 之后：交易日行情与其他已启用的日更组
+cne run daily --all-groups
+
+# 公告、监管事件和资讯：独立运行，周末也更新
+cne run events
+
+cne status --datasets
+```
+
+`config create` 生成正式配置，默认正式湖与 demo 分开。`init` 默认覆盖沪深京全市场最近 **3 年的初始化主干**；它不是所有数据集的全历史下载，也没有固定完成时长。
+
+| 你想要 | 使用方式 |
+|---|---|
+| 先验证真实采集 | `cne init --profile demo` |
+| 全市场近期主干 | `cne init`（默认 `quick`） |
+| 更深的初始化主干 | `cne init --profile full`，其中日线默认从 2016-01-01 起 |
+| 某个数据集更早的历史 | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD --plan`，审阅后去掉 `--plan` |
+| 补历史 ST 扫描 | `cne backfill trading_status`；覆盖能力仍受市场与来源约束 |
+
+三个容易误解的默认值：
+
+- `cne run daily` 不带选项时只执行核心 waves；`--all-groups` 才遍历日更组，**不包含 `run events`**。
+- 初始化进度里的 **400 只**是默认 Baostock 历史 ST 扫描上限，不是全市场日线范围。
+- 分钟线、分笔和逐合约期货/期权默认关闭；只有当前快照的来源需从启用后积累，不能补造过去。
+
+继续阅读：[快速开始](docs/getting-started/quickstart.md) → [初始化、范围与续跑](docs/getting-started/initialization.md) → [日常运维](docs/operations/runbook.md)。
+
+## Python、SQL 和 AI agent 共用一份数据
+
+已建立含复权因子的正式湖后：
+
+```python
+from cnequity.query import load
+
+bars = load(
+    "daily_bars",
+    symbols=["600519.SH"],
+    start="2024-01-01",
+    end="2024-12-31",
+    adjust="hfq",
+    strict_adj=True,
+)
+print(bars.select("trade_date", "close", "adj_close", "adj_is_exact"))
+```
+
+```bash
+cne query --sql "SELECT symbol, max(trade_date) AS last_date FROM daily_bars GROUP BY symbol LIMIT 10"
+cne mcp --config /abs/path/to/cnequity.toml
+```
+
+`load()` 提供复权、PIT 和股票池语义；`scan()` 提供原始 LazyFrame。MCP 默认只读本地湖，提供描述、代码解析、行情、财报、通用数据集和 SQL 六类工具。客户端配置见 [MCP 指南](docs/reference/mcp.md)，查询边界见 [Python API](docs/reference/python-api.md)。
+
+## 适合与边界
+
+**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](docs/comparison.md)。
+
+- 当前处于 **0.x 迭代阶段**。本仓库文档对应当前实现，PyPI 稳定版可能落后；升级前核对 `cne --version` 和[更新日志](CHANGELOG.md)。
+- 公共来源的网络可达性、历史深度和发布节奏会变化。基础采集无需 token，部分补充来源需要自备凭证；安装不代表获得所有上游权限。
+- `fresh` 表示新鲜度，不能单独证明历史完整或研究有效。严格 PIT 可能返回空结果，历史股票池可能因证据不足拒绝读取。
+- 项目提供数据基础设施，不含回测引擎、交易信号或下单功能。代码采用 [Apache-2.0](LICENSE)，数据另受[上游许可](docs/legal-and-data-sources.md)约束，仓库不附带数据湖。
+
+## 文档与参与
+
+| 想做什么 | 从这里开始 |
+|---|---|
+| 安装、跑通首个查询 | [安装](docs/getting-started/installation.md) · [快速开始](docs/getting-started/quickstart.md) |
+| 找数据、确认口径 | [目录](docs/datasets/catalog.md) · [字段](docs/datasets/schema.md) · [研究示例](docs/recipes/README.md) |
+| 查命令、参数和副作用 | [CLI](docs/reference/cli.md) · [参数默认值](docs/reference/cli-options.md) · [联网与写入清单](docs/reference/cli-surface.md) |
+| 配调度、处理失败 | [运行手册](docs/operations/runbook.md) · [取数与源保护](docs/operations/fetch-policy.md) · [排障](docs/operations/troubleshooting.md) |
+| 理解产品方向与反馈问题 | [产品设计](docs/architecture/overview.md) · [升级与反馈](docs/getting-started/upgrading.md) |
+
+欢迎提交带最小复现的 [Issue](https://github.com/rootSunc/CNEquity/issues)、文档修正或数据适配 PR。研究引用见 [CITATION.cff](CITATION.cff)；安全问题请按[安全策略](SECURITY.md)私下报告。
+
+**觉得有用？[点一个 Star](https://github.com/rootSunc/CNEquity)，或把项目分享给同样在维护 A 股数据的人。**

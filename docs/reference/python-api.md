@@ -1,0 +1,215 @@
+# Python API 参考
+
+模块：`cnequity.query`。先看[查询指南](../datasets/query-guide.md)理解口径；本页用于查参数、返回值和版本边界。
+
+```python
+from cnequity.query import load, scan, list_datasets, dataset_schema
+```
+
+## load()
+
+```python
+def load(
+    dataset: str,
+    *,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    adjust: Literal["qfq", "hfq"] | None = None,
+    universe: Literal["all_a", "all_a_sh_sz"] | None = None,
+    profile: UniverseProfileLike | None = None,
+    universe_profile: UniverseProfileLike | None = None,
+    as_of: str | date | None = None,
+    items: list[str] | None = None,
+    symbols: list[str] | None = None,
+    strict_adj: bool = False,
+    strict_universe: bool = False,
+    all_vintages: bool = False,
+    pit_mode: Literal["strict", "best_effort"] | None = None,
+    config: Config | None = None,
+    data_root: str | Path | None = None,
+    revision: RevisionSelection | None = None,
+    revision_map: Mapping[str, int | str] | None = None,
+) -> pl.DataFrame
+```
+
+### 参数
+
+| 参数 | 说明 |
+|------|------|
+| `dataset` | 注册数据集名 |
+| `start`, `end` | 含边界日期窗口（数据集主日期列） |
+| `adjust` | `hfq` / `qfq`；适用于 `daily_bars`、`minute_bars`、`minute_bars_5m` 等价量数据集 |
+| `universe` | `"all_a"` 沪深北全 A；`"all_a_sh_sz"` 明确限定沪深子集并排除北交所 |
+| `as_of` | PIT 截止日；可见性规则由 `pit_mode` 决定。严格模式核验公告、可用/发布时间及观察时间，随后按事实键选有效版本 |
+| `items` | 财报科目 code 列表 |
+| `symbols` | symbol 白名单 |
+| `strict_adj` | True 时缺复权因子抛 `ReaderError` |
+| `strict_universe` | True 时支持的 universe 缺少 instruments、逐日 trading_status 覆盖或版本化历史 ST 证据收据会抛错；适合研究读取 |
+| `all_vintages` | True 时返回 `as_of` 前的**全部**版本（研究财报修订用）；截面选股勿开，会重复计同一事实 |
+| `pit_mode` | PIT 证据模式：`strict` 排除 reconstructed 回填；`best_effort` 保留但返回 `pit_is_exact=False`。省略值为 0.x 兼容模式，仍按 `fetched_at` 截止，不代表严格 PIT |
+| `config` / `data_root` | 湖位置；默认读 `configs/cnequity.toml` |
+| `profile` / `universe_profile` | 版本化股票池策略，二者为别名；研究优先明确 profile，按该范围校验证据 |
+| `revision` | revision 数字或 ID 固定主数据集；也支持按数据集映射。单个数字不固定因子或股票池依赖 |
+| `revision_map` | 固定各依赖数据集的 retained revision；显式缺失版本抛 `RevisionConsistencyError`，不退回 latest |
+
+### 固定组合读取的数据版本
+
+复权股票池查询可能依赖 `daily_bars`、`adj_factors`、`instruments`、`trading_status`、
+`trading_calendar`。`revision_map` 使用各数据集自身的 revision，数字不必相同；只填
+主表并不能固定整个结果。一次 `load()` 为所用依赖各选择一次 generation，后续股票池
+和覆盖数据读取复用该选择。未指定的依赖选当前版本，不提供全湖原子事务。
+
+这只固定数据。长期研究使用 `SnapshotStore.create(name, datasets, research=True)`
+或 CLI `snapshot create --research`，将完整依赖、ST/退市证据、目录、日历种子和非敏感读取配置一起封装。快照不包含 API token，恢复后可以离线解释原来的来源能力。
+读取时检查冻结的 canonical 策略与所请求内置 profile，版本不一致报错；快照不打包可执行软件。
+长期研究还应保存依赖版本映射、查询参数、profile、配置和软件版本；旧 generation
+受保留期限制。不要以水位或 `fetched_at` 代替完整依赖的 revision 身份。
+
+### 返回
+
+- 未复权数据集：原始列
+- PIT `load()` 还会返回可选双时态列 `available_at`、`source_published_at`、
+  `observed_at`、`revision_id`，以及 `pit_is_exact` / `pit_quality` 质量标记；
+  旧 Parquet 缺列时读侧补齐
+- `adjust` 非空：附加 `adj_open`, `adj_high`, `adj_low`, `adj_close`, `adj_is_exact`
+
+### 异常
+
+`ReaderError`（`ValueError` 子类）：未知数据集、无数据、strict_adj 失败等。
+
+## scan()
+
+返回原始 `pl.LazyFrame`，适合大窗口的自定义 lazy 管道。它只做日期分区和
+symbol 过滤，不执行 `load()` 的复权、universe、PIT 或严格覆盖语义；需要这些
+语义时应使用 `load()`。当前参数如下：
+
+```python
+def scan(
+    dataset: str,
+    *,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    symbols: list[str] | None = None,
+    config: Config | None = None,
+    data_root: str | Path | None = None,
+    revision: RevisionSelection | None = None,
+    revision_map: Mapping[str, int | str] | None = None,
+) -> pl.LazyFrame
+```
+
+```python
+import polars as pl
+
+lf = scan("daily_bars", start="2020-01-01", symbols=["600519.SH"])
+df = lf.filter(pl.col("close") > 0).collect()
+```
+
+## list_datasets()
+
+```python
+def list_datasets(
+    *,
+    config: Config | None = None,
+    data_root: str | Path | None = None,
+) -> pl.DataFrame
+```
+
+主要列：`dataset`、`layer`、`date_col`、`fetch_semantics`、`history_mode`、`backfill_source`、`history_horizon_days`、`pit`、`pit_quality`、`pit_storage_columns`、`has_data`、`coverage_start`、`coverage_end`、`watermarked`、`watermark`。另返回 `snapshot_date`、`revision`、`revision_id`、`schema_version`、`contract_fingerprint`。
+
+日期边界用于发现数据，不等于窗口完整性证明；版本字段来自 state，读取提交版本仍以 revision pointer 为准。
+
+`history_mode` ∈ `by_date` / `snapshot_with_backfill` / `snapshot_only`；与 `coverage_*` 一起构成可用起点合同。
+
+## historical_universe_validity()
+
+历史研究门禁位于 `cnequity.quality.historical_validity`，默认验证沪深北全 A：
+
+```python
+from cnequity.quality.historical_validity import historical_universe_validity
+from datetime import date
+
+report = historical_universe_validity(
+    cfg,
+    start=date(2020, 1, 1),
+    end=date(2024, 12, 31),
+    universe="all_a_sh_sz",
+)
+assert report["universe_ready"]
+```
+
+`universe="all_a_sh_sz"` 会让日线区间、历史 ST 证据和退市覆盖都只按沪深
+子集核验；它不会把全 A (`all_a`) 的 BJ 历史证据缺口隐藏掉。`universe_ready`
+为真才表示该明确口径可以进入历史研究。
+
+## dataset_state() 与分钟重采样
+
+`dataset_state(dataset, config=..., data_root=...)` 返回 `DatasetState`，用于取得下游缓存身份。字段见 `query/state.py`，可用标准库 `dataclasses.asdict()` 转为字典；不要只用最大日期判断数据是否变化。
+
+`resample_trade_bars(frame, "5m")` 从完整 1m 成交数据重采样，支持 5m / 15m / 30m / 60m，按上午和下午分别对齐。它不覆写原始湖，缺组成分钟会报错，详见[查询指南](../datasets/query-guide.md#成交口径的分钟重采样)。
+
+## dataset_schema()
+
+```python
+def dataset_schema(dataset: str) -> dict[str, pl.DataType]
+```
+
+返回 `domain/schemas.py` 中注册的 Polars 类型映射。
+
+## 配置解析
+
+```python
+from cnequity.query.reader import resolve_config
+
+cfg = resolve_config(config=my_cfg)
+cfg = resolve_config(data_root="/path/to/lake")
+```
+
+优先级：`config` > `data_root` > 默认 toml 路径。
+
+## 示例
+
+### 后复权全市场
+
+```python
+bars = load(
+    "daily_bars",
+    start="2024-01-01",
+    end="2024-12-31",
+    adjust="hfq",
+    universe="all_a",
+    strict_universe=True,
+    strict_adj=True,
+)
+```
+
+### PIT 财报
+
+```python
+roe = load(
+    "financial_statement_items",
+    items=["roe"],
+    as_of="2024-04-30",
+    pit_mode="strict",
+)
+```
+
+### 指数行情
+
+```python
+idx = load("index_bars", start="2024-01-01", symbols=["000300.SH"])
+```
+
+### 显式 data_root（无需 toml）
+
+```python
+bars = load("daily_bars", start="2024-06-01", data_root="/data/cnequity")
+```
+
+## DuckDB 入口
+
+视图由 `query/views.py` 维护，复权列见 `daily_bars_adj`。SQL 不会自动替普通表查询附加 `load()` 的 strict PIT、股票池或缺因子拒绝逻辑；需要自行表达并验证，或优先用 `load()`。示例见 [DuckDB 与 Polars](../recipes/duckdb-polars.md)。
+
+## 相关文档
+
+- [查询指南](../datasets/query-guide.md)
+- [产品边界](../architecture/overview.md)

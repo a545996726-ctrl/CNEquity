@@ -1,0 +1,89 @@
+# 取数、速度与源保护
+
+先用 `cne init --profile sample` 离线验证安装；真实小样用 `--profile demo`。全市场初始化和历史回填可能持续数小时。不要用全市场任务测试网络，也不要通过不断重试健康探测判断是否恢复。
+
+```bash
+cne sources limits                               # 离线查看冷却、预算与续跑入口
+cne sources probe --list                         # 离线列出可探测名称
+cne sources probe --only tdx_protocol --vantage local
+cne backfill daily_bars --symbols 000001.SZ --start 2026-09-01 --end 2026-09-04 --plan
+```
+
+`--plan` 不联网、不创建湖或运行记录。普通数据集显示生效的源开关、共享冷却、限速/并发、修复模式、已知欠账与切片；显式股票日线范围另给冷缓存的最低请求数及全板块快照是否跳过。衍生品按交易所能力估算请求数。分页、连接发现、缓存和缺口会改变真实成本，未知数量显示为 `null`，不把一天说成一个请求。去掉 `--plan` 才执行。
+
+## 哪些 CLI 会联网
+
+下表覆盖全部叶命令。离线指不向数据源请求；写报告、索引、快照或配置仍属于本地写入。
+
+| 命令 | 联网与副作用 |
+|---|---|
+| `config create/validate/diff`、`doctor` | 离线；create 写个人配置，doctor 可能测试目录可写性 |
+| `init` | quick/full 抓历史；demo 抓小样；sample 离线合成；`--layout-only` 只创建本地目录和元数据 |
+| `run daily/events/retry` | 联网采集，写 staging、元数据并按步骤发布；retry 应指定失败 run/组 |
+| `run compact/clean` | 离线；compact 发布暂存数据，clean 删除符合条件的本地数据。clean 的 `--dry-run` 预览删除范围，不能与会改运行状态的 `--reconcile-runs` 同用 |
+| `backfill`、`delisted backfill` | 通常联网补历史；已完成的切片/证券按各数据集 checkpoint 续跑；退市范围使用 `backfill daily_bars --profile delisted`，旧 `delisted backfill` 给迁移提示；`backfill --plan` 离线。`--shfe-annual-archive` 是显式本地 ZIP 导入，不请求数据源，但会保存原包并发布缺字段行 |
+| `derive` | `adj_factors` 会刷新外部因子及备源；其他派生模式主要读本地数据、写派生结果或映射。不要把 derive 整体视为离线命令 |
+| `verify` | 默认检查本地覆盖；`--repair` 才执行联网回填 |
+| `audit` | run 审计可能向 NBS/交易所做启用的外部对照；`--full` 读取湖和已有证据，不等同于主动源探测 |
+| `query --sql` | 查询湖；可更新本地 DuckDB 视图 |
+| `query --dataset … --symbol …` | 缓存命中则读取；缺失/`--refresh` 时联网。受 `[on_demand].enabled` 和源开关约束；失败非零退出 |
+| `mcp`、`serve` | 默认查询湖；`mcp --live` 显式启用有限的源查询。不会自动运行全市场采集 |
+| `sources probe` | 逐源有界探测并写报告；`--list` 离线。DCE 官方、THS 目录、Baostock、国证历史文件仅在 `--only` 显式指定时主动探测；握手、分页、下载各计一次 |
+| `sources substitutes` | 默认读已有报告；`--probe` 才联网 |
+| `sources slo/resilience/policy/limits` | 读取本地源策略、历史探测、冷却、预算和统计；可写报告，不触发取数 |
+| `status`、`delisted status`、`profile list/show`、`contract show/diff/validate` | 本地状态、目录或契约检查 |
+| `decision-data payment-gaps/stock-terms/cash-rights` | 从已提交数据生成本地决策清单，不采集 |
+| `stats show/rebuild` | 读本地 Parquet/统计；可能刷新统计文件 |
+| `snapshot create/verify/restore/export/import`、`snapshot delta create/verify/apply` | 本地快照、校验、复制；不向行情源取数，restore/apply 会写目标 |
+| `ths-official capture/backfill/repair-bars/resource-sectors` | 可选凭证源；capture 写对照证据，backfill 补空缺。repair/resource 的默认预演**也会联网**，`--apply` 控制写入，不表示联网许可或配额无限 |
+
+## 数据源选择与请求成本
+
+选择顺序以数据口径、覆盖与可复查性为前提；同一厂商换域名不算独立备源。不能用快照冒充历史，也不能直接拼接不同厂商的板块指数。完整字段与例外见[数据源说明](../datasets/sources.md)和[数据集目录](../datasets/catalog.md)。
+
+| 数据族 | 当前获取方式 | 速度与风险取舍 |
+|---|---|---|
+| 沪深日线、指数、分钟、分笔 | TDX 连接复用与分页；日线按缺口使用 EM 等兜底 | 全市场当日优先利用交易所板块快照；显式历史或最多 4 只的日线回填跳过全板块快照，直接走限定范围；分钟按证券切片，避免按日期重复拉 tip 页 |
+| 北京日线 | BSE 官方当日板块快照；历史以 TDX/Sina 按覆盖路由，字段修复按来源证据执行 | 全市场当日按页取板块，避免逐证券多次请求；显式历史或最多 4 只的回填跳过全板块快照，不制造 Sina 未提供的成交额 |
+| 公司行动、复权、历史 ST/估值 | EM/TDX 公司行动；Sina 因子、Baostock 备援与历史证据；发行人公告补付款日 | 因子缓存只刷新需要更新的证券；Baostock 串行、批次休息；缺失事件仍保留缺口 |
+| 财务、股东、资金、新闻及快照 | EM datacenter / push2 / 新闻接口；THS 资金流另存独立表 | push2 快照复用、按源预算；快照丢失日不能靠今天重抓补成历史；财报按报告期×报表、前十大股东按季度切片；同一 run 续跑跳过已验证并暂存的完整时间窗。股东分页后期失败时，已验证页中的正向事实可以标记部分覆盖后发布，失败窗口留在欠账并重抓；不能把不同时点的页拼成完整快照 |
+| 公告、监管 | CNINFO 分页 POST，按日期与发布板块细分 | 有界重试、按窗口 checkpoint；不能靠更高并发解决页数上限 |
+| 融资融券、龙虎榜、大宗交易 | 融资以交易所为默认；龙虎榜/大宗交易 EM 主、交易所备 | 按日批量获取；交易所未发布字段留空，不能为了字段齐全伪造数据 |
+| 行业、指数成分、板块行情 | 当前快照 + SW/CNI 历史文件；THS 同口径板块 K 线 | 文件优先、目录缓存；SW 行业文件与 CNI 各指数调整文件校验后缓存 24 小时；指数/板块换源需显式审核 |
+| 宏观、商品研究序列 | EM、PBOC 发布文件、Sina 连续行情；NBS 做有限对照 | 文件和完整序列一次下载后切窗口；NBS PMI 索引校验后缓存 1 小时、已解析正文缓存 24 小时；主连研究序列不能代替真实合约生命周期 |
+| 期货、期权 | 交易所文件；DCE 的配置路由、Sina 有限分钟窗口 | 按交易所文件缓存、完成收据和缺口续跑；不突破源历史边界，见[衍生品指南](../recipes/derivatives.md) |
+| 可选 keyed API | `ths_official` / Tushare，仅启用后调用 | 不成为免费核心链的强依赖；大文件优先于逐标的，公开 THS 网站与 keyed 服务独立限流 |
+
+## 共享限速与冷却
+
+请求同时受两种约束：每源最大在途数、相邻请求的最短间隔。先取得并发名额，再在实际网络调用前等待间隔，慢请求结束不会释放一批提前取得时隙的请求。同一公共站点的端点别名还共用源族基础间隔，避免各守一次间隔却合计超速；更慢的页面/历史接口仍单独守自己的间隔，不拖慢同厂商的普通接口。等待者每次醒来重新检查共享时间，能看到其他进程后来设置的冷却。
+
+HTTP `429` 与没有认证质询的 `403`、`412`、`456` 会在已接入的请求边界记录至少 300 秒的共享冷却；服务端 `Retry-After` 更长时按它执行，支持秒数与 HTTP 日期。`401` 或带 `WWW-Authenticate` 的 `403` 按凭证问题交由调用者报告，不把另一套凭证所在的整个出口封住。普通 `404` 不作为封禁。预期 JSON 的端点遇到明确验证码/挑战 HTML，以及东财 datacenter 的“请求过于频繁”和 keyed THS 的业务限流码，也会冷却。
+
+一般 `5xx` 按服务端临时故障走适配器已有的有界重试与退避，不直接判为整个出口遭封禁；东财 host 熔断还有单独的、较严格的 5xx 规则。真实源请求量可能包含连接发现或分页，不能只凭 HTTP 状态推断 IP 风险。
+
+冷却期内后续请求在本地失败。期满后，同一源族只放行一个恢复请求；失败则重新冷却，成功才放开。公开 THS 页面返回 401 时也作为该公共站点的拒绝处理，不与需要凭证的 `ths_official` 混淆。Baostock 的明确黑名单业务码会触发至少 40 分钟共享冷却，避免重登与换数据集继续请求。可选 Tushare 的明确业务限流消息和 keyed THS 的 HTTP 429 也不连续重试。由适配器识别的业务拒绝才会进入此流程，无法保证识别所有 HTTP 200 中的反爬页面。每次拒绝保留失败/缺口以供续跑。
+
+`cne sources limits` 只读取账本，显示配置值与当日跨进程实际生效的最严间隔/并发、恢复探测状态、东财剩余预算，以及最近一次 run 已记录的请求与重试；交易所期货文件的逐主机 lane 也单独列出。`metered_attempts_today` 在共享限流放行后、网络调用前按源族和 lane 记一次；本地冷却或禁用拒绝不计。它覆盖已接入的请求作用域，包括 TDX 连接发现和分页，但一个作用域可能发送多次底层请求，不能把它当精确 HTTP/TCP 包数。`wire_responses_today` 汇总已接入响应钩子的返回次数、HTTP 状态、解码后正文大小和端点路径哈希；不保存查询参数，也不计没有返回响应的请求。`cache_reuse_today` 记录已接入响应缓存的复用次数，不算新源观察。`request_events_today` 记录已标记的期货文件、BSE、东财 datacenter 与 Tushare 的额外重试，以及东财直连 fallback；其他路径尚未统一标记。运行 `metrics.requests` 仍只覆盖适配器传入的遥测，部分预取和实际传输字节尚未统一，不能据此宣称全项目真实请求降幅。
+
+`[sources.eastmoney].daily_budget` 可为 push2 与 datacenter 设置同一出口的共享日上限；默认 0 只计数，部署前应根据实际请求账本选择保守值。两个 lane 的间隔和各自预算仍独立生效。
+
+这遵循 HTTP 对限流与重试时间的表达方式；300 秒是本项目保守策略，**不是源方公布的配额，也不保证 IP 永不被封**。[HTTP 429](https://www.rfc-editor.org/rfc/rfc6585.html#section-4)、[Retry-After](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3)。
+
+已有的 EM push2 当日熔断/预算、datacenter 熔断，以及衍生品主机 challenge 熔断继续生效。东财的日预算与熔断现在共用出口账本；首次使用时会合并本湖当天的旧账本。多个进程设定不同时，选已见过的最严格正数预算与熔断阈值。冷却不会清除这些更严格的限制。不要删除状态文件、轮换 IP、增加 worker 或关闭熔断来应对拒绝；暂停受影响源，等冷却后做一次小范围验证，并修复失败范围。
+
+默认限流与冷却放在 `{data.root}/meta/rate_limits`。**同一个出口上多个湖/CLI 进程必须共用目录**：
+
+```bash
+export CNE_RATE_LIMIT_ROOT="$HOME/.local/state/cnequity/egress"
+```
+
+HTTP、TDX 和 EM 日预算/熔断都读取这个变量。所有进程应使用相同、保守的源设置；目录要支持可靠的本地文件锁。这个机制不协调不同机器，也不限制浏览器或其他程序的流量；同一出口优先用一个采集调度器。
+
+## 操作顺序
+
+1. 离线 `doctor`、`config validate`、`config diff`；先确认配置与绝对 `data.root`，再看 `backfill --plan`。
+2. 小范围验证可达性和数据口径；范围参数不能是空字符串。健康探测源名可用 `--list` 查询，拼错会报错。
+3. 日常用增量 `run daily` / `run events`；只为失败窗口回填。`verify --repair`、`--force`、`--refresh` 的成本不同，执行前看帮助。
+4. 被拒时保留日志、run ID 和 checkpoint，暂停同源任务。恢复后续跑缺口，避免重复初始化或全量扫描。
+5. 性能比较记录源、范围、缓存冷热、请求数和耗时；个人出口观测放本地过程文档，不转化成公共速率保证。

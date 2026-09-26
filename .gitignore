@@ -60,3 +60,6 @@ AGENTS.md
 
 # Operator journals, campaign scripts and private research notes (see private/README.md).
 /private/
+
+# Local validation reports (CI may still generate these as artifacts).
+/evidence/

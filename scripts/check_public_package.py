@@ -23,6 +23,7 @@ def check_members(names: list[str]) -> list[str]:
         path = PurePosixPath(name)
         if (
             "private" in path.parts
+            or "evidence" in path.parts
             or path.name == "AGENTS.md"
             or path.name.startswith(".env")
             or path.name.endswith(".local.toml")

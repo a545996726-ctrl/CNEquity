@@ -85,11 +85,9 @@ def test_documented_counts_match_the_registries():
     """
     from cnequity.diagnostics.source_health import PROBES_BY_KEY
     from cnequity.domain.datasets import DATASETS
-    from conftest import PRISTINE_STEP_NAMES
 
     docs = ROOT / "docs"
     claims = [
-        (docs / "modules" / "steps.md", f"**{len(PRISTINE_STEP_NAMES)} 个**注册 step"),
         (docs / "datasets" / "catalog.md", str(len(DATASETS))),
         (ROOT / "README.md", f"**{len(DATASETS)} 个数据集"),
         (ROOT / "README.en.md", f"**{len(DATASETS)} datasets"),

@@ -1,0 +1,481 @@
+# CLI 参数与默认值
+
+由 `scripts/sync_cli_options.py` 从 Click 注册表生成。命令用途、副作用与操作场景分别见 [CLI 参考](cli.md) 和 [副作用清单](cli-surface.md)。
+
+## `cne audit`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--run-id` | `—` | — |
+| `--full` | `False` | 整个湖的健康快照（当前状态 + 新鲜度），而不是某一次 run 的文件。 |
+| `--research-start` | `—` | 严格校验从这一天开始的研究窗口（需要 --full）。 |
+| `--quality-only` | `False` | 配合 --full：只按质量 error 判门禁；调度新鲜度请另外用 status 检查。 |
+| `--research-end` | `—` | 研究窗口终点（默认取最新的 daily_bars；需要 --research-start）。 |
+| `--research-universe` | `all_a` | --full 检查的历史研究 universe。 |
+
+## `cne backfill`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `dataset` | `—` | 必填；位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--profile` | `default` | daily_bars 可选 delisted：只回填已确认退市名录，沿用独立发现证据。 |
+| `--shfe-annual-archive` | `—` | 仅期货/期权日线：从已核验格式的本地上期所年度 ZIP 离线导入。 |
+| `--archive-year` | `—` | 年度 ZIP 对应的交易年份。 |
+| `--accept-partial-fields` | `False` | 明确接受年度包缺少日文件独有字段；已有完整日线不会被覆盖。 |
+| `--archive-url` | `—` | 可选：该 ZIP 在上期所网站上的原始 HTTPS 链接，仅写证据。 |
+| `--archive-downloaded-at` | `—` | 可选：已知的原始下载时间，带时区 ISO 8601。 |
+| `--plan` | `False` | 只输出来源、范围和抓取方式；衍生品另给请求预算。不取数、不写湖。 |
+| `--exchange` | `—` | 仅衍生品：限定交易所，可重复。INE 归入 SHF 路由；2018 期货另取 INE 日文件。 |
+| `--refresh` | `False` | 仅衍生品日线：忽略完成收据与响应缓存，重新核对指定区间；不绕过熔断。 |
+| `--retry-failed` | `False` | 续跑 sector_bars 回填（跳过 checkpoint 里已写过的板块）。 |
+| `--force` | `False` | 清掉 sector_bars 回填 checkpoint，重抓全部板块。 |
+| `--start` | `—` | 按日期推进的回填（margin_trading、financial_statement_items 报告期推进、minute_bars）及衍生品日线的区间起点（YYYY-MM-DD），也用来收窄 sector_bars 的 K 线窗口（默认往前 400 天）。有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。 |
+| `--end` | `—` | 按日期推进的回填（margin_trading、financial_statement_items 报告期推进）与 sector_bars 的区间终点（YYYY-MM-DD，默认今天）。 |
+| `--outstanding` | `False` | 只修复被容忍缺口欠下的那些 key，范围和窗口都取自欠账台账，不看 --symbols/--start/--end。补上的 key 会销账，仍然缺的继续欠着。 |
+| `--symbols` | `—` | 限定范围的标的列表，逗号分隔：用于 intraday、trading_status、corporate_actions 的限定回填，以及 financial_statement_items、daily_bars 的限定修复。trading_status 的 checkpoint 与覆盖证据会记下确切范围；daily_bars 会把这个显式范围写进 backfill 元数据。 |
+| `--workers` | `1` | 仅 margin_trading 的日期推进并发数。每个请求仍然走配置里共享的源限流器；其它数据集必须为 1。 |
+| `--margin-source` | `—` | 仅 margin_trading：本次回填使用的来源，不修改配置文件或来源限速。 |
+| `--payment-date-repair` | `False` | 仅 corporate_actions：先应用已审发行人公告，再用 Baostock 匹配真实派息日；早于除息日的付款日视为未知。 |
+| `--issuer-notice-repair` | `False` | 仅 corporate_actions：只用发行人实施公告（已审清单、巨潮、北交所）修复付款日和已审送转条款；未匹配事件保留缺口，不请求 Baostock。 |
+| `--baostock-repair` | `False` | 仅 corporate_actions：用 Baostock 显式修复已退市的沪深标的。 |
+| `--ths-repair` | `False` | 仅 corporate_actions：用同花顺显式修复已退市的北交所标的。 |
+| `--eastmoney-bj-repair` | `False` | 仅 corporate_actions：通过现行的 920xxx 东财代码修复北交所老代码。 |
+| `--eastmoney-date-repair` | `False` | 仅 corporate_actions：按 --ex-dates 指定的除权日向东财逐日要历史除权行。回补路径的主源是 TDX，东财只有日更的等值过滤能取到 2015-09-29 以前的行。 |
+| `--ex-dates` | `—` | 配合 --eastmoney-date-repair：逗号分隔的除权日 YYYY-MM-DD。 |
+| `--bse-tip-repair` | `False` | 仅 daily_bars：用北交所官网补已有交易日的 BJ 成交额，不重抓 Sina。 |
+| `--bj-amount-repair` | `False` | 仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。 |
+| `--tdx-volume-repair` | `False` | 仅 daily_bars：重读 TDX，只改写已存 TDX 行的成交量（修 2026-09-17 前的解码错误）；价格须一致，64.5 元以下被放大的成交额一并改写；不新增行。需要 --symbols 和 --start/--end。 |
+| `--fill-em-outage` | `False` | 仅 valuation_metrics：东财快照中断时，用东财 datacenter 估值报表补东财最后一个完整日之后、今天之前的 --start/--end 窗口；全市场取全才写入。 |
+
+## `cne config`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `action` | `—` | 必填；位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--force` | `False` | action=create 时覆盖已存在的配置文件。 |
+| `--data-root` | `—` | action=create 时设置 [data].root（默认把 ./data/cnequity 解析成绝对路径）。 |
+
+## `cne contract diff`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `old_contract` | `—` | 位置参数 |
+| `new_contract` | `—` | 位置参数 |
+| `--old` | `—` | 基线契约文件路径。 |
+| `--new` | `—` | 候选契约文件路径。 |
+| `--from` | `—` | --old 的别名。 |
+| `--to` | `—` | --new 的别名。 |
+| `--json` | `False` | 输出机器可读的 JSON。 |
+| `--allow-breaking` | `False` | 即使发现破坏性变更也返回退出码 0。 |
+
+## `cne contract show`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `dataset` | `—` | 位置参数 |
+| `--dataset` | `—` | 数据集名（也可以直接作为参数传）。不给则输出完整契约。 |
+| `--out, --output, --path` | `-` | 把 JSON 写到这个路径而不是标准输出；'-' 表示打印。 |
+| `--json` | `False` | 输出机器可读的 JSON（默认）。 |
+
+## `cne contract validate`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `contract_path` | `—` | 位置参数 |
+| `--path` | `—` | 契约 JSON 路径（也可以直接作为参数传）。 |
+| `--json` | `False` | 输出机器可读的 JSON。 |
+| `--against-registry` | `False` | 要求文件里的契约与当前的 DATASETS / SCHEMAS / PRIMARY_KEYS 完全一致。 |
+
+## `cne decision-data cash-rights`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--start` | `2016-01-01` | — |
+| `--end` | `—` | 默认今天；配置了 [research] holdout_start 时默认其前一天。 |
+| `--output-dir` | `—` | — |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+
+## `cne decision-data payment-gaps`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--start` | `2016-01-01` | — |
+| `--end` | `—` | 默认今天；配置了 [research] holdout_start 时默认其前一天。 |
+| `--output-dir` | `—` | — |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+
+## `cne decision-data stock-terms`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--start` | `2016-01-01` | — |
+| `--end` | `—` | 默认今天；配置了 [research] holdout_start 时默认其前一天。 |
+| `--output-dir` | `—` | — |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+
+## `cne delisted backfill`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--since` | `2016-01-01` | 湖窗口起点。 |
+
+## `cne delisted status`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--since` | `2016-01-01` | 湖窗口起点。 |
+| `--sample` | `15` | 打印多少行明细。 |
+
+## `cne derive`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `adj_factors` | 位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--full` | `False` | 重写 adj_factors / industry_index / option_greeks 的全部分区（默认只补增量）。 |
+| `--start` | `—` | industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之后的。 |
+| `--end` | `—` | industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之前的。 |
+| `--apply` | `False` | bse_code_migration：真正重写分区（默认只报告）。 |
+
+## `cne doctor`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--json` | `False` | 输出机器可读的 JSON。 |
+
+## `cne init`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--profile` | `quick` | 建多大。demo = 用真实数据源抓几只票，sample = 同样的形状但离线且确定 —— 两者都不是一个市场。quick = 全市场标的、最近 3 年；full = 全市场标的、从 2016-01-01 起（通常需要更多分页）。以后可以用 `cne backfill daily_bars` 补深。 |
+| `--symbols` | `600519.SH,000001.SZ,000858.SZ,300750.SZ,601318.SH` | demo/sample：要抓的标的，逗号分隔（有意保持很少）。 |
+| `--days` | `30` | demo/sample：daily_bars 大致抓最近多少个交易日。 |
+| `--data-root` | `data/cnequity-demo` | demo/sample：独立的湖根目录（不要拿去跑全市场 init）。 |
+| `--config-out` | `configs/cnequity.demo.toml` | demo/sample：把那份小配置写到哪，供后续 `cne query` 使用。 |
+| `--force` | `False` | demo/sample：允许覆盖内容不同的已有 --config-out；默认拒绝并保留原文件。 |
+| `--intraday` | `False` | demo/sample：同一批标的额外抓 1 分钟线（最多 5 个交易日）并打印一个交易日，让 bar_time 的口径看得见。 |
+| `--research` | `False` | demo/sample：额外用 Sina 派生 hfq 复权因子，并打印未复权 / 复权收益对照（较慢；需要访问 Sina）。 |
+| `--layout-only` | `False` | 只建目录、manifest 和 DuckDB 视图，跳过 init 各阶段。 |
+| `--trade-date` | `—` | init 各阶段的 as-of 交易日（YYYY-MM-DD）；默认今天。 |
+| `--resume` | `False` | 续跑最近一次没跑完的 init run（重试失败批次 + 补缺失阶段）。 |
+| `--run-id` | `—` | 续跑指定的 init run_id（隐含 --resume）。 |
+| `--keep-going` | `False` | 某个阶段失败后继续往下跑，而不是停下来。 |
+| `--since` | `—` | 显式指定历史起点（YYYY-MM-DD）；覆盖 --profile。 |
+| `--quiet` | `False` | 只留 warning 及以上，不打逐批进度。 |
+
+## `cne mcp`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--live` | `False` | 湖里没有的数据就按需向源头取，并且不落盘。只支持标的查找和未复权日线；其它工具宁可拒绝，也不会在没有复权、universe 和 PIT 的情况下作答。 |
+
+## `cne profile list`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--include-compatibility, --official-only` | `True` | 列表里包含历史遗留的 universe 别名。 |
+
+## `cne profile show`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `--symbol` | `—` | 把 profile 绑定到具体标的，并附带 concrete_scope_hash。 |
+
+## `cne query`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--sql` | `SELECT COUNT(*) AS n FROM daily_bars` | — |
+| `--dataset` | `—` | 按需抓取的数据集名 |
+| `--symbol` | `—` | 按需抓取的标的代码 |
+| `--refresh` | `False` | 抓取前先刷新按需缓存（需要同时给 --dataset 和 --symbol）。 |
+
+## `cne run clean`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--dry-run` | `False` | 只报告可以删的 staging，不真删。 |
+| `--orphan-retention-days` | `7` | 删掉超过这么多天、且 manifest 里没有记录的孤儿 staging。 |
+| `--snapshot-retention-days` | `14` | 删掉超过这么多天的 meta/source_snapshots run_id 目录（每个数据集 / 源的最新一份始终保留）。 |
+| `--force` | `False` | 连还不满足清理条件的 staging 也删（批次没跑完、和/或没 compact 过）。成功的抓取批次会被降级为 failed，好让 `cne run retry` 重抓（数据是重抓不是丢失，但重试会变成整段重跑）。成功但没 compact 的 run 不要用它 —— 先跑 `cne run compact --run-id`。 |
+| `--keep-revision-generations` | `5` | meta/revisions/data 下每个数据集保留这么多代已提交版本，更老的代只删存储字节。receipt 始终保留，current.json 指向的那一代永远不删。0 表示不清理。 |
+| `--log-retention-days` | `30` | 删掉超过这么多天的 `logs/cne-*.log`。每次调用都会写一份，没有别的东西会清理它们。0 表示不清理。 |
+| `--reconcile-runs` | `False` | 清理前，把卡在 'running'（worker 崩溃）的 run 标成 failed。 |
+| `--reconcile-after-seconds` | `—` | 只对静默超过这么多秒的 run 做上面的对账（默认取 [orchestrator].batch_stale_seconds）。 |
+
+## `cne run compact`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--run-id` | `—` | — |
+
+## `cne run daily`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--groups` | `—` | 把 --stale-only 限定在这些 daily 调度组内（逗号或空格分隔）。 |
+| `--group` | `—` | 调度组：core、capital、signals、fundamentals、macro_risk、research、intraday、ticks |
+| `--all-groups` | `False` | 按配置顺序串行跑完全部调度组，某个组失败也继续往下跑。一条命令跑完一天，给没有仓库里 scripts/daily_pipeline.sh 的人用。数据集全部关闭的组会跳过。 |
+| `--trade-date` | `—` | as-of 交易日 YYYY-MM-DD（默认今天）。周末 / 节假日补跑时用。 |
+| `--backfill` | `False` | 用 backfill 语义跑：跳过交易日门禁和每个 step 自己的增量窗口，改为抓配置里 backfill scope 指定的窗口。用于补跑调度漏掉的某一天；日常调度从不带这个参数。 |
+| `--repair-gaps` | `False` | 在 daily / stale 跑之前，先修复已验证、且有诚实来源的历史缺口。 |
+| `--quiet` | `False` | 只留 warning 及以上，不打逐步进度。 |
+| `--stale-only` | `False` | 只重抓仍然落后于最后交易日的数据集。挂在主 pipeline 几小时之后跑：snapshot 类数据集一旦因源端中断丢掉当天窗口，第二天就补不回来了。 |
+| `--snapshots-only` | `False` | 配合 --stale-only：只重抓 snapshot 类数据集；历史类留给下一次日更按日期补。 |
+
+## `cne run events`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--group` | `—` | [job.events.groups] 里的某一个组（默认按顺序跑全部）。 |
+| `--trade-date` | `—` | as-of 自然日 YYYY-MM-DD（默认今天），含周末与节假日。 |
+| `--quiet` | `False` | 只留 warning 及以上，不打逐步进度。 |
+
+## `cne run retry`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--run-id` | `—` | 重试指定的一次 run。 |
+| `--failed-groups` | `False` | 重试每个 daily 调度组最近一次失败的 run。 |
+
+## `cne serve`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--host` | `127.0.0.1` | — |
+| `--port` | `8787` | — |
+| `--token` | `—` | 要求这个 bearer token（或 ?token=）。--host 不是回环地址时必须设置。 |
+
+## `cne snapshot create`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `--research` | `False` | 包含价格、因子、身份、状态、日历及研究覆盖证据；缺少依赖时报错。 |
+| `--dataset` | `—` | 必填；要包含的数据集（可重复）。快照永远是显式指定的，不会是整个湖。 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 快照放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot delta apply`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `target` | `—` | 必填；位置参数 |
+| `--dry-run` | `False` | 只校验前置条件，不改动 TARGET。 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 增量包放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot delta create`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `--from` | `—` | 基线湖根目录。目标根目录会与它逐字节比对。 |
+| `--to` | `—` | 目标湖根目录；默认取配置里当前生效的根目录。 |
+| `--from-revision` | `—` | 用目标里已提交的 revision 作为基线前置条件。 |
+| `--dataset` | `—` | 要包含的数据集（可重复）。不给则自动发现两个根目录里都有的数据集。 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 增量包放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot delta verify`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 增量包放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot export`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `destination` | `—` | 位置参数 |
+| `--compression` | `auto` | 归档编码；auto 优先 tar.zst，不行则退回 tar.gz。 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 快照放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot import`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `archive` | `—` | 必填；位置参数 |
+| `--name` | `—` | 导入后的快照名；默认取归档文件名。 |
+| `--overwrite` | `False` | 仅在归档校验通过之后，才替换已存在的同名快照。 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 快照放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot restore`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `target` | `—` | 必填；位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 快照放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne snapshot verify`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `—` | 必填；位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--snapshot-root` | `—` | 快照放在哪；默认是数据根目录下的 meta/snapshots。 |
+
+## `cne sources limits`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+
+## `cne sources policy`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `source` | `—` | 位置参数 |
+| `--profile` | `—` | — |
+| `--redistribution` | `False` | — |
+
+## `cne sources probe`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--vantage` | `local` | 这次探测是从哪儿跑的 —— 'cn'、'overseas'，或你自己用的任何标签。有几个源拒绝非大陆出口，所以没有这个标签的结果没法解读。 |
+| `--only` | `—` | 要探测的 key，逗号分隔；高成本/已受挑战的端点仅在显式列出时探测。 |
+| `--stale-only` | `False` | 复用 12 小时内已校验的采集证据，只主动探测缺少新证据的端点。 |
+| `--list` | `False` | 离线列出探测源名称，不需要配置。 |
+| `--out` | `—` | JSON 报告写到哪。默认写到湖内的 meta/source_health/<vantage>.json，`cne serve` 也从那里读。 |
+
+## `cne sources resilience`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--out` | `—` | — |
+| `--enforce` | `False` | 核心数据集没有独立备份时退出 1。 |
+| `--with-availability` | `False` | 把实测的探测可用率接到每个故障域上（会读湖）。 |
+| `--window-days` | `30` | — |
+
+## `cne sources slo`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--window-days` | `30` | — |
+| `--minimum-observations` | `10` | — |
+| `--enforce` | `False` | 关键源的 SLO 未达标时退出 1。 |
+
+## `cne sources substitutes`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--vantage` | `local` | 读哪个出口位置（vantage）的报告。 |
+| `--probe, --no-probe` | `False` | 现在实测，而不是读已存的报告。请求和 `sources probe` 相同。 |
+| `--json` | `False` | 输出机器可读的 JSON。 |
+
+## `cne stats rebuild`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--dataset` | `—` | 只重算这些数据集（可重复）。其它数据集的行保持不变。 |
+| `--if-stale` | `False` | 除非统计建好之后又跑过采集，否则什么都不做。可以安全地挂定时器。 |
+| `--json` | `False` | 以 JSON 打印结果。 |
+
+## `cne stats show`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--dataset` | `—` | 某一个数据集的逐分区明细。 |
+| `--by-source` | `False` | 改为按 source / data_version 分组。 |
+| `--json` | `False` | 输出机器可读的 JSON。 |
+
+## `cne status`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--run` | `—` | 要看的 run id，或 'latest'（默认）。包含各数据集 stage 的结果。 |
+| `--datasets` | `False` | 逐数据集的新鲜度：覆盖区间、水位，以及相对最后交易日是否陈旧。 |
+| `--all-columns` | `False` | 配合 --datasets：打印数据集清单的全部列，而不只是新鲜度。 |
+| `--groups` | `—` | 配合 --datasets：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，但不会让门禁失败。截面检查同样受它约束——daily_bars 归哪个组，它的覆盖率就归谁判。未跑完的 init 不属于任何调度组，始终判失败。 |
+| `--scope, --no-scope` | `True` | 配合 --datasets：是否做最新交易日的标的截面校验。它要读 daily_bars 的 tip 分区、instruments 和 trading_status，比单纯看水位贵；--no-scope 让这条命令回到纯元数据。 |
+
+## `cne ths-official backfill`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--start` | `2016-01-01` | 起始报告期。 |
+| `--end` | `2024-12-31` | 结束报告期。 |
+| `--chunk-size` | `200` | 每个 staging 批次放多少只证券。 |
+| `--workers` | `4` | 并发请求数。 |
+| `--symbols` | `—` | 用逗号分隔的标的列表代替整个市场。跑一遍全市场要 78 分钟，为几只因偶发传输错误丢掉的票再跑一遍不值 —— 收尾 JSON 会在 `failed_symbols` 里点名它们。 |
+
+## `cne ths-official capture`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--what` | `all` | 抓取哪一种对端快照。 |
+| `--days` | `45` | K 线窗口，按自然日算。 |
+| `--sample` | `400` | K 线抽样多少只证券。 |
+
+## `cne ths-official repair-bars`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--start` | `2005-01-01` | — |
+| `--end` | `2015-12-31` | — |
+| `--apply` | `False` | 真正写入。不加它只报告差异，不改任何东西。 |
+| `--adjudicator` | `—` | 来自独立源的 (symbol, trade_date, close) parquet。 |
+| `--diff-out` | `—` | 把有争议的行写到这里。 |
+| `--workers` | `4` | — |
+
+## `cne ths-official resource-sectors`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--start` | `2022-01-04` | 服务起点。 |
+| `--end` | `—` | 默认今天。 |
+| `--apply` | `False` | 真正写入。不加它只抓取并报告，不改任何东西。 |
+| `--workers` | `4` | — |
+
+## `cne verify`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--derivatives` | `False` | 只读验收衍生品研究窗口；需 --dataset、--start、--end。 |
+| `--bars` | `False` | 改为检查「证券 × 交易日」，含窗口内一行都没有的证券。需要 --start。 |
+| `--runs` | `False` | 改为检查连续交易日的运行证据，不补任何缺口。 |
+| `--dataset` | `—` | 只校验这些数据集（逗号分隔）；默认校验注册表里的全部。 |
+| `--repair` | `False` | 把能补的缺口跑一遍回填，按数据集从新到旧。 |
+| `--kind` | `—` | 只看这些缺口类型：empty,stale,interior,shallow。 |
+| `--start` | `—` | 配合 --bars/--derivatives：覆盖窗口起点（含）。 |
+| `--end` | `—` | 覆盖窗口终点；--bars 默认上一个完整交易日，--derivatives 必填。 |
+| `--days` | `—` | 配合 --runs：要求连续多少个交易日（默认 20）。 |
+| `--as-of` | `—` | 配合 --runs：截止日期 YYYY-MM-DD（含）。 |
+| `--enforce` | `False` | 配合 --runs：连续天数门禁没过就退出 1。 |
