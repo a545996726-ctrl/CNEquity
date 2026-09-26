@@ -494,7 +494,14 @@ def _safe_lake_relative(raw: str) -> Path:
     if path.parts[0] == "meta":
         allowed = {"state", "revisions", "adj_factors_cache", "applied-deltas", "raw"}
         if len(path.parts) < 2 or path.parts[1] not in allowed:
-            raise ValueError(f"unsupported lake metadata path: {raw}")
+            from cnequity.storage.research_inputs import CONTEXT_PATH, RESEARCH_METADATA
+
+            relative = Path(*path.parts[1:])
+            if relative != CONTEXT_PATH and not any(
+                relative == Path(prefix) or Path(prefix) in relative.parents
+                for prefix in RESEARCH_METADATA
+            ):
+                raise ValueError(f"unsupported lake metadata path: {raw}")
     return path
 
 
@@ -1048,7 +1055,7 @@ class SnapshotStore:
             meta_root=self.config.meta_root,
         )
 
-    def create(self, name: str, datasets: list[str]) -> Path:
+    def create(self, name: str, datasets: list[str], *, research: bool = False) -> Path:
         """Copy selected datasets into a new immutable snapshot directory.
 
         Snapshot creation is a lake read transaction, not just a collection of
@@ -1064,6 +1071,10 @@ class SnapshotStore:
         # be followed merely as a side effect of taking a read lock.
         _reject_symlink_path(self.config.meta_root, label="metadata root")
         _reject_symlink_path(self.config.data_root, label="data root")
+        if research:
+            from cnequity.storage.research_inputs import RESEARCH_DATASETS
+
+            datasets = sorted(set(datasets) | RESEARCH_DATASETS)
         with lake_mutation_lock(self.config.meta_root, blocking=True):
             return self._create_locked(name, datasets)
 
@@ -1096,6 +1107,7 @@ class SnapshotStore:
         records: list[SnapshotFile] = []
         runtime_state: dict[str, Any] = {}
         try:
+            research_inputs = self._capture_research_inputs(temp, selected, records)
             dataset_states = {dataset: state.get_payload(dataset) for dataset in selected}
             for dataset in selected:
                 layer, source = self._source_root(dataset)
@@ -1334,8 +1346,13 @@ class SnapshotStore:
                 },
                 "lineage": runtime_lineage(self.config),
                 "runtime_state": runtime_state,
+                "research_inputs": research_inputs,
                 "files": [asdict(item) for item in records],
             }
+            # Evidence publishers can run independently of the compact lock.
+            # Reject a changing set instead of shipping a silently mixed read.
+            if research_inputs["source_fingerprint"] != self._research_evidence_identity():
+                raise RuntimeError("research evidence changed during snapshot; retry creation")
             write_json_atomic(temp / "manifest.json", manifest, indent=2, ensure_ascii=False)
             # Do not publish a package whose denormalised state disagrees with
             # its pointer/receipt, even if all copied bytes are individually
@@ -1353,6 +1370,66 @@ class SnapshotStore:
             shutil.rmtree(temp, ignore_errors=True)
             raise
         return destination / "manifest.json"
+
+    def _research_evidence_identity(self) -> dict[str, str]:
+        from cnequity.storage.research_inputs import CONTEXT_PATH, RESEARCH_METADATA
+
+        identity = {}
+        for relative in (*RESEARCH_METADATA, CONTEXT_PATH.as_posix()):
+            root = self.config.meta_root / relative
+            _reject_symlink_path(root, label="research evidence")
+            if not root.exists():
+                continue
+            if root.is_dir():
+                entries, unsafe = _tree_files_no_follow(root, reject_hardlinks=True)
+                if unsafe:
+                    raise ValueError(f"unsafe research evidence files: {sorted(unsafe)}")
+                paths = [root / item for item in sorted(entries)]
+            else:
+                paths = [root]
+            for path in paths:
+                _reject_link_or_non_regular(path, hardlink=True)
+                identity[path.relative_to(self.config.meta_root).as_posix()] = _sha256(path)
+        return identity
+
+    def _capture_research_inputs(self, target: Path, selected: list[str], records: list) -> dict:
+        from cnequity.storage.research_inputs import (
+            CONTEXT_PATH,
+            RESEARCH_DATASETS,
+            research_context,
+        )
+
+        identity = self._research_evidence_identity()
+        paths = []
+        for relative, digest in identity.items():
+            if relative == CONTEXT_PATH.as_posix():
+                continue
+            stored = target / "meta" / relative
+            stored.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.config.meta_root / relative, stored)
+            if _sha256(stored) != digest:
+                raise RuntimeError("research evidence changed while copying")
+            paths.append(stored)
+        context = target / "meta" / CONTEXT_PATH
+        write_json_atomic(context, research_context(self.config, selected), indent=2)
+        paths.append(context)
+        for stored in paths:
+            records.append(
+                SnapshotFile(
+                    dataset=selected[0],
+                    layer="meta",
+                    path=stored.relative_to(target).as_posix(),
+                    size_bytes=stored.stat().st_size,
+                    sha256=_sha256(stored),
+                )
+            )
+        return {
+            "schema_version": 1,
+            "context_path": (Path("meta") / CONTEXT_PATH).as_posix(),
+            "files": [path.relative_to(target).as_posix() for path in paths],
+            "dependency_closure": RESEARCH_DATASETS <= set(selected),
+            "source_fingerprint": identity,
+        }
 
     def _manifest(self, name: str) -> tuple[Path, dict]:
         snapshot = self.path(name)
@@ -1435,6 +1512,52 @@ class SnapshotStore:
             mismatched.append(path)
         mismatched.extend(_manifest_contract_issues(manifest))
         mismatched.extend(_manifest_state_issues(snapshot, manifest))
+        research = manifest.get("research_inputs")
+        if research is not None:
+            if not isinstance(research, Mapping) or research.get("schema_version") != 1:
+                mismatched.append("research_inputs")
+            else:
+                declared = research.get("files", [])
+                if (
+                    not isinstance(declared, list)
+                    or not all(isinstance(item, str) for item in declared)
+                    or not set(declared) <= seen
+                ):
+                    mismatched.append("research_inputs.files")
+                if research.get("context_path") not in seen:
+                    mismatched.append("research_inputs.context_path")
+                from cnequity.storage.research_inputs import (
+                    CONTEXT_PATH,
+                    RESEARCH_DATASETS,
+                    load_research_context,
+                )
+
+                expected_context = (Path("meta") / CONTEXT_PATH).as_posix()
+                if research.get("context_path") != expected_context:
+                    mismatched.append("research_inputs.context_path")
+                fingerprint = research.get("source_fingerprint", {})
+                if not isinstance(fingerprint, Mapping):
+                    mismatched.append("research_inputs.source_fingerprint")
+                    fingerprint = {}
+                for relative, digest in fingerprint.items():
+                    if not isinstance(relative, str) or not isinstance(digest, str):
+                        mismatched.append("research_inputs.source_fingerprint")
+                        continue
+                    if relative == CONTEXT_PATH.as_posix():
+                        continue
+                    path = _snapshot_meta_path(
+                        snapshot, str(Path("meta") / relative), label="research evidence"
+                    )
+                    if not path.is_file() or _sha256(path) != digest:
+                        mismatched.append(f"research_inputs:{relative}")
+                if research.get("dependency_closure") and not RESEARCH_DATASETS <= set(
+                    manifest.get("datasets", [])
+                ):
+                    mismatched.append("research_inputs.dependency_closure")
+                try:
+                    load_research_context(Config(data_root=snapshot))
+                except (ValueError, OSError, TypeError):
+                    mismatched.append("research_inputs.context")
         # A malformed manifest field is reported once even when it also caused
         # an ordinary file-set mismatch.  Stable diagnostics make release and
         # restore tooling easier to consume.
@@ -2179,6 +2302,23 @@ class SnapshotStore:
                         dataset,
                         "meta",
                     )
+        if datasets:
+            from cnequity.storage.research_inputs import CONTEXT_PATH, RESEARCH_METADATA
+
+            for relative in (*RESEARCH_METADATA, CONTEXT_PATH.as_posix()):
+                source = root / "meta" / relative
+                _reject_symlink_path(source, label="research evidence")
+                if not source.exists():
+                    continue
+                if source.is_dir():
+                    entries, unsafe = _tree_files_no_follow(source)
+                    if unsafe:
+                        raise ValueError(f"unsafe research evidence: {sorted(unsafe)}")
+                    paths = [source / item for item in entries]
+                else:
+                    paths = [source]
+                for path in paths:
+                    add(path, path.relative_to(root), sorted(datasets)[0], "meta")
         return index
 
     @staticmethod
@@ -2569,6 +2709,19 @@ class SnapshotStore:
         with lake_mutation_lock(target_root / "meta", blocking=True):
             target_states = self._state_payloads(target_root, selected)
             changed_paths: set[str] = set()
+            from cnequity.storage.research_inputs import CONTEXT_PATH, RESEARCH_METADATA
+
+            # A snapshot restore can add a credential-free read context that
+            # the live revision producer does not have. Remove that context
+            # when absent from the target, or replace it with the target one.
+            changed_paths.add((Path("meta") / CONTEXT_PATH).as_posix())
+            for path in self._lake_index(target_root, selected):
+                relative = Path(path)
+                if (
+                    any(Path("meta") / prefix in relative.parents for prefix in RESEARCH_METADATA)
+                    or path == "meta/state/delisted_catalog.json"
+                ):
+                    changed_paths.add(path)
             for dataset in selected:
                 current_state = target_states.get(dataset, {})
                 current_raw = current_state.get("revision", 0)

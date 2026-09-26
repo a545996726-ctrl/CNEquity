@@ -680,7 +680,7 @@ class RevisionStore:
             ),
             changed_partitions=partitions,
             files=files,
-            metadata=dict(metadata or {}),
+            metadata={**dict(metadata or {}), "base_revision_id": pointer.get("revision_id")},
             generation_path=generation_relative,
             generation_files=generation_files,
             pointer_path=self.pointer_path(dataset).relative_to(self.meta_root).as_posix(),
@@ -818,6 +818,8 @@ def resolve_committed_root(
         meta = Path(meta_root).expanduser()
     store = RevisionStore(meta, logical.parent)
     resolved = store.current_root(name, revision=revision)
+    if resolved is None and revision is not None:
+        raise RevisionConsistencyError(f"no retained revision {revision!r} for {name}")
     return logical if resolved is None else resolved
 
 

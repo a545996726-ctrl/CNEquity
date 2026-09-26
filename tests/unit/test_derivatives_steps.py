@@ -103,7 +103,9 @@ def test_one_exchange_missing_leaves_the_others_written(cfg, monkeypatch, reader
         "XXX",
         dataclasses.replace(derivatives.READERS["CFE"], exchange="XXX", fetch_day=never),
     )
-    monkeypatch.setattr(derivatives, "SUPPORTED_EXCHANGES", ("CFE", "XXX"))
+    monkeypatch.setattr(
+        "cnequity.adapters.futures_exchange.registry.SUPPORTED_EXCHANGES", ("CFE", "XXX")
+    )
     cfg.futures_exchanges = []
     findings: list[dict] = []
     frame = derivatives.fetch_session(cfg, date(2026, 9, 24), "futures", findings=findings)

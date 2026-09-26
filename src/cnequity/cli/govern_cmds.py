@@ -243,6 +243,11 @@ def snapshot_grp():
 @snapshot_grp.command("create")
 @click.argument("name")
 @click.option(
+    "--research",
+    is_flag=True,
+    help="包含价格、因子、身份、状态、日历及研究覆盖证据；缺少依赖时报错。",
+)
+@click.option(
     "--dataset",
     "datasets",
     multiple=True,
@@ -257,7 +262,11 @@ def snapshot_grp():
     help="快照放在哪；默认是数据根目录下的 meta/snapshots。",
 )
 def snapshot_create(
-    name: str, datasets: tuple[str, ...], config_path: str, snapshot_root: Path | None
+    name: str,
+    datasets: tuple[str, ...],
+    config_path: str,
+    snapshot_root: Path | None,
+    research: bool,
 ):
     """把指定的数据集冻结成一份新的、不可变的快照。
 
@@ -270,7 +279,7 @@ def snapshot_create(
     from cnequity.storage.snapshots import SnapshotStore
 
     with _snapshot_operator_errors():
-        manifest = SnapshotStore(cfg, snapshot_root).create(name, list(datasets))
+        manifest = SnapshotStore(cfg, snapshot_root).create(name, list(datasets), research=research)
     click.echo(str(manifest))
 
 

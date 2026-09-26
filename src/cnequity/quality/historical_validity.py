@@ -12,6 +12,7 @@ from cnequity.domain.universe_profiles import (
     UniverseProfileError,
     resolve_universe_profile,
 )
+from cnequity.quality.delisted_coverage import delisted_coverage_report
 from cnequity.quality.st_coverage import st_evidence_coverage_report
 from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
 from cnequity.query.universe import (
@@ -20,7 +21,6 @@ from cnequity.query.universe import (
     coverage_start_date,
     st_coverage_start,
 )
-from cnequity.steps.delisted import delisted_coverage_report
 
 
 def _daily_bar_missing_sessions(
@@ -42,7 +42,7 @@ def _daily_bar_missing_sessions(
     if symbols is not None and not symbols:
         return []
 
-    from cnequity.steps.common import list_trading_dates
+    from cnequity.query.calendar import list_trading_dates
 
     expected = list_trading_dates(config, start, end)
     if not expected:

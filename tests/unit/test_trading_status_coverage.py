@@ -23,6 +23,97 @@ from cnequity.query.universe import (
     trading_status_coverage_start,
 )
 from cnequity.steps.finalize import step_audit
+from cnequity.storage.read_context import ReadContext
+from cnequity.storage.revisions import RevisionStore
+from cnequity.storage.snapshots import SnapshotStore
+
+
+def test_snapshot_restores_coverage_evidence_without_live_credentials(tmp_path):
+    from cnequity.quality.st_coverage import _tushare_st_enabled
+
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        sources={"tushare": True},
+        tushare_token="never-export-this-secret",
+    )
+    day = date(2024, 6, 28)
+    _write_status_partition(cfg, day, source="baostock")
+    _write_bars_partition(cfg, day)
+    _write_st_receipt(cfg, day, day)
+    for dataset in ("adj_factors", "trading_calendar"):
+        root = (cfg.derived_root if dataset == "adj_factors" else cfg.curated_root) / dataset
+        root.mkdir(parents=True)
+        pl.DataFrame({"trade_date": [day]}).write_parquet(root / "part.parquet")
+    store = SnapshotStore(cfg, tmp_path / "snapshots")
+    manifest = store.create("research", ["daily_bars"], research=True)
+    assert json.loads(manifest.read_text())["research_inputs"]["dependency_closure"]
+    assert all(
+        "never-export-this-secret" not in p.read_text()
+        for p in store.path("research").rglob("*.json")
+    )
+    restored = Config(data_root=store.restore("research", tmp_path / "restored"))
+    assert not restored.tushare_token
+    assert _tushare_st_enabled(restored)
+    assert st_evidence_coverage_report(restored, day, day)["verified"]
+    for receipt in (cfg.meta_root / "quality/coverage").rglob("*.json"):
+        receipt.unlink()
+    assert not st_evidence_coverage_report(cfg, day, day)["verified"]
+    assert st_evidence_coverage_report(restored, day, day)["verified"]
+    saved = next((store.path("research") / "meta/quality/coverage").rglob("*.json"))
+    saved.write_text("{}")
+    assert not store.verify("research").passed
+
+
+def test_snapshot_rejects_evidence_changed_during_capture(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path)
+    day = date(2024, 6, 28)
+    _write_bars_partition(cfg, day)
+    _write_status_partition(cfg, day, source="baostock")
+    _write_st_receipt(cfg, day, day)
+    store = SnapshotStore(cfg)
+    original = store._source_root
+
+    def mutate(dataset):
+        next((cfg.meta_root / "quality/coverage").rglob("*.json")).write_text("{}")
+        return original(dataset)
+
+    monkeypatch.setattr(store, "_source_root", mutate)
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        store.create("racing", ["daily_bars"])
+    assert not store.path("racing").exists()
+
+
+def test_receipt_integrity_uses_selected_status_generation(tmp_path):
+    cfg = Config(data_root=tmp_path)
+    day = date(2024, 6, 28)
+    _write_status_partition(cfg, day, source="baostock")
+    _write_bars_partition(cfg, day)
+    _write_st_receipt(cfg, day, day)
+    store = RevisionStore(cfg.meta_root, cfg.curated_root)
+    path = cfg.curated_root / "trading_status" / f"trade_date={day}" / "part-0.parquet"
+    store.commit(
+        "trading_status",
+        run_id="evidence",
+        changed_files=[path],
+        schema_version=1,
+        contract_fingerprint="test",
+    )
+    selected = ReadContext.capture(
+        cfg, {"daily_bars", "instruments", "trading_status"}, {"trading_status": 1}
+    )
+    assert st_evidence_coverage_report(cfg, day, day, read_context=selected)["verified"]
+    pl.read_parquet(path).with_columns(pl.lit("eastmoney").alias("source")).write_parquet(path)
+    store.commit(
+        "trading_status",
+        run_id="missing-evidence",
+        changed_files=[path],
+        schema_version=1,
+        contract_fingerprint="test",
+    )
+    assert not st_evidence_coverage_report(cfg, day, day)["verified"]
+    # Same quality receipt, different retained data: no latest-root or cached
+    # integrity result from the current generation may leak into this read.
+    assert st_evidence_coverage_report(cfg, day, day, read_context=selected)["verified"]
 
 
 def _write_status_partition(

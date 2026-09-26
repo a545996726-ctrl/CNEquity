@@ -57,6 +57,10 @@ deep_reconciliation_dow = 6
 # knowing how often it fires is a gate that gets turned off again.
 # Only `error` gates; the 32 checks that emit `warning` never do.
 audit_gate = "shadow"
+# Full offline audit of the candidate batch before publishing any pointer.
+# block rejects new errors relative to the committed baseline; shadow reports only.
+# This full-lake scan is opt-in; schema and batch gates always remain active.
+publication_gate = "off"
 
 [tdx_protocol]
 enabled = true

@@ -86,7 +86,7 @@ def test_history_plan_includes_etf_and_filters_future_or_undated_listings(tmp_pa
         ]
     ).write_parquet(inst / "part.parquet")
 
-    cfg = SimpleNamespace(curated_root=curated)
+    cfg = Config(data_root=tmp_path)
     monkeypatch.setattr(
         bars,
         "load_symbols",
@@ -115,7 +115,7 @@ def test_history_plan_includes_etf_and_filters_future_or_undated_listings(tmp_pa
 
 
 def test_history_plan_without_instruments_falls_back(tmp_path, monkeypatch):
-    cfg = SimpleNamespace(curated_root=tmp_path / "missing")
+    cfg = Config(data_root=tmp_path / "missing")
     monkeypatch.setattr(bars, "load_symbols", lambda config: ["600519.SH", "920001.BJ"])
     plan = bars._history_plan(cfg, date(2020, 1, 1), date(2025, 1, 1))
     assert plan == [("600519.SH", date(2020, 1, 1))]
@@ -144,7 +144,7 @@ def test_history_plan_dedupes_nested_instrument_fragments(tmp_path, monkeypatch)
         }
     ).write_parquet(nested / "part-old.parquet")
 
-    cfg = SimpleNamespace(curated_root=curated)
+    cfg = Config(data_root=tmp_path)
     monkeypatch.setattr(bars, "load_symbols", lambda config: ["688001.SH"])
 
     plan = bars._history_plan(cfg, date(2020, 1, 1), date(2025, 1, 1))

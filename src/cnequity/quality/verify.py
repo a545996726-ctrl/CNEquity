@@ -277,7 +277,7 @@ def _complete_derived_days(config: Config, spec: DatasetSpec) -> list[date]:
 
 
 def _trading_days(config: Config, start: date, end: date) -> list[date]:
-    from cnequity.steps.common import list_trading_dates
+    from cnequity.query.calendar import list_trading_dates
 
     if start > end:
         return []

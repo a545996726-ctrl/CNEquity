@@ -415,7 +415,7 @@ class LakeView:
 
         if spec.partition_granularity == "day":
             # Only sessions count as missing; a weekend is not a gap.
-            from cnequity.steps.common import _load_trading_calendar_df
+            from cnequity.query.calendar import _load_trading_calendar_df
 
             calendar = _load_trading_calendar_df(self.config, start=first, end=last)
             if calendar is None or calendar.is_empty():
@@ -942,7 +942,7 @@ class LakeView:
         rides along on each row so a renderer can say so rather than imply a
         precision the layout does not have.
         """
-        from cnequity.steps.common import _load_trading_calendar_df
+        from cnequity.query.calendar import _load_trading_calendar_df
 
         anchor = self.anchor()
         window_start = anchor - timedelta(days=int(days * 1.7) + 10)

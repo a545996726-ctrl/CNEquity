@@ -137,23 +137,36 @@ def _publish_derived_revision(
     ]
     if not changed:
         return None
-    contract = dataset_contract(dataset)
-    revision = RevisionStore(
-        config.meta_root,
-        config.curated_root,
-        config.derived_root,
-    ).commit(
-        dataset,
-        run_id=run_id,
-        changed_files=changed,
-        schema_version=int(contract["schema_version"]),
-        contract_fingerprint=contract_fingerprint(contract),
-        metadata={
-            "trade_date": trade_date.isoformat(),
-            "layer": "derived",
-            "rows_written": len(changed),
-        },
-    )
+    from cnequity.file_lock import lake_mutation_lock
+    from cnequity.quality.publication import evaluate_publication
+
+    revisions = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
+    with lake_mutation_lock(config.meta_root, blocking=True):
+        publication = evaluate_publication(
+            config, f"{run_id}-{dataset}", trade_date, {dataset: root}
+        )
+        if publication["blocked"]:
+            revisions.quarantine_candidate(dataset, run_id=run_id, reason="publication_gate")
+            raise RuntimeError(
+                f"publication gate blocked {dataset}: {publication.get('report_path')}"
+            )
+        contract = dataset_contract(dataset)
+        revision = revisions.commit(
+            dataset,
+            run_id=run_id,
+            changed_files=changed,
+            schema_version=int(contract["schema_version"]),
+            contract_fingerprint=contract_fingerprint(contract),
+            metadata={
+                "trade_date": trade_date.isoformat(),
+                "layer": "derived",
+                "publication_audit": {
+                    key: publication.get(key) for key in ("mode", "blocked", "report_path")
+                },
+                "rows_written": len(changed),
+            },
+            _locked=True,
+        )
     if revision is None:
         return None
     return {
@@ -327,6 +340,7 @@ def step_compact(config: Config, trade_date: date, run_id: str, context: dict) -
 
 
 def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
+    from cnequity.domain.canonical import canonical_policy
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
     from cnequity.orchestrator.compact_gate import compact_allowed
     from cnequity.orchestrator.manifest import Manifest
@@ -339,6 +353,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     total = 0
     compacted: set[str] = set()
     committed_revisions: dict[str, dict] = {}
+    pending: list[tuple] = []
     skipped: list[dict] = []
     audit_findings: list[dict] = []
     revisions = RevisionStore(config.meta_root, config.curated_root)
@@ -379,6 +394,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
 
         pcol = PARTITION_COLS[ds]
         changed_files: list[Path] = []
+        change_log: list[dict] = []
         # Establish revision zero before touching the legacy-compatible
         # curated path, then always merge against the immutable committed
         # generation. A previous process may have died after replacing only
@@ -399,6 +415,18 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
             total += rows
             if inst_findings:
                 audit_findings.extend(inst_findings)
+            if changed_files:
+                from cnequity.query.parquet_scan import collect_parquet_root
+                from cnequity.storage.changes import summarize_changes
+
+                try:
+                    previous = collect_parquet_root(committed_root, hive=False, committed=False)
+                except FileNotFoundError:
+                    previous = pl.DataFrame()
+                current = collect_parquet_root(
+                    config.curated_root / ds, hive=False, committed=False
+                )
+                change_log.append({"partition": None, **summarize_changes(previous, current, ds)})
         else:
             rows = compact_dataset(
                 config.staging_root,
@@ -408,6 +436,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 partition_col=pcol,
                 changed_files=changed_files,
                 base_root=committed_root,
+                change_log=change_log,
             )
             if rows:
                 compacted.add(ds)
@@ -477,68 +506,111 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                         error_message="independent source drift exceeds configured tolerance",
                     )
                     continue
-            try:
-                contract = dataset_contract(ds)
-                revision = revisions.commit(
-                    ds,
-                    run_id=run_id,
-                    changed_files=changed_files,
-                    schema_version=int(contract["schema_version"]),
-                    contract_fingerprint=contract_fingerprint(contract),
-                    metadata={
-                        "trade_date": trade_date.isoformat(),
-                        "partition_col": pcol,
-                        "rows_written": rows,
-                        **lineage,
-                    },
-                    # ``_compact_locked`` already holds the shared compact
-                    # run lock, whose path is intentionally the same as the
-                    # low-level lake mutation lock.  Re-entering it would
-                    # deadlock on POSIX; direct RevisionStore callers still
-                    # acquire the lock through the default path.
-                    _locked=True,
-                )
-            except Exception as exc:
-                _record_dataset_result(
-                    config,
-                    run_id,
-                    ds,
-                    "publish_revision",
-                    "failed",
-                    criticality=_dataset_criticality(ds),
-                    rows_written=rows,
-                    error_code=type(exc).__name__,
-                    error_message=str(exc),
-                )
-                raise
-            if revision is not None:
-                committed_revisions[ds] = {
-                    "revision": revision.revision,
-                    "revision_id": revision.revision_id,
-                    "content_digest": revision.content_digest,
-                    "changed_partitions": list(revision.changed_partitions),
-                }
-                _record_dataset_result(
-                    config,
-                    run_id,
-                    ds,
-                    "publish_revision",
-                    "success",
-                    criticality=_dataset_criticality(ds),
-                    revision_id=revision.revision_id,
-                    rows_written=rows,
-                )
-            else:
-                _record_dataset_result(
-                    config,
-                    run_id,
-                    ds,
-                    "publish_revision",
-                    "skipped",
-                    criticality=_dataset_criticality(ds),
-                    rows_written=rows,
-                )
+            pending.append((ds, pcol, rows, changed_files, change_log, gate_spec))
 
+    from cnequity.quality.publication import evaluate_publication
+
+    publication = evaluate_publication(
+        config, run_id, trade_date, {item[0]: config.curated_root / item[0] for item in pending}
+    )
+    if publication["blocked"]:
+        for ds, _pcol, rows, *_ in pending:
+            quarantine = revisions.quarantine_candidate(
+                ds, run_id=run_id, reason="publication_gate"
+            )
+            compacted.discard(ds)
+            skipped.append(
+                {
+                    "dataset": ds,
+                    "reason": "publication_gate",
+                    "quarantine": str(quarantine) if quarantine else None,
+                }
+            )
+            _record_dataset_result(
+                config,
+                run_id,
+                ds,
+                "publish_revision",
+                "blocked",
+                criticality=_dataset_criticality(ds),
+                rows_written=rows,
+                error_code="publication_gate",
+                error_message="candidate audit introduced errors; see publication report",
+            )
+        audit_findings.extend(publication["new_errors"])
+        pending = []
+    for ds, pcol, rows, changed_files, change_log, gate_spec in pending:
+        try:
+            contract = dataset_contract(ds)
+            revision = revisions.commit(
+                ds,
+                run_id=run_id,
+                changed_files=changed_files,
+                schema_version=int(contract["schema_version"]),
+                contract_fingerprint=contract_fingerprint(contract),
+                metadata={
+                    "trade_date": trade_date.isoformat(),
+                    "partition_col": pcol,
+                    "rows_written": rows,
+                    "canonical_policy": canonical_policy(ds),
+                    "changes": change_log,
+                    "publication_audit": {
+                        key: publication.get(key) for key in ("mode", "blocked", "report_path")
+                    },
+                    "validation": {
+                        "schema": "passed",
+                        "batch_completeness": "passed",
+                        "source_diff_gate": "passed" if gate_spec is not None else "not_configured",
+                    },
+                    **lineage,
+                },
+                # ``_compact_locked`` already holds the shared compact
+                # run lock, whose path is intentionally the same as the
+                # low-level lake mutation lock.  Re-entering it would
+                # deadlock on POSIX; direct RevisionStore callers still
+                # acquire the lock through the default path.
+                _locked=True,
+            )
+        except Exception as exc:
+            _record_dataset_result(
+                config,
+                run_id,
+                ds,
+                "publish_revision",
+                "failed",
+                criticality=_dataset_criticality(ds),
+                rows_written=rows,
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
+        if revision is not None:
+            committed_revisions[ds] = {
+                "revision": revision.revision,
+                "revision_id": revision.revision_id,
+                "content_digest": revision.content_digest,
+                "changed_partitions": list(revision.changed_partitions),
+            }
+            _record_dataset_result(
+                config,
+                run_id,
+                ds,
+                "publish_revision",
+                "success",
+                criticality=_dataset_criticality(ds),
+                revision_id=revision.revision_id,
+                rows_written=rows,
+            )
+        else:
+            _record_dataset_result(
+                config,
+                run_id,
+                ds,
+                "publish_revision",
+                "skipped",
+                criticality=_dataset_criticality(ds),
+                rows_written=rows,
+            )
     if compacted:
         _update_watermarks(config, frozenset(compacted), trade_date)
     audit_findings.extend(_reconcile_watermarks(config))
@@ -563,6 +635,8 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
         )
 
     result: dict = {"rows_read": total, "rows_written": total}
+    if publication.get("report_path"):
+        result["publication_audit"] = publication["report_path"]
     if skipped:
         # Skipping is an intentional integrity gate, but it is not a
         # successful compact: callers must surface the run as retryable and

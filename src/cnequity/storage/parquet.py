@@ -15,6 +15,7 @@ from cnequity.domain.pit import (
 )
 from cnequity.domain.schemas import PRIMARY_KEYS, sanitize_dataset_rows, validate_dataframe
 from cnequity.storage.atomic import write_parquet_atomic
+from cnequity.storage.changes import summarize_changes
 from cnequity.storage.revisions import sha256_file
 
 
@@ -137,6 +138,7 @@ def compact_dataset(
     granularity: Granularity | None = None,
     changed_files: list[Path] | None = None,
     base_root: Path | None = None,
+    change_log: list[dict] | None = None,
 ) -> int:
     """Merge staging batches into curated partitions, dedupe by PK.
 
@@ -214,6 +216,8 @@ def compact_dataset(
                 combined = dedupe_by_primary_key(combined, dataset)
         out_dir.mkdir(parents=True, exist_ok=True)
         business_changed = not _business_equal(existing, combined)
+        if change_log is not None and business_changed:
+            change_log.append({"partition": None, **summarize_changes(existing, combined, dataset)})
         # One-time migration: a file written before the bitemporal columns
         # existed keeps deriving them on every read until it is rewritten, and
         # the digest above cannot see that because both sides are normalized.
@@ -268,6 +272,13 @@ def compact_dataset(
             merged = dedupe_by_primary_key(merged, dataset)
         merged = _pit(merged)
         business_changed = not _business_equal(existing, merged)
+        if change_log is not None and business_changed:
+            change_log.append(
+                {
+                    "partition": f"{partition_col}={val_str}",
+                    **summarize_changes(existing, merged, dataset),
+                }
+            )
         # See the unpartitioned branch: rewrite once so the columns stop being
         # recomputed on every read.
         pit_missing = _pit_columns_absent(out_path, dataset)

@@ -331,7 +331,7 @@ def missing_session_findings(
     root = config.curated_root / "daily_bars"
     if dataset not in enabled or not dataset_has_parquet(root):
         return []
-    from cnequity.steps.intraday import MinuteBarsScopeError, resolve_scope
+    from cnequity.query.intraday_scope import MinuteBarsScopeError, resolve_scope
 
     try:
         symbols = resolve_scope(config)

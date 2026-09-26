@@ -13,6 +13,7 @@ on:
       - "contracts/**"
       - "sources/SOURCES.yml"
       - "scripts/fresh_lake_e2e.py"
+      - "scripts/check_release_contract.py"
       - "tests/**"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -58,6 +59,8 @@ jobs:
           cne contract validate "$contract" --against-registry \
             | tee evidence/contract-validate.txt
           cp "$contract" evidence/
+          python scripts/check_release_contract.py --current "$contract" \
+            --output evidence/contract-diff.json
           printf 'package_version=%s\ncontract=%s\n' "$package_version" "$contract" \
             > evidence/contract-metadata.txt
       - name: Run offline regression suite

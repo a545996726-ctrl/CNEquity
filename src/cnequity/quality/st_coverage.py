@@ -30,6 +30,7 @@ from cnequity.query.parquet_scan import (
     scan_parquet_files,
     scan_parquet_root,
 )
+from cnequity.storage.read_context import ReadContext, read_root
 
 ST_EVIDENCE_VERSION = 2
 ST_COVERAGE_CLAIM = "historical_st_evidence"
@@ -73,9 +74,9 @@ def symbol_scope_hash(symbols: list[str]) -> str:
     return _canonical_hash(sorted(set(symbols)))
 
 
-def _trading_status_fingerprint(config: Config) -> str:
+def _trading_status_fingerprint(config: Config, read_context: ReadContext | None = None) -> str:
     """Fingerprint Parquet layout metadata for receipt-cache invalidation."""
-    root = config.curated_root / "trading_status"
+    root = read_root(config, "trading_status", read_context)
     if not root.exists():
         return "missing"
     entries: list[tuple[str, int, int]] = []
@@ -91,7 +92,7 @@ def _trading_status_fingerprint(config: Config) -> str:
                 int(stat.st_mtime_ns),
             )
         )
-    return _canonical_hash(entries)
+    return _canonical_hash({"root": str(root.resolve()), "files": entries})
 
 
 def current_st_universe(
@@ -101,6 +102,7 @@ def current_st_universe(
     end: date | None = None,
     symbols: list[str] | None = None,
     universe: str = "all_a",
+    read_context: ReadContext | None = None,
 ) -> list[str]:
     """All-A instruments whose price history makes ST evidence relevant.
 
@@ -113,12 +115,12 @@ def current_st_universe(
             f"(supported: {', '.join(sorted(ST_EVIDENCE_COMPATIBLE_UNIVERSES))})"
         )
     requested_symbols = set(symbols) if symbols is not None else None
-    root = config.curated_root / "instruments"
+    root = read_root(config, "instruments", read_context)
     if not root.exists():
         return []
     try:
         frame = dedupe_by_primary_key(
-            collect_parquet_root(root, hive=False),
+            collect_parquet_root(root, hive=False, committed=False),
             "instruments",
         )
     except (FileNotFoundError, OSError, pl.exceptions.PolarsError, ValueError) as exc:
@@ -151,7 +153,7 @@ def current_st_universe(
             symbol for symbol in resolved_symbols if parse_symbol(symbol).exchange in {"SH", "SZ"}
         ]
 
-    bars_root = config.curated_root / "daily_bars"
+    bars_root = read_root(config, "daily_bars", read_context)
     if bars_root.exists() and any(bars_root.rglob("*.parquet")):
         try:
             # Let the partition-aware scanner prune the requested bar window
@@ -164,6 +166,8 @@ def current_st_universe(
                 start=start,
                 end=end,
                 traded_only=True,
+                dataset="daily_bars",
+                committed=False,
             )
             bars = set(
                 bar_scan.select("symbol")
@@ -180,6 +184,11 @@ def current_st_universe(
 
 
 def _tushare_st_enabled(config: Config | None) -> bool:
+    if config is not None:
+        from cnequity.storage.research_inputs import CONTEXT_PATH, load_research_context
+
+        if (config.meta_root / CONTEXT_PATH).exists():
+            return load_research_context(config)["tushare_st_enabled"]
     return bool(
         config is not None and config.sources.get("tushare", False) and config.tushare_token
     )
@@ -190,6 +199,7 @@ def _tushare_floor_symbols(
     symbols: list[str],
     start: date | None,
     end: date | None,
+    read_context: ReadContext | None = None,
 ) -> set[str]:
     if not _tushare_st_enabled(config) or start is None or end is None:
         return set()
@@ -197,7 +207,7 @@ def _tushare_floor_symbols(
 
     if start >= TUSHARE_ST_HISTORY_FLOOR:
         return set()
-    first_dates = _first_traded_dates(config, set(symbols), start, end)
+    first_dates = _first_traded_dates(config, set(symbols), start, end, read_context)
     return {
         symbol
         for symbol, first_date in first_dates.items()
@@ -219,6 +229,7 @@ def _bj_symbols(symbols: Iterable[str]) -> list[str]:
 def bse_st_observed_window(
     config: Config | None,
     symbols: Iterable[str],
+    read_context: ReadContext | None = None,
 ) -> tuple[date, date] | None:
     """The trailing run of sessions the exchange board answered completely.
 
@@ -241,12 +252,16 @@ def bse_st_observed_window(
     bj = set(_bj_symbols(symbols))
     if not bj:
         return None
-    bars_root = config.curated_root / "daily_bars"
-    status_root = config.curated_root / "trading_status"
-    if not dataset_has_parquet(bars_root) or not dataset_has_parquet(status_root):
+    bars_root = read_root(config, "daily_bars", read_context)
+    status_root = read_root(config, "trading_status", read_context)
+    if not dataset_has_parquet(bars_root, committed=False) or not dataset_has_parquet(
+        status_root, committed=False
+    ):
         return None
 
-    scanned = scan_parquet_root(status_root, partition_col="trade_date", symbols=sorted(bj))
+    scanned = scan_parquet_root(
+        status_root, partition_col="trade_date", symbols=sorted(bj), committed=False
+    )
     if "source" not in scanned.collect_schema().names():
         # Rows that do not say where they came from cannot be attributed to the
         # board, and an unattributed row is not an observation.
@@ -266,6 +281,7 @@ def bse_st_observed_window(
             partition_col="trade_date",
             start=first_observed,
             symbols=sorted(bj),
+            committed=False,
         )
         .filter(pl.col("volume") > 0)
         .select("symbol", "trade_date")
@@ -299,11 +315,12 @@ def _bse_covers(
     symbols: Iterable[str],
     start: date | None,
     end: date | None,
+    read_context: ReadContext | None = None,
 ) -> bool:
     """Whether the board's observed window contains the requested one."""
     if start is None or end is None:
         return False
-    window = bse_st_observed_window(config, symbols)
+    window = bse_st_observed_window(config, symbols, read_context)
     if window is None:
         return False
     observed_start, observed_end = window
@@ -316,6 +333,7 @@ def st_evidence_unsupported_symbols(
     config: Config | None = None,
     start: date | None = None,
     end: date | None = None,
+    read_context: ReadContext | None = None,
 ) -> list[str]:
     """Symbols the configured historical ST source cannot query.
 
@@ -329,11 +347,11 @@ def st_evidence_unsupported_symbols(
     """
     unsupported: list[str] = []
     tushare_enabled = _tushare_st_enabled(config)
-    floor_symbols = _tushare_floor_symbols(config, symbols, start, end)
+    floor_symbols = _tushare_floor_symbols(config, symbols, start, end, read_context)
     # The board covers BJ for the window it actually observed. Asked for an
     # earlier one it stays unsupported, which keeps the deep-history answer
     # ("no source serves this") distinct from the recent one ("observed").
-    board_covers = _bse_covers(config, symbols, start, end)
+    board_covers = _bse_covers(config, symbols, start, end, read_context)
     for symbol in symbols:
         try:
             parsed = parse_symbol(symbol)
@@ -366,6 +384,7 @@ def st_evidence_source_symbols(
     config: Config | None = None,
     start: date | None = None,
     end: date | None = None,
+    read_context: ReadContext | None = None,
 ) -> list[str]:
     """Return the portion of a scope owned by one historical ST source."""
     if source == "baostock":
@@ -378,7 +397,9 @@ def st_evidence_source_symbols(
         if not _tushare_st_enabled(config):
             return []
         unsupported = set(
-            st_evidence_unsupported_symbols(symbols, config=config, start=start, end=end)
+            st_evidence_unsupported_symbols(
+                symbols, config=config, start=start, end=end, read_context=read_context
+            )
         )
         return sorted(
             symbol
@@ -390,7 +411,9 @@ def st_evidence_source_symbols(
         # Tushare owns BJ whenever it is configured: it reaches back to 2016,
         # and two sources claiming the same symbols would demand two receipts
         # for one fact. The board is what answers when nothing was bought.
-        if _tushare_st_enabled(config) or not _bse_covers(config, symbols, start, end):
+        if _tushare_st_enabled(config) or not _bse_covers(
+            config, symbols, start, end, read_context
+        ):
             return []
         return _bj_symbols(symbols)
     raise ValueError(f"unknown historical ST evidence source: {source}")
@@ -522,11 +545,12 @@ def _st_row_counts(
     symbols: set[str],
     *,
     staging_run_id: str | None = None,
+    read_context: ReadContext | None = None,
 ) -> dict[str, int]:
     """Count persisted Baostock facts in curated plus one resumable run."""
     if not symbols:
         return {}
-    files = list((config.curated_root / "trading_status").rglob("*.parquet"))
+    files = list(read_root(config, "trading_status", read_context).rglob("*.parquet"))
     if staging_run_id:
         from cnequity.storage import StagingWriter
 
@@ -840,6 +864,7 @@ def _receipt_rows_intact(
     receipt: dict[str, Any],
     scope: dict[str, Any],
     symbols: set[str],
+    read_context: ReadContext | None = None,
 ) -> bool:
     """Check that persisted source facts still back a valid receipt.
 
@@ -848,7 +873,7 @@ def _receipt_rows_intact(
     counts; legacy receipts carry only an aggregate, which is still checked so
     deletion of material evidence cannot silently leave research certified.
     """
-    status_fingerprint = _trading_status_fingerprint(config)
+    status_fingerprint = _trading_status_fingerprint(config, read_context)
     receipt_fingerprint = _canonical_hash(
         {
             "completed_symbols_sha256": receipt.get("completed_symbols_sha256"),
@@ -873,7 +898,7 @@ def _receipt_rows_intact(
         verification_symbols = (
             symbols if isinstance(expected_by_symbol, dict) else set(receipt["completed_symbols"])
         )
-        persisted = _st_row_counts(config, scope, verification_symbols)
+        persisted = _st_row_counts(config, scope, verification_symbols, read_context=read_context)
         if isinstance(expected_by_symbol, dict):
             intact = all(
                 persisted.get(symbol, 0) >= int(expected_by_symbol[symbol]) for symbol in symbols
@@ -894,12 +919,16 @@ def _receipt_rows_intact(
 
 
 def _first_traded_dates(
-    config: Config, symbols: set[str], start: date, end: date
+    config: Config,
+    symbols: set[str],
+    start: date,
+    end: date,
+    read_context: ReadContext | None = None,
 ) -> dict[str, date]:
     """Return first persisted traded bar for each symbol in a set."""
     if not symbols:
         return {}
-    root = config.curated_root / "daily_bars"
+    root = read_root(config, "daily_bars", read_context)
     if not root.exists():
         return {}
     try:
@@ -910,6 +939,8 @@ def _first_traded_dates(
                 start=start,
                 end=end,
                 traded_only=True,
+                dataset="daily_bars",
+                committed=False,
             )
             .filter(pl.col("symbol").is_in(sorted(symbols)))
             .select("symbol", "trade_date")
@@ -1144,6 +1175,7 @@ def st_evidence_coverage_report(
     *,
     symbols: list[str] | None = None,
     universe: str = "all_a",
+    read_context: ReadContext | None = None,
 ) -> dict[str, Any]:
     """Return whether a complete, current all-A receipt covers the window.
 
@@ -1157,12 +1189,14 @@ def st_evidence_coverage_report(
         end=end,
         symbols=symbols,
         universe=universe,
+        read_context=read_context,
     )
     unsupported_symbols = st_evidence_unsupported_symbols(
         symbols,
         config=config,
         start=start,
         end=end,
+        read_context=read_context,
     )
     supported_symbols = sorted(set(symbols) - set(unsupported_symbols))
     source_groups = {
@@ -1172,6 +1206,7 @@ def st_evidence_coverage_report(
             config=config,
             start=start,
             end=end,
+            read_context=read_context,
         )
         for source in ST_EVIDENCE_SOURCES
     }
@@ -1210,7 +1245,9 @@ def st_evidence_coverage_report(
                 -date.fromisoformat(item["scope"]["end"]).toordinal(),
             ),
         ):
-            if _receipt_rows_intact(config, candidate, candidate["scope"], set(source_symbols)):
+            if _receipt_rows_intact(
+                config, candidate, candidate["scope"], set(source_symbols), read_context
+            ):
                 best = candidate
                 break
             receipt_integrity_failures.add(source)

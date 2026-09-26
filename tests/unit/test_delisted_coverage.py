@@ -53,7 +53,9 @@ def test_coverage_verifies_definite_and_bar_proven_overlap(tmp_path, monkeypatch
         cfg,
         [("600001.SH", date(2020, 1, 3)), ("600002.SH", date(2025, 2, 3))],
     )
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
 
     report = delisted_coverage_report(cfg, date(2019, 1, 1), date(2024, 12, 31))
 
@@ -74,7 +76,9 @@ def test_coverage_can_scope_out_unsupported_bj_delistings(tmp_path, monkeypatch)
         cfg,
         [("600001.SH", date(2020, 1, 3)), ("920001.BJ", date(2020, 1, 3))],
     )
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
 
     report = delisted_coverage_report(
         cfg,
@@ -100,7 +104,9 @@ def test_coverage_separates_definite_unknown_terminal_and_identity_gaps(tmp_path
     _write_bars(cfg, "600003.SH", date(2019, 2, 1), date(2021, 6, 4))
     _write_bars(cfg, "600519.SH", date(2026, 7, 24))
     _write_instruments(cfg, [("600003.SH", None)])
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
 
     report = delisted_coverage_report(cfg, date(2019, 1, 1), date(2024, 12, 31))
 
@@ -117,7 +123,9 @@ def test_final_nonprinting_quote_is_not_a_missing_terminal_bar(tmp_path, monkeyp
     _write_bars(cfg, "600003.SH", date(2019, 2, 1), date(2021, 6, 4))
     _write_bars(cfg, "600519.SH", date(2026, 7, 24))
     _write_instruments(cfg, [("600003.SH", date(2021, 6, 8))])
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
 
     report = delisted_coverage_report(cfg, date(2019, 1, 1), date(2024, 12, 31))
 
@@ -131,7 +139,10 @@ def test_pending_discovery_blocks_an_otherwise_complete_report(tmp_path, monkeyp
     _write_bars(cfg, "600001.SH", date(2019, 1, 2), date(2020, 1, 3))
     _write_bars(cfg, "600519.SH", date(2026, 7, 24))
     _write_instruments(cfg, [("600001.SH", date(2020, 1, 3))])
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: ["600999.SH"])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes",
+        lambda cfg, read_context=None: ["600999.SH"],
+    )
 
     report = delisted_coverage_report(cfg, date(2019, 1, 1), date(2024, 12, 31))
 
@@ -144,10 +155,12 @@ def test_pending_discovery_blocks_an_otherwise_complete_report(tmp_path, monkeyp
 def test_recent_live_missing_after_window_does_not_block_history(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, {})
     _write_bars(cfg, "600519.SH", date(2026, 7, 24))
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
     monkeypatch.setattr(
         "cnequity.steps.delisted.load_live_missing",
-        lambda cfg: {"920000.BJ": date(2026, 7, 21)},
+        lambda cfg, read_context=None: {"920000.BJ": date(2026, 7, 21)},
     )
 
     report = delisted_coverage_report(cfg, date(2020, 1, 1), date(2024, 12, 31))
@@ -161,7 +174,9 @@ def test_later_catalogue_terminal_does_not_require_future_formal_date(tmp_path, 
     _write_bars(cfg, "600001.SH", date(2023, 1, 3), date(2024, 12, 31), date(2026, 7, 21))
     _write_bars(cfg, "600519.SH", date(2026, 12, 31))
     _write_instruments(cfg, [("600001.SH", None)])
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
     historical = delisted_coverage_report(cfg, date(2023, 1, 1), date(2024, 12, 31))
     assert historical["verified"] is True
     assert historical["counts"]["invalid_delist_date"] == 0
@@ -179,10 +194,12 @@ def test_recent_live_name_with_current_instrument_and_bars_is_not_quarantined(
     cfg = _cfg(tmp_path, {})
     _write_bars(cfg, "920000.BJ", date(2026, 7, 21), date(2026, 8, 14))
     _write_instruments(cfg, [("920000.BJ", None)])
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
     monkeypatch.setattr(
         "cnequity.steps.delisted.load_live_missing",
-        lambda cfg: {"920000.BJ": date(2026, 7, 21)},
+        lambda cfg, read_context=None: {"920000.BJ": date(2026, 7, 21)},
     )
 
     report = delisted_coverage_report(cfg, date(2026, 7, 1), date(2026, 8, 14))
@@ -197,7 +214,9 @@ def test_future_ipo_requires_source_identity_not_first_bar(tmp_path, monkeypatch
     cfg = _cfg(tmp_path, {"600001.SH": "2025-01-03"})
     _write_bars(cfg, "600519.SH", date(2026, 7, 24))
     _write_instruments(cfg, [("600001.SH", date(2025, 1, 6))])
-    monkeypatch.setattr("cnequity.steps.delisted.pending_codes", lambda cfg: [])
+    monkeypatch.setattr(
+        "cnequity.quality.delisted_coverage.pending_codes", lambda cfg, read_context=None: []
+    )
     assert not delisted_coverage_report(cfg, date(2016, 1, 1), date(2016, 12, 31))["verified"]
     write_delisted_identity_evidence(
         cfg,

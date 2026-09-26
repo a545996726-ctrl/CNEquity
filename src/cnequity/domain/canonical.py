@@ -15,6 +15,20 @@ _EVIDENCE_RANK = "__canonical_evidence_rank"
 _HELPER_COLUMNS = (_SOURCE_RANK, _EVIDENCE_RANK)
 
 
+def canonical_policy(dataset: str) -> str:
+    """Versioned conflict-resolution rule recorded with normal compaction.
+
+    Sources are provenance, not permanent ownership. A configured ingestion
+    may correct existing keys; these rules decide which observation wins.
+    Change the version when changing precedence, not for a new observation.
+    """
+    return {
+        "corporate_actions": "corporate_action_evidence_v1",
+        "trading_status": "trading_status_evidence_v1",
+        "instruments": "instrument_identity_merge_v1",
+    }.get(dataset, "observation_recency_v1")
+
+
 def _source_rank_expr(dataset: str, columns: set[str]) -> pl.Expr | None:
     """Rank primary/backup sources for deterministic same-timestamp ties."""
     if "source" not in columns:

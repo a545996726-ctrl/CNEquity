@@ -8,6 +8,7 @@ import duckdb
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.action_evidence import evidence_level_sql
 from cnequity.domain.datasets import DATASETS, DatasetSpec
 from cnequity.domain.partitions import uses_hive
 from cnequity.domain.schemas import DATASET_SCHEMAS, PRIMARY_KEYS
@@ -99,6 +100,10 @@ def _canonical_order_sql(name: str, columns: set[str] | dict[str, str]) -> str:
         evidence = evidence_rank_sql(columns)
         if evidence is not None:
             order_by.append(f"{evidence} DESC")
+    elif name == "corporate_actions":
+        evidence = evidence_level_sql(set(columns))
+        if evidence is not None:
+            order_by.append(f"{evidence} DESC")
     if "fetched_at" in columns:
         order_by.append("fetched_at DESC NULLS LAST")
     if "source" in columns:
@@ -149,6 +154,36 @@ def _view_select_sql(
         return f"SELECT * FROM {source}"
     partition_by = ", ".join(primary_key)
     order_by = _canonical_order_sql(name, columns or set())
+    payment_keys = primary_key + ["cash_dividend", "bonus_ratio", "transfer_ratio"]
+    if name == "corporate_actions" and set(
+        payment_keys + ["payment_date", "payment_source"]
+    ) <= set(columns or ()):
+        # Python carries the nearest preceding valid payment evidence within
+        # identical economic terms. Descending order reverses its ascending
+        # forward-fill, so the equivalent SQL frame looks forward. Select the
+        # winner BEFORE enrichment: adding a date must not re-rank the rows.
+        return f"""
+            SELECT * EXCLUDE (__payment_evidence) REPLACE (
+                CASE WHEN payment_date IS NOT NULL THEN payment_date
+                     ELSE __payment_evidence.payment_date END AS payment_date,
+                CASE WHEN payment_date IS NOT NULL THEN payment_source
+                     ELSE __payment_evidence.payment_source END AS payment_source
+            ) FROM (
+                SELECT *, first_value(
+                    CASE WHEN payment_date IS NOT NULL AND payment_date >= ex_date
+                         THEN struct_pack(payment_date := payment_date,
+                                          payment_source := payment_source)
+                    END IGNORE NULLS
+                ) OVER (
+                    PARTITION BY {", ".join(payment_keys)} ORDER BY {order_by}
+                    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+                ) AS __payment_evidence
+                FROM {source}
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY {partition_by} ORDER BY {order_by}
+                ) = 1
+            )
+        """
     return (
         "SELECT * FROM "
         f"{source} "

@@ -21,6 +21,7 @@ from cnequity.query.parquet_scan import (
     list_partitions,
     scan_parquet_root,
 )
+from cnequity.storage.read_context import ReadContext, read_root
 from cnequity.storage.revisions import resolve_committed_root
 
 # Statuses a tradable-universe query drops. ST no longer lives in `status`, so
@@ -71,8 +72,8 @@ def _all_a_symbol_expr(symbol_col: str = "symbol", *, universe: str = "all_a") -
     return (~excluded) & allowed
 
 
-def _load_instruments(config: Config) -> pl.DataFrame:
-    root = config.curated_root / "instruments"
+def _load_instruments(config: Config, read_context: ReadContext | None = None) -> pl.DataFrame:
+    root = read_root(config, "instruments", read_context)
     try:
         return dedupe_by_primary_key(
             collect_parquet_root(
@@ -80,6 +81,7 @@ def _load_instruments(config: Config) -> pl.DataFrame:
                 hive=False,
                 dataset="instruments",
                 meta_root=config.meta_root,
+                committed=False,
             ),
             "instruments",
         )
@@ -180,6 +182,7 @@ def coverage_end_date(
     dataset: str,
     *,
     date_col: str = "trade_date",
+    read_context: ReadContext | None = None,
 ) -> date | None:
     """Latest *date_col* present in curated *dataset*, if any.
 
@@ -187,11 +190,7 @@ def coverage_end_date(
     mixed layouts must use the date stored in the row; otherwise a partial
     current month/year can make an incomplete research window look complete.
     """
-    root = resolve_committed_root(
-        config.curated_root / dataset,
-        dataset=dataset,
-        meta_root=config.meta_root,
-    )
+    root = read_root(config, dataset, read_context)
     if not root.exists():
         return None
     parts = list_partitions(root, date_col, resolve=False)
@@ -346,6 +345,7 @@ def apply_universe_filter(
     universe: str,
     date_col: str = "trade_date",
     strict: bool = False,
+    read_context: ReadContext | None = None,
 ) -> pl.DataFrame:
     """Filter bar-like frames to tradable universe rows per *date_col*.
 
@@ -370,7 +370,7 @@ def apply_universe_filter(
             )
         return df
 
-    instruments = _load_instruments(config)
+    instruments = _load_instruments(config, read_context)
     if instruments.is_empty():
         if strict:
             raise UniverseCoverageError(f"{universe} universe requires curated instruments")
@@ -399,12 +399,13 @@ def apply_universe_filter(
     try:
         status = dedupe_lazy_by_primary_key(
             scan_parquet_root(
-                config.curated_root / "trading_status",
+                read_root(config, "trading_status", read_context),
                 partition_col="trade_date",
                 start=status_start,
                 end=status_end,
                 dataset="trading_status",
                 meta_root=config.meta_root,
+                committed=False,
             ),
             "trading_status",
         )
@@ -443,6 +444,7 @@ def apply_universe_filter(
             end=requested[date_col].max(),
             symbols=sorted(requested["symbol"].drop_nulls().unique().to_list()),
             universe=universe,
+            read_context=read_context,
         )
         if not evidence["verified"]:
             unsupported = int(evidence.get("unsupported_symbols", 0) or 0)

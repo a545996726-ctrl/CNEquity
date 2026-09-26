@@ -31,7 +31,7 @@ def test_snapshot_create_verify_and_restore(tmp_path):
     manifest = store.create("research-2024", ["daily_bars"])
     assert manifest.exists()
     verification = store.verify("research-2024")
-    assert verification.passed and verification.verified_files == 1
+    assert verification.passed and verification.verified_files == 2
 
     restored = store.restore("research-2024", tmp_path / "restored")
     file = restored / "curated" / "daily_bars" / "trade_date=2024-06-18" / "part-merged.parquet"

@@ -16,11 +16,104 @@ from cnequity.query.parquet_scan import parquet_glob
 from cnequity.query.views import _view_glob, ensure_duckdb_views
 
 
+@pytest.mark.parametrize(
+    "older,newer,expected",
+    [
+        (
+            {"payment_source": "issuer_notice:original"},
+            {"cash_dividend": 0.11038, "payment_date": None, "payment_source": None},
+            (0.11, date(2024, 6, 28)),
+        ),
+        (
+            {"payment_source": "vendor:date"},
+            {"payment_date": None, "payment_source": None},
+            (0.11, date(2024, 6, 28)),
+        ),
+        (
+            {"payment_source": "issuer_notice:original"},
+            {"cash_dividend": 0.12, "payment_source": "issuer_notice:correction"},
+            (0.12, date(2024, 6, 28)),
+        ),
+        (
+            {"payment_source": "", "payment_date": date(2024, 6, 29)},
+            {"payment_date": None, "payment_source": None},
+            (0.11, date(2024, 6, 29)),
+        ),
+        (
+            {"payment_source": "", "payment_date": date(2024, 6, 27)},
+            {"payment_date": None, "payment_source": None},
+            (0.11, None),
+        ),
+        (
+            {"payment_source": ""},
+            {"cash_dividend": 0.12, "payment_date": None, "payment_source": None},
+            (0.12, None),
+        ),
+    ],
+)
+def test_corporate_action_evidence_matches_all_readers(tmp_path, older, newer, expected):
+    common = dict(
+        symbol="600519.SH",
+        ex_date=date(2024, 6, 28),
+        action_type="cash_dividend",
+        cash_dividend=0.11,
+        bonus_ratio=0.0,
+        transfer_ratio=0.0,
+        payment_date=date(2024, 6, 28),
+        payment_source=None,
+        source="tdx_protocol",
+        data_version="v1",
+    )
+    frame = pl.DataFrame(
+        [
+            {**common, **older, "fetched_at": "2024-06-29T00:00:00Z"},
+            {**common, **newer, "fetched_at": "2024-06-30T00:00:00Z"},
+        ],
+        schema_overrides={"payment_date": pl.Date, "payment_source": pl.String},
+    )
+    root = tmp_path / "curated/corporate_actions"
+    root.mkdir(parents=True)
+    frame.write_parquet(root / "legacy-fragments.parquet")
+    eager = dedupe_by_primary_key(frame, "corporate_actions")
+    lazy = dedupe_lazy_by_primary_key(frame.lazy(), "corporate_actions").collect()
+    db = ensure_duckdb_views(Config(data_root=tmp_path))
+    cols = ["cash_dividend", "payment_date", "payment_source"]
+    with duckdb.connect(str(db), read_only=True) as con:
+        sql = con.execute(f"SELECT {', '.join(cols)} FROM corporate_actions").fetchall()
+    assert eager.select(cols).rows() == lazy.select(cols).rows() == sql
+    assert sql[0][:2] == expected
+
+
 def test_view_glob_uses_forward_slashes():
     glob_path, hive = _view_glob("C:/Users/测试/lake", DATASETS["daily_bars"])
     assert "\\" not in glob_path
     assert glob_path.startswith("C:/Users/测试/lake/curated/daily_bars/")
     assert hive is True
+
+
+def test_reviewed_stock_terms_outrank_newer_vendor_in_sql(tmp_path):
+    rows = pl.DataFrame(
+        {
+            "symbol": ["920395.BJ"] * 2,
+            "ex_date": [date(2024, 4, 17)] * 2,
+            "action_type": ["transfer"] * 2,
+            "cash_dividend": [0.0] * 2,
+            "bonus_ratio": [0.0] * 2,
+            "transfer_ratio": [0.4, 0.8],
+            "payment_date": [None] * 2,
+            "payment_source": [None] * 2,
+            "source": ["tdx_protocol"] * 2,
+            "fetched_at": ["2024-04-18T00:00:00Z", "2024-04-19T00:00:00Z"],
+        },
+        schema_overrides={"payment_date": pl.Date, "payment_source": pl.String},
+    )
+    root = tmp_path / "curated/corporate_actions"
+    root.mkdir(parents=True)
+    rows.write_parquet(root / "legacy.parquet")
+    db = ensure_duckdb_views(Config(data_root=tmp_path))
+    with duckdb.connect(str(db), read_only=True) as con:
+        assert con.execute("SELECT transfer_ratio FROM corporate_actions").fetchall() == [(0.4,)]
+    assert dedupe_by_primary_key(rows, "corporate_actions")["transfer_ratio"].to_list() == [0.4]
 
 
 def test_merge_style_view_glob_is_recursive():

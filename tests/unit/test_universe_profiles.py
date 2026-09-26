@@ -58,7 +58,7 @@ def test_strict_profile_delisting_evidence_fails_closed(tmp_path, monkeypatch):
     frame = pl.DataFrame({"trade_date": [date(2026, 8, 28)]})
     profile = resolve_universe_profile("cn_a_sh_sz_research_v1")
     monkeypatch.setattr(
-        "cnequity.steps.delisted.delisted_coverage_report",
+        "cnequity.quality.delisted_coverage.delisted_coverage_report",
         lambda *args, **kwargs: {
             "verified": False,
             "counts": {"pending_probe": 1},

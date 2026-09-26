@@ -55,6 +55,62 @@ def _revision_lake(root: Path, close: float) -> tuple[Config, RevisionStore, Pat
     return config, store, path
 
 
+@pytest.mark.parametrize("changed_dataset", ["instruments", "trading_status"])
+def test_revision_map_pins_universe_dependencies(tmp_path, changed_dataset):
+    cfg, store, _ = _revision_lake(tmp_path, 10.0)
+    day = date(2026, 1, 1)
+    frames = {
+        "instruments": pl.DataFrame(
+            {"symbol": ["600000.SH"], "list_date": [date(2000, 1, 1)], "delist_date": [None]},
+            schema_overrides={"delist_date": pl.Date},
+        ),
+        "trading_status": pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "trade_date": [day],
+                "is_trading": [True],
+                "status": ["normal"],
+                "risk_warning": [False],
+            }
+        ),
+    }
+    for dataset, frame in frames.items():
+        path = cfg.curated_root / dataset / "part.parquet"
+        path.parent.mkdir(parents=True)
+        frame.write_parquet(path)
+        store.commit(
+            dataset,
+            run_id="initial",
+            changed_files=[path],
+            schema_version=1,
+            contract_fingerprint="test",
+        )
+    pinned = {"daily_bars": 1, "instruments": 1, "trading_status": 1}
+    assert load("daily_bars", config=cfg, universe="all_a", revision_map=pinned).height == 1
+    frame = frames[changed_dataset].with_columns(
+        pl.lit(date(2025, 12, 31)).alias("delist_date")
+        if changed_dataset == "instruments"
+        else pl.lit(True).alias("risk_warning")
+    )
+    path = cfg.curated_root / changed_dataset / "part.parquet"
+    frame.write_parquet(path)
+    store.commit(
+        changed_dataset,
+        run_id="correction",
+        changed_files=[path],
+        schema_version=1,
+        contract_fingerprint="test",
+    )
+    assert load("daily_bars", config=cfg, universe="all_a").height == 0
+    assert load("daily_bars", config=cfg, universe="all_a", revision_map=pinned).height == 1
+
+
+def test_explicit_revision_cannot_silently_read_unversioned_lake(tmp_path):
+    _bars(tmp_path / "curated/daily_bars/part.parquet", date(2026, 1, 1), 10.0)
+    with pytest.raises(RevisionConsistencyError, match="no retained revision"):
+        load("daily_bars", data_root=tmp_path, revision=1)
+
+
 def test_cow_pointer_keeps_query_on_one_generation_after_failed_publish(tmp_path, monkeypatch):
     data = tmp_path / "data"
     cfg = Config(data_root=data)

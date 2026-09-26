@@ -249,6 +249,7 @@ def _collect_lake_findings(
     context: dict | None = None,
     *,
     full: bool = False,
+    offline: bool = False,
 ) -> list[dict]:
     """All quality findings for the current curated lake (run-independent).
 
@@ -498,7 +499,8 @@ def _collect_lake_findings(
     # Reaches the statistics bureau and the exchanges; gated on [sources.nbs]
     # and [sources.exchange] so an offline lake (and every unit test) stays off
     # the network.
-    findings.extend(run_authority_checks(config, trade_date))
+    if not offline:
+        findings.extend(run_authority_checks(config, trade_date))
     return findings
 
 
@@ -757,7 +759,7 @@ def lake_health(
 def _last_trading_day(config: Config, trade_date: date) -> date:
     from datetime import timedelta
 
-    from cnequity.steps.common import is_trading_day
+    from cnequity.query.calendar import is_trading_day
 
     d = trade_date if is_session_final(trade_date) else trade_date - timedelta(days=1)
     for _ in range(15):

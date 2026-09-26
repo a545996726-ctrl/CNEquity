@@ -249,7 +249,7 @@ def _run_wheel_smoke(work: Path) -> dict[str, Any]:
     lake = work / "wheel-lake"
     cne = _venv_script(venv, "cne")
     for command in (
-        ["config", "init", "--config", str(config_path), "--data-root", str(lake)],
+        ["config", "create", "--config", str(config_path), "--data-root", str(lake)],
         ["config", "validate", "--config", str(config_path)],
         ["init", "--config", str(config_path), "--layout-only"],
     ):

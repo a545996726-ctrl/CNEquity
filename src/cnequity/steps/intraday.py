@@ -22,6 +22,7 @@ from cnequity.adapters.tdx_protocol.minute_bars import pages_for_window
 from cnequity.config import Config
 from cnequity.domain.datasets import get_dataset, intraday_datasets
 from cnequity.orchestrator.registry import register_step
+from cnequity.query.intraday_scope import MinuteBarsScopeError as MinuteBarsScopeError
 from cnequity.steps.common import incremental_window, instrument_metadata, load_symbols
 from cnequity.storage import StagingWriter
 
@@ -82,62 +83,6 @@ def _validate_minute_batch(
             f"{sorted(returned_frequencies)}"
         )
     return normalized
-
-
-class MinuteBarsScopeError(RuntimeError):
-    """Raised when the configured scope cannot be resolved to symbols."""
-
-
-def _index_members(config: Config, index_symbol: str) -> list[str]:
-    """Latest known constituents of *index_symbol* from ``index_constituents``."""
-    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
-
-    root = config.curated_root / "index_constituents"
-    if not dataset_has_parquet(root):
-        raise MinuteBarsScopeError(
-            f"minute_bars scope 'index:{index_symbol}' needs the index_constituents "
-            "dataset, which is empty — run `cne run daily` (or `cne backfill "
-            "index_constituents`) first, or set [minute_bars].scope = 'watchlist'"
-        )
-    df = (
-        scan_parquet_root(root, partition_col="as_of_date", hive=False)
-        .filter(pl.col("index_symbol") == index_symbol)
-        .select("symbol", "as_of_date")
-        .collect()
-    )
-    if df.is_empty():
-        raise MinuteBarsScopeError(
-            f"index_constituents holds no rows for {index_symbol!r}; "
-            "check the index symbol or pick another scope"
-        )
-    latest = df["as_of_date"].max()
-    return sorted(df.filter(pl.col("as_of_date") == latest)["symbol"].unique().to_list())
-
-
-def resolve_scope(config: Config) -> list[str]:
-    """Symbols the intraday capture covers, per ``[minute_bars].scope``.
-
-    ``index:<symbol>`` — that index's latest constituents (the default;
-    沪深300 is ~300 names, about 2MB a day at 1m).
-    ``watchlist`` — exactly ``[minute_bars].symbols``.
-    ``all`` — the whole universe. ~1.3M rows and ~30MB a day; opt in knowingly.
-    """
-    scope = (config.minute_bars_scope or "").strip()
-    if scope == "all":
-        # BJ has no TDX intraday route at all, so it would be all failures.
-        return [s for s in load_symbols(config) if not s.endswith(".BJ")]
-    if scope == "watchlist":
-        symbols = [s.strip() for s in config.minute_bars_symbols if s.strip()]
-        if not symbols:
-            raise MinuteBarsScopeError(
-                "[minute_bars].scope = 'watchlist' but [minute_bars].symbols is empty"
-            )
-        return symbols
-    if scope.startswith("index:"):
-        return _index_members(config, scope.split(":", 1)[1].strip())
-    raise MinuteBarsScopeError(
-        f"unknown [minute_bars].scope {scope!r} (expected 'all', 'watchlist', or 'index:<symbol>')"
-    )
 
 
 def _filter_all_scope_to_listed_symbols(
@@ -446,3 +391,9 @@ def _approx_trading_days(config: Config, start: date, end: date) -> int:
     from cnequity.steps.common import list_trading_dates
 
     return max(1, len(list_trading_dates(config, start, end)))
+
+
+def resolve_scope(config: Config) -> list[str]:
+    from cnequity.query.intraday_scope import resolve_scope as read_scope
+
+    return read_scope(config, all_symbols=lambda: load_symbols(config))

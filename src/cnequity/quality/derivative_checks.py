@@ -97,7 +97,7 @@ def derivative_tip_scope(config: Config, dataset: str) -> dict | None:
     if bars is None:
         return None
     from cnequity.adapters.futures_exchange import members
-    from cnequity.steps.derivatives import expected_exchanges
+    from cnequity.adapters.futures_exchange.registry import expected_exchanges
 
     kind = "futures" if dataset == "futures_bars" else "options"
     try:
@@ -188,7 +188,7 @@ def exchange_session_gaps(config: Config, dataset: str) -> dict[str, list[date]]
     if bars is None:
         return {}
     from cnequity.domain.derivatives import UNPUBLISHED_FUTURES_SESSIONS
-    from cnequity.steps.common import list_trading_dates
+    from cnequity.query.calendar import list_trading_dates
 
     present = bars.select("exchange", "trade_date").unique().collect()
     gaps: dict[str, list[date]] = {}

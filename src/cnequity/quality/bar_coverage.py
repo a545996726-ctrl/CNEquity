@@ -7,17 +7,17 @@ from datetime import date
 import polars as pl
 
 from cnequity.config import Config
-from cnequity.domain.symbols import filter_ingest_universe
+from cnequity.domain.symbols import filter_ingest_universe, is_subscription_placeholder
 from cnequity.domain.trading_status import (
     CURRENT_SNAPSHOT_SOURCES,
     DERIVED_BAR_GAP_SOURCE,
     EVIDENCE_POINT_IN_TIME,
     evidence_rank_expr,
 )
+from cnequity.query.calendar import list_trading_dates
 from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
-from cnequity.steps.common import (
-    instrument_metadata,
-    list_trading_dates,
+from cnequity.storage.instrument_catalog import (
+    load_curated_instruments,
     load_curated_trading_status,
 )
 
@@ -94,7 +94,23 @@ def daily_bar_coverage(config: Config, start: date, end: date) -> dict:
     """
     if start > end:
         raise ValueError("start must be on or before end")
-    instruments = instrument_metadata(config)
+    instruments = load_curated_instruments(config)
+    if instruments is None:
+        instruments = pl.DataFrame(
+            schema={"symbol": pl.String, "list_date": pl.Date, "delist_date": pl.Date}
+        )
+    if not instruments.is_empty():
+        instruments = instruments.filter(
+            pl.Series(
+                [
+                    not is_subscription_placeholder(row.get("name"), row.get("symbol"))
+                    for row in instruments.iter_rows(named=True)
+                ]
+            )
+        )
+    for column in ("list_date", "delist_date"):
+        if column not in instruments.columns:
+            instruments = instruments.with_columns(pl.lit(None, dtype=pl.Date).alias(column))
     scope = filter_ingest_universe(instruments["symbol"].to_list(), config.ingest_universe)
     instruments = instruments.filter(pl.col("symbol").is_in(scope))
     unknown = instruments.filter(pl.col("list_date").is_null())["symbol"].unique().sort().to_list()

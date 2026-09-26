@@ -40,6 +40,7 @@ from cnequity.query.parquet_scan import (
     scan_parquet_root,
 )
 from cnequity.query.universe import apply_universe_filter
+from cnequity.storage.read_context import ReadContext
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,7 @@ def _require_profile_delisting_evidence(
     config: Config,
     frame: pl.DataFrame,
     profile: UniverseProfile,
+    read_context: ReadContext | None = None,
 ) -> None:
     """Fail closed when a strict profile cannot prove survivorship coverage."""
     if not profile.strict_research or frame.is_empty() or "trade_date" not in frame.columns:
@@ -202,7 +204,7 @@ def _require_profile_delisting_evidence(
         for requirement in profile.evidence_requirements
     ):
         return
-    from cnequity.steps.delisted import delisted_coverage_report
+    from cnequity.quality.delisted_coverage import delisted_coverage_report
 
     start = frame["trade_date"].min()
     end = frame["trade_date"].max()
@@ -211,6 +213,7 @@ def _require_profile_delisting_evidence(
         start,
         end,
         universe=profile.legacy_universe,
+        read_context=read_context,
     )
     if not report.get("verified"):
         counts = report.get("counts") or {}
@@ -369,13 +372,15 @@ def _read_dataset(
     universe: UniverseType | str | None = None,
     strict_universe: bool = False,
     revision: RevisionRef | None = None,
+    read_context: ReadContext | None = None,
 ) -> pl.DataFrame:
-    root = _dataset_root(config, dataset)
+    root = read_context.roots[dataset] if read_context else _dataset_root(config, dataset)
     if not dataset_has_parquet(
         root,
         dataset=dataset,
         meta_root=config.meta_root,
         revision=revision,
+        committed=read_context is None,
     ):
         raise ReaderError(_missing_dataset_message(dataset, root, config.data_root))
 
@@ -390,6 +395,7 @@ def _read_dataset(
             dataset=dataset,
             meta_root=config.meta_root,
             revision=revision,
+            committed=read_context is None,
         )
     except FileNotFoundError as exc:
         raise ReaderError(_missing_dataset_message(dataset, root, config.data_root)) from exc
@@ -404,6 +410,7 @@ def _read_dataset(
             universe=universe,
             date_col=DATE_COLUMNS[dataset],
             strict=strict_universe,
+            read_context=read_context,
         )
         price_cols = [col for col in ("open", "high", "low", "close") if col in df.columns]
         if price_cols and not df.is_empty():
@@ -527,6 +534,7 @@ def _apply_adjustment(
     *,
     strict_adj: bool = False,
     revision: RevisionRef | None = None,
+    read_context: ReadContext | None = None,
 ) -> pl.DataFrame:
     if bars.is_empty():
         return bars
@@ -537,6 +545,7 @@ def _apply_adjustment(
         start=start,
         end=end,
         revision=revision,
+        read_context=read_context,
     )
     if factors.is_empty():
         out = bars.with_columns(
@@ -710,10 +719,14 @@ def load(
         Lake location; auto-detects ``configs/cnequity.toml`` when omitted.
         Raises ``ReaderError`` if config or dataset parquet files are missing.
     revision:
-        Optional committed dataset revision number or revision id.  When
-        supplied, the query reads that retained immutable generation rather
-        than whatever is current at collection time; omitted reads pin the
-        current pointer when the LazyFrame is constructed.
+        Committed revision number/id for the primary dataset, or a mapping
+        of dataset names to revisions. A scalar does not pin dependencies.
+    revision_map:
+        Per-dataset revisions for data and its dependencies (factors,
+        instruments, trading status, calendar). Each required generation is
+        selected once for this load; unspecified dependencies select current.
+        Missing explicit versions fail closed. Quality receipts, operator
+        configuration and software versions are not pinned by this map.
     """
     cfg = resolve_config(config=config, data_root=data_root)
     revision_selection = _merge_revision_selection(revision, revision_map)
@@ -743,6 +756,32 @@ def load(
     end_d = _parse_date(end)
     as_of_d = _parse_date(as_of)
 
+    dependencies = {dataset}
+    if adjust and dataset in ADJUSTABLE_DATASETS:
+        dependencies.add("adj_factors")
+    if effective_universe:
+        dependencies.update({"instruments", "trading_status", "trading_calendar"})
+    selected_revisions = {
+        name: (
+            _revision_for_dataset(revision_selection, name, fallback_primary=name == dataset)
+            if name == dataset or isinstance(revision_selection, Mapping)
+            else None
+        )
+        for name in dependencies
+    }
+    read_context = ReadContext.capture(cfg, dependencies, selected_revisions)
+    from cnequity.storage.research_inputs import validate_research_policies
+
+    validate_research_policies(
+        cfg,
+        dependencies,
+        resolved_profile.name
+        if resolved_profile
+        else f"legacy_{effective_universe}"
+        if effective_universe
+        else None,
+    )
+
     if dataset in PIT_DATASETS:
         if as_of_d is None:
             raise ReaderError(f"{dataset} requires as_of= for point-in-time queries")
@@ -751,6 +790,7 @@ def load(
             dataset,
             symbols=symbols,
             revision=_revision_for_dataset(revision_selection, dataset),
+            read_context=read_context,
         )
         df = _apply_pit_filters(
             df,
@@ -777,9 +817,10 @@ def load(
         universe=effective_universe,
         strict_universe=effective_strict_universe,
         revision=_revision_for_dataset(revision_selection, dataset),
+        read_context=read_context,
     )
     if resolved_profile is not None and dataset == "daily_bars":
-        _require_profile_delisting_evidence(cfg, df, resolved_profile)
+        _require_profile_delisting_evidence(cfg, df, resolved_profile, read_context)
 
     # Intraday datasets join on (symbol, trade_date) like the daily bars do: a
     # corporate action applies to a whole session, so every bar in a day shares
@@ -794,6 +835,7 @@ def load(
             start_d,
             end_d,
             strict_adj=strict_adj,
+            read_context=read_context,
             # A scalar revision belongs to the primary dataset.  Adjustment
             # factors have their own revision sequence; absent an explicit
             # map, use their current committed generation for backwards

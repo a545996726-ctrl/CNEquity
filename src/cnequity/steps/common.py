@@ -11,7 +11,6 @@ from datetime import date, datetime, timedelta
 
 import polars as pl
 
-from cnequity.adapters.calendar.holidays_cn import CLOSED_DATES
 from cnequity.adapters.tdx_protocol.client import fetch_instruments
 from cnequity.config import Config
 from cnequity.domain.datasets import DATASETS, calendar_scope_datasets, fetch_semantics
@@ -19,6 +18,10 @@ from cnequity.domain.frames import with_columns_unless_blank
 from cnequity.domain.schemas import data_version_for, with_provenance
 from cnequity.domain.symbols import is_subscription_placeholder
 from cnequity.storage import StagingWriter
+from cnequity.storage.instrument_catalog import load_curated_instruments as load_curated_instruments
+from cnequity.storage.instrument_catalog import (
+    load_curated_trading_status as load_curated_trading_status,
+)
 from cnequity.storage.state import StateStore
 
 logger = logging.getLogger(__name__)
@@ -118,97 +121,6 @@ def incremental_window(config: Config, dataset: str, trade_date: date) -> date:
     return trade_date - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
 
 
-def _load_trading_calendar_df(
-    config: Config,
-    *,
-    start: date | None = None,
-    end: date | None = None,
-) -> pl.DataFrame | None:
-    """Load trading_calendar, preferring a lazy hive scan with optional date prune."""
-    curated = config.curated_root / "trading_calendar"
-    if curated.exists() and any(curated.rglob("*.parquet")):
-        from cnequity.query.canonical import dedupe_by_primary_key
-
-        try:
-            from cnequity.query.parquet_scan import collect_parquet_root
-
-            return dedupe_by_primary_key(
-                collect_parquet_root(curated, partition_col="trade_date", start=start, end=end),
-                "trading_calendar",
-            )
-        except (FileNotFoundError, OSError, pl.exceptions.PolarsError, ValueError) as exc:
-            logger.warning(
-                "curated trading_calendar scan failed for %s; salvaging readable files: %s",
-                curated,
-                exc,
-            )
-        files = list(curated.glob("**/*.parquet"))
-        if files:
-            try:
-                lf = pl.scan_parquet([str(f) for f in files])
-                if start is not None:
-                    lf = lf.filter(pl.col("trade_date") >= start)
-                if end is not None:
-                    lf = lf.filter(pl.col("trade_date") <= end)
-                return dedupe_by_primary_key(lf.collect(), "trading_calendar")
-            except (FileNotFoundError, OSError, pl.exceptions.PolarsError, ValueError) as exc:
-                logger.warning(
-                    "mixed curated trading_calendar scan failed for %s; reading files individually: %s",
-                    curated,
-                    exc,
-                )
-                frames: list[pl.DataFrame] = []
-                for path in files:
-                    try:
-                        frames.append(pl.read_parquet(path))
-                    except (
-                        FileNotFoundError,
-                        OSError,
-                        pl.exceptions.PolarsError,
-                        ValueError,
-                    ) as file_exc:
-                        logger.warning(
-                            "skipping unreadable trading_calendar file %s: %s", path, file_exc
-                        )
-                if frames:
-                    frame = pl.concat(frames, how="diagonal_relaxed")
-                    if "trade_date" in frame.columns:
-                        if start is not None:
-                            frame = frame.filter(pl.col("trade_date") >= start)
-                        if end is not None:
-                            frame = frame.filter(pl.col("trade_date") <= end)
-                    return dedupe_by_primary_key(frame, "trading_calendar")
-    staging_root = config.staging_root / "trading_calendar"
-    staging = sorted(staging_root.rglob("*.parquet")) if staging_root.exists() else []
-    if staging:
-        from cnequity.query.canonical import dedupe_by_primary_key
-
-        df = pl.concat([pl.read_parquet(path) for path in staging], how="diagonal_relaxed")
-        if "trade_date" in df.columns:
-            df = dedupe_by_primary_key(df, "trading_calendar")
-        if start is not None:
-            df = df.filter(pl.col("trade_date") >= start)
-        if end is not None:
-            df = df.filter(pl.col("trade_date") <= end)
-        return df
-    return None
-
-
-def load_curated_instruments(config: Config) -> pl.DataFrame | None:
-    """Read the merge-style instrument catalog across all surviving shards."""
-    root = config.curated_root / "instruments"
-    if not root.exists() or not any(root.rglob("*.parquet")):
-        return None
-    from cnequity.query.canonical import dedupe_by_primary_key
-    from cnequity.query.parquet_scan import collect_parquet_root
-
-    try:
-        frame = collect_parquet_root(root, hive=False)
-    except FileNotFoundError:
-        return None
-    return dedupe_by_primary_key(frame, "instruments")
-
-
 def _load_staged_instruments(config: Config) -> pl.DataFrame | None:
     """Read all recoverable instrument fragments when curated data is absent."""
     root = config.staging_root / "instruments"
@@ -232,64 +144,6 @@ def _without_subscription_placeholders(frame: pl.DataFrame) -> pl.DataFrame:
         for name, symbol in zip(names, symbols, strict=True)
     ]
     return frame.filter(pl.Series(keep))
-
-
-def list_trading_dates(config: Config, start: date, end: date) -> list[date]:
-    """Trading days in [start, end] from curated data or the bundled calendar.
-
-    Never fall back to plain weekdays for the CN market: that would classify
-    Spring Festival and National Day as sessions when the lake has not yet
-    materialized ``trading_calendar``.
-    """
-    if start > end:
-        return []
-    cal = _load_trading_calendar_df(config, start=start, end=end)
-    if cal is not None and not cal.is_empty() and "trade_date" in cal.columns:
-        covered = set(cal.get_column("trade_date").drop_nulls().to_list())
-        expected_days = (end - start).days + 1
-        if len(covered) == expected_days:
-            out = (
-                cal.filter(
-                    pl.col("is_trading")
-                    & (pl.col("trade_date").dt.weekday() <= 5)
-                    & ~pl.col("trade_date").dt.strftime("%Y-%m-%d").is_in(CLOSED_DATES)
-                )["trade_date"]
-                .sort()
-                .to_list()
-            )
-            if out:
-                return out
-        else:
-            logger.warning(
-                "trading_calendar only covers %d/%d calendar day(s) in %s..%s; "
-                "rebuilding from the seed and bar evidence",
-                len(covered),
-                expected_days,
-                start.isoformat(),
-                end.isoformat(),
-            )
-    from cnequity.adapters.calendar.exchange_calendar import (
-        build_trading_calendar,
-        ensure_seed_csv,
-    )
-
-    seed_path = config.meta_root / "seeds" / "trading_calendar.csv"
-    effective_seed = seed_path if seed_path.exists() else ensure_seed_csv()
-    calendar = build_trading_calendar(
-        start,
-        end,
-        seed_path=effective_seed,
-        curated_root=config.curated_root if config.curated_root.exists() else None,
-    )
-    return (
-        calendar.filter(
-            pl.col("is_trading")
-            & (pl.col("trade_date").dt.weekday() <= 5)
-            & ~pl.col("trade_date").dt.strftime("%Y-%m-%d").is_in(CLOSED_DATES)
-        )["trade_date"]
-        .sort()
-        .to_list()
-    )
 
 
 def walks_calendar_days(dataset: str) -> bool:
@@ -355,37 +209,6 @@ def last_session_on_or_before(config: Config, day: date) -> date:
         f"{day.isoformat()}. The trading calendar is missing or wrong for that "
         "window; rebuild it with `cne run daily --steps trading_calendar`."
     )
-
-
-def is_trading_day(config: Config, trade_date: date) -> bool:
-    """Return whether *trade_date* is a trading day per curated calendar or seed."""
-    if trade_date.weekday() >= 5 or trade_date.isoformat() in CLOSED_DATES:
-        return False
-    cal = _load_trading_calendar_df(config, start=trade_date, end=trade_date)
-    if cal is not None and not cal.is_empty():
-        row = cal.filter(pl.col("trade_date") == trade_date)
-        if not row.is_empty():
-            return bool(row["is_trading"][0])
-
-    from cnequity.adapters.calendar.exchange_calendar import (
-        build_trading_calendar,
-        ensure_seed_csv,
-    )
-
-    seed_path = config.meta_root / "seeds" / "trading_calendar.csv"
-    effective_seed = seed_path if seed_path.exists() else ensure_seed_csv()
-    day_cal = build_trading_calendar(
-        trade_date,
-        trade_date,
-        seed_path=effective_seed,
-        curated_root=config.curated_root if config.curated_root.exists() else None,
-    )
-    if day_cal.is_empty():
-        raise RuntimeError(
-            f"trading calendar returned no row for {trade_date.isoformat()}; "
-            "refusing to classify it by weekday"
-        )
-    return bool(day_cal["is_trading"][0])
 
 
 def empty_day_is_expected(config: Config, dataset: str, day: date) -> bool:
@@ -690,48 +513,6 @@ def instrument_metadata(config: Config) -> pl.DataFrame:
         if name not in out.columns:
             out = with_columns_unless_blank(out, pl.lit(None, dtype=dtype).alias(name))
     return out
-
-
-def load_curated_trading_status(
-    config: Config,
-    *,
-    start: date | None = None,
-    end: date | None = None,
-    symbols: list[str] | None = None,
-) -> pl.DataFrame | None:
-    """Load the available status evidence without making a network request.
-
-    ``trading_status`` is an advisory but independently fetched daily
-    snapshot.  Daily-bar routing may use it to prove that a missing symbol was
-    suspended; it must never synthesize a status by treating an absent row as
-    ``normal``.  A corrupt or absent status root therefore returns ``None``
-    and leaves the symbol in the strict unknown bucket.
-    """
-    root = config.curated_root / "trading_status"
-    if not root.exists() or not any(root.rglob("*.parquet")):
-        return None
-    try:
-        from cnequity.query.canonical import dedupe_by_primary_key
-        from cnequity.query.parquet_scan import collect_parquet_root
-
-        frame = collect_parquet_root(
-            root,
-            partition_col="trade_date",
-            start=start,
-            end=end,
-            symbols=symbols,
-        )
-    except (FileNotFoundError, OSError, pl.exceptions.PolarsError, ValueError) as exc:
-        logger.warning("curated trading_status scan failed; status evidence unavailable: %s", exc)
-        return None
-    required = {"symbol", "trade_date", "is_trading"}
-    if not required.issubset(frame.columns):
-        logger.warning(
-            "curated trading_status lacks required evidence columns: %s",
-            sorted(required - set(frame.columns)),
-        )
-        return None
-    return dedupe_by_primary_key(frame, "trading_status")
 
 
 def _row_fingerprint(rows: Iterable[dict]) -> str:
@@ -1276,3 +1057,15 @@ def walk_day_backfill(
             "audit_findings": [_backfill_empty_day_finding(dataset, empty_days)]
         }
     return result
+
+
+def list_trading_dates(config: Config, start: date, end: date) -> list[date]:
+    from cnequity.query.calendar import list_trading_dates as read_dates
+
+    return read_dates(config, start, end, include_staging=True)
+
+
+def is_trading_day(config: Config, trade_date: date) -> bool:
+    from cnequity.query.calendar import is_trading_day as read_day
+
+    return read_day(config, trade_date, include_staging=True)

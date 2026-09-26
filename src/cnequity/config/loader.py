@@ -310,6 +310,8 @@ class Config:
     # it would have blocked so the gate can be switched on with evidence
     # rather than optimism.  See [quality].audit_gate.
     audit_gate: str = "shadow"
+    # Full offline candidate audit; independent of post-publication run status.
+    publication_gate: str = "off"
     # Keep new compatibility options at the end for the same reason. If an
     # explicit proxy fails only for push2his, this permits one retry without
     # proxy/environment routing; default-off avoids bypassing mandatory proxy
@@ -952,6 +954,7 @@ def load_config(path: str | Path) -> Config:
             if str(value).strip()
         ),
         audit_gate=str(quality_raw.get("audit_gate", "shadow")).strip().lower(),
+        publication_gate=str(quality_raw.get("publication_gate", "off")).strip().lower(),
         config_path=config_path,
     )
     return cfg
@@ -1025,6 +1028,8 @@ def validate_config(cfg: Config) -> list[str]:
         errors.append(f"[universe].ingest must be one of: {known}")
     if cfg.audit_gate not in {"off", "shadow", "block"}:
         errors.append("[quality].audit_gate must be one of: off, shadow, block")
+    if cfg.publication_gate not in {"off", "shadow", "block"}:
+        errors.append("[quality].publication_gate must be one of: off, shadow, block")
     if cfg.raw_archive_compression not in {"gzip", "none"}:
         errors.append("[raw_archive].compression must be 'gzip' or 'none'")
     if cfg.raw_archive_max_payload_bytes is not None and cfg.raw_archive_max_payload_bytes < 1:

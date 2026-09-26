@@ -26,6 +26,10 @@ import polars as pl
 from cnequity.domain.symbols import is_all_a_symbol, is_cdr_symbol
 
 ISSUER_NOTICE_PREFIX = "issuer_notice:"
+PAYMENT_EVIDENCE_INPUTS = frozenset(
+    {"symbol", "ex_date", "action_type", "payment_date", "payment_source"}
+)
+REVIEWED_TERMS_TOLERANCE = 1e-8
 
 # BJ issuer notices that state a capital-reserve transfer only, while TDX also
 # reported the same quantity as a bonus.  (symbol, ex_date) -> (notice id,
@@ -124,8 +128,7 @@ def clear_invalid_payment_evidence(df: pl.DataFrame) -> pl.DataFrame:
 
 def evidence_level_expr(columns: set[str]) -> pl.Expr | None:
     """0/1/2 evidence level for corporate-action rows (see module docstring)."""
-    needed = {"symbol", "ex_date", "action_type", "payment_date", "payment_source"}
-    if not needed <= columns:
+    if not PAYMENT_EVIDENCE_INPUTS <= columns:
         return None
     source = pl.col("payment_source").fill_null("")
     valid = valid_payment_expr()
@@ -137,7 +140,7 @@ def evidence_level_expr(columns: set[str]) -> pl.Expr | None:
             (pl.col("symbol") == symbol)
             & (pl.col("ex_date") == ex_date)
             & (pl.col("action_type") == action)
-            & ((pl.col(column).cast(pl.Float64) - value).abs() <= 1e-8)
+            & ((pl.col(column).cast(pl.Float64) - value).abs() <= REVIEWED_TERMS_TOLERANCE)
         )
     return (
         pl.when((valid & source.str.starts_with(ISSUER_NOTICE_PREFIX)) | reviewed)
@@ -145,4 +148,29 @@ def evidence_level_expr(columns: set[str]) -> pl.Expr | None:
         .when(valid & (source != ""))
         .then(1)
         .otherwise(0)
+    )
+
+
+def evidence_level_sql(columns: set[str]) -> str | None:
+    """SQL counterpart of ``evidence_level_expr``, using the same reviewed terms."""
+    if not PAYMENT_EVIDENCE_INPUTS <= columns:
+        return None
+
+    def literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    reviewed = []
+    for (symbol, ex_date, action), (column, value) in reviewed_stock_terms().items():
+        if column in columns:
+            reviewed.append(
+                f"(symbol = {literal(symbol)} AND ex_date = DATE '{ex_date.isoformat()}' "
+                f"AND action_type = {literal(action)} "
+                f"AND abs(CAST({column} AS DOUBLE) - {value!r}) <= {REVIEWED_TERMS_TOLERANCE})"
+            )
+    valid = "(payment_date IS NOT NULL AND payment_date >= ex_date)"
+    source = "coalesce(payment_source, '')"
+    terms = " OR ".join(reviewed) or "FALSE"
+    return (
+        f"CASE WHEN ({valid} AND starts_with({source}, {literal(ISSUER_NOTICE_PREFIX)})) "
+        f"OR ({terms}) THEN 2 WHEN {valid} AND {source} <> '' THEN 1 ELSE 0 END"
     )

@@ -14,6 +14,33 @@ from cnequity.storage.source_snapshots import SnapshotStore
 from cnequity.storage.state import StateStore
 
 
+def test_cross_source_correction_retains_parent_and_records_changed_keys(tmp_path):
+    from cnequity.query.reader import load
+
+    cfg = Config(data_root=tmp_path)
+    day = date(2024, 6, 28)
+    store = RevisionStore(cfg.meta_root, cfg.curated_root)
+    writer = StagingWriter(cfg.staging_root)
+    for run_id, source, close, hour in [
+        ("original", "tdx_protocol", 1800.0, 0),
+        ("correction", "eastmoney", 1810.0, 1),
+    ]:
+        frame = _gate_bar_frame(day, close, source).with_columns(
+            pl.lit(f"2024-06-28T0{hour}:00:00+00:00").alias("fetched_at")
+        )
+        writer.write_batch("daily_bars", run_id, "batch", frame)
+        result = step_compact(cfg, day, run_id, {})
+        assert result.get("status", "success") == "success"
+    assert load("daily_bars", config=cfg, revision=1)["close"].to_list() == [1800.0]
+    assert load("daily_bars", config=cfg)["close"].to_list() == [1810.0]
+    receipt = store.latest("daily_bars")
+    assert receipt.metadata["base_revision_id"]
+    assert receipt.metadata["canonical_policy"] == "observation_recency_v1"
+    changes = receipt.metadata["changes"]
+    assert changes[0]["updated_keys"] == 1
+    assert changes[0]["source_changes"] == [{"from": "tdx_protocol", "to": "eastmoney", "keys": 1}]
+
+
 def _daily_bar_row(symbol: str, trade_date: date) -> dict:
     return {
         "symbol": symbol,
