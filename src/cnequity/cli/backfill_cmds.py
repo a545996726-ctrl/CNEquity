@@ -136,6 +136,14 @@ from cnequity.orchestrator.engine import JobEngine
     is_flag=True,
     help="仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。",
 )
+@click.option(
+    "--fill-em-outage",
+    is_flag=True,
+    help=(
+        "仅 valuation_metrics：东财快照中断时，用 Baostock 补东财最后一个完整日之后、"
+        "今天之前的 --start/--end 窗口；全市场取全才写入。"
+    ),
+)
 def backfill(
     dataset: str,
     config_path: str,
@@ -155,6 +163,7 @@ def backfill(
     ex_dates_str: str | None,
     bse_tip_repair: bool,
     bj_amount_repair: bool,
+    fill_em_outage: bool,
 ):
     """回填一个数据集。
 
@@ -233,6 +242,12 @@ def backfill(
         if start_d is None or end_d is None:
             raise click.ClickException("--bj-amount-repair 需要同时给 --start 和 --end")
         cfg._bj_amount_repair = True
+    if fill_em_outage:
+        if dataset != "valuation_metrics":
+            raise click.ClickException("--fill-em-outage 只适用于 valuation_metrics")
+        if start_d is None or end_d is None:
+            raise click.ClickException("--fill-em-outage 需要同时给 --start 和 --end")
+        cfg._valuation_fill_em_outage = True
     if bse_tip_repair:
         if not symbols_str:
             raise click.ClickException("--bse-tip-repair 需要 --symbols")

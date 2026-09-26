@@ -112,6 +112,35 @@ def _valuation_history_end(config: Config, trade_date: date) -> date:
     return min(trade_date, trade_date - timedelta(days=1))
 
 
+def _em_outage_window(
+    config: Config, trade_date: date, start: date, requested_end: date | None
+) -> tuple[date, date]:
+    """The sessions an EastMoney outage left without a snapshot, bounded.
+
+    Opt-in (``cne backfill valuation_metrics --fill-em-outage``). The ordinary
+    cap keeps baostock history behind the last complete EastMoney day, which
+    is right while EastMoney publishes and leaves an outage permanently empty
+    when it does not (push2 failed every host from 2026-09-22). This lets
+    baostock fill only what the outage lost: sessions after that last day and
+    before the run day, which EastMoney still owns.
+    """
+    from datetime import timedelta
+
+    from cnequity.quality.cross_checks import last_complete_em_valuation_tip
+
+    if requested_end is None:
+        raise RuntimeError("--fill-em-outage needs an explicit --end")
+    em_tip = last_complete_em_valuation_tip(config)
+    if em_tip is None:
+        raise RuntimeError(
+            "--fill-em-outage needs a complete EastMoney day to anchor on; "
+            "use the ordinary backfill for a lake without one"
+        )
+    return max(start, em_tip + timedelta(days=1)), min(
+        requested_end, trade_date - timedelta(days=1)
+    )
+
+
 def _backfill_valuation_metrics(config: Config, trade_date: date, run_id: str) -> dict:
     """Historical PE/PB/PS + market cap from baostock over the requested window.
 
@@ -169,7 +198,12 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
         _VALUATION_BACKFILL_START,
     )
     requested_end = getattr(config, "_backfill_end", None)
-    if requested_end is not None:
+    outage = bool(getattr(config, "_valuation_fill_em_outage", False))
+    if outage:
+        history_start, history_end = _em_outage_window(
+            config, trade_date, history_start, requested_end
+        )
+    elif requested_end is not None:
         history_end = min(history_end, requested_end)
     if history_end < history_start:
         return {
@@ -222,6 +256,16 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
             rows_written += int(chunk.get("rows_written", 0))
         report(offset + len(batch))
 
+    if outage and (all_failed or aborted_reason):
+        # An outage fill publishes whole sessions or nothing: a partial sweep
+        # is exactly the sparse tip `_valuation_history_end` exists to prevent.
+        # Failing the step keeps its batches from being compacted.
+        raise RuntimeError(
+            f"valuation_metrics EastMoney-outage fill incomplete: "
+            f"{len(set(all_failed))} of {len(todo)} symbol(s) failed"
+            f"{f' ({aborted_reason})' if aborted_reason else ''}; nothing will be "
+            "published — re-run the same command"
+        )
     result: dict = {
         "rows_read": rows_read,
         "rows_written": rows_written,

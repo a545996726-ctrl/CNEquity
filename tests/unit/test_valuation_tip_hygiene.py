@@ -234,3 +234,65 @@ def test_baostock_single_flight_refuses_overlap(tmp_path):
     assert out["rows_written"] == 0
     assert "baostock lock" in out["note"]
     assert out["context_updates"]["audit_findings"][0]["check"] == "baostock_single_flight"
+
+
+def _em_tip_lake(tmp_path, tip: date, symbols: list[str]):
+    cfg = _lake(tmp_path)
+    _write_day(cfg.curated_root, "daily_bars", tip, symbols, source="tdx", schema=DAILY_BARS_SCHEMA)
+    _write_day(
+        cfg.curated_root,
+        "valuation_metrics",
+        tip,
+        symbols,
+        source="eastmoney",
+        schema=VALUATION_METRICS_SCHEMA,
+    )
+    return cfg
+
+
+def test_an_outage_fill_reaches_only_the_days_eastmoney_missed(tmp_path):
+    """push2 failed every host from 2026-09-22; the last EM day was 09-21."""
+    from cnequity.steps.fundamentals import _em_outage_window
+
+    symbols = [f"{i:06d}.SH" for i in range(600000, 600005)]
+    cfg = _em_tip_lake(tmp_path, date(2026, 9, 21), symbols)
+
+    # Starts after the last EastMoney day, never on the run day it still owns.
+    assert _em_outage_window(cfg, date(2026, 9, 26), date(2026, 9, 1), date(2026, 9, 30)) == (
+        date(2026, 9, 22),
+        date(2026, 9, 25),
+    )
+
+
+def test_an_outage_fill_needs_an_end_and_an_eastmoney_anchor(tmp_path):
+    import pytest
+
+    from cnequity.steps.fundamentals import _em_outage_window
+
+    with pytest.raises(RuntimeError, match="--end"):
+        _em_outage_window(_lake(tmp_path), date(2026, 9, 26), date(2026, 9, 22), None)
+    with pytest.raises(RuntimeError, match="anchor"):
+        _em_outage_window(_lake(tmp_path), date(2026, 9, 26), date(2026, 9, 22), date(2026, 9, 24))
+
+
+def test_an_incomplete_outage_fill_publishes_nothing(tmp_path, monkeypatch):
+    import pytest
+
+    from cnequity.steps import fundamentals
+
+    symbols = [f"{i:06d}.SH" for i in range(600000, 600003)]
+    cfg = _em_tip_lake(tmp_path, date(2026, 9, 21), symbols)
+    cfg._backfill_start = date(2026, 9, 22)
+    cfg._backfill_end = date(2026, 9, 24)
+    cfg._valuation_fill_em_outage = True
+    monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
+    monkeypatch.setattr(
+        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.baostock.valuation.fetch_valuation_history",
+        lambda batch, start, end, config=None: (pl.DataFrame(), [batch[0]]),
+    )
+
+    with pytest.raises(RuntimeError, match="nothing will be published"):
+        fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-outage")
