@@ -504,3 +504,82 @@ def test_an_outage_fill_only_fills_sessions_the_lake_lacks(tmp_path, monkeypatch
     assert out["symbols_todo"] == 1
     assert set(written[0]["symbol"]) == {"920571.BJ"}
     assert written[0].height == 3
+
+
+# ---- daily run fills missed sessions --------------------------------------------
+
+
+def _gap_lake(tmp_path):
+    symbols = ["600000.SH", "000001.SZ"]
+    cfg = _em_tip_lake(tmp_path, date(2026, 9, 21), symbols)
+    for d in (date(2026, 9, 22), date(2026, 9, 23), date(2026, 9, 24)):
+        _write_day(
+            cfg.curated_root, "daily_bars", d, symbols, source="tdx", schema=DAILY_BARS_SCHEMA
+        )
+    return cfg, symbols
+
+
+def test_the_daily_run_reads_back_missed_sessions(tmp_path, monkeypatch):
+    from cnequity.steps import fundamentals
+
+    cfg, symbols = _gap_lake(tmp_path)
+    monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
+    asked: list[tuple] = []
+
+    def _dc(start, end=None, *, client=None, config=None):
+        asked.append((start, end))
+        return _dc_frame(symbols, [date(2026, 9, 22), date(2026, 9, 23)])
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter", _dc
+    )
+    monkeypatch.setattr(
+        fundamentals, "write_fetched", lambda *a, **k: {"rows_read": 4, "rows_written": 4}
+    )
+    gap_result = {
+        "rows_written": 2,
+        "context_updates": {
+            "audit_findings": [{"check": "coverage_gap", "gap_dates": ["2026-09-22", "2026-09-23"]}]
+        },
+    }
+    monkeypatch.setattr(fundamentals, "run_incremental_fetched", lambda *a, **k: dict(gap_result))
+
+    out = fundamentals.step_valuation_metrics(cfg, date(2026, 9, 24), "run-gap", {})
+    assert asked == [(date(2026, 9, 22), date(2026, 9, 23))]
+    assert out["gap_fill"]["sessions"] == ["2026-09-22", "2026-09-23"]
+    assert not (out.get("context_updates") or {}).get("audit_findings")
+
+
+def test_no_gap_means_no_extra_request(tmp_path, monkeypatch):
+    from cnequity.steps import fundamentals
+
+    cfg, symbols = _gap_lake(tmp_path)
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",
+        lambda *a, **k: pytest.fail("no missed session, no read-back"),
+    )
+    monkeypatch.setattr(
+        fundamentals, "run_incremental_fetched", lambda *a, **k: {"rows_written": 2}
+    )
+    out = fundamentals.step_valuation_metrics(cfg, date(2026, 9, 22), "run-nogap", {})
+    assert "gap_fill" not in out
+
+
+def test_a_failed_read_back_does_not_block_the_day(tmp_path, monkeypatch):
+    from cnequity.steps import fundamentals
+
+    cfg, symbols = _gap_lake(tmp_path)
+    monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
+
+    def _dc(*a, **k):
+        raise RuntimeError("datacenter 502")
+
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter", _dc
+    )
+    monkeypatch.setattr(
+        fundamentals, "run_incremental_fetched", lambda *a, **k: {"rows_written": 2}
+    )
+    out = fundamentals.step_valuation_metrics(cfg, date(2026, 9, 24), "run-fail", {})
+    assert out["rows_written"] == 2
+    assert out["context_updates"]["audit_findings"][0]["check"] == "valuation_gap_fill_failed"

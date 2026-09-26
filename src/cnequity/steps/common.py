@@ -74,6 +74,10 @@ def _is_deep_reconciliation_day(config: Config, trade_date: date) -> bool:
 # job ran announcement_index's 30-day sweep four times every Saturday — ~2 h of
 # CNINFO requests where one pass was the design) walks the full window once.
 _DEEP_RECONCILED_FIELD = "deep_reconciled_on"
+# Same for the shallow tail: the 6-hourly events job re-walked the last 7 days
+# of announcements on each of its four daily runs (~1,850 CNINFO requests a
+# day). The tail is walked once per day; later runs fetch from the watermark.
+_TAIL_RECONCILED_FIELD = "tail_reconciled_on"
 
 
 def _deep_reconciliation_due(config: Config, dataset: str, trade_date: date) -> bool:
@@ -85,6 +89,22 @@ def _deep_reconciliation_due(config: Config, dataset: str, trade_date: date) -> 
         return False
     state = StateStore(config.meta_root)
     return state.get_date(dataset, field=_DEEP_RECONCILED_FIELD) != trade_date
+
+
+def _reconciliation_depth(config: Config, dataset: str, trade_date: date) -> str | None:
+    """How far back this run of a tiered feed reaches: deep, tail or tip.
+
+    None for a feed without a shallow tier (its full lookback every run).
+    """
+    spec = DATASETS.get(dataset)
+    if not int(getattr(spec, "shallow_reconciliation_lookback_days", 0) or 0):
+        return None
+    if _deep_reconciliation_due(config, dataset, trade_date):
+        return "deep"
+    state = StateStore(config.meta_root)
+    if state.get_date(dataset, field=_TAIL_RECONCILED_FIELD) == trade_date:
+        return "tip"
+    return "tail"
 
 
 def incremental_window(config: Config, dataset: str, trade_date: date) -> date:
@@ -105,7 +125,11 @@ def incremental_window(config: Config, dataset: str, trade_date: date) -> date:
     spec = DATASETS.get(dataset)
     lookback = max(int(getattr(spec, "reconciliation_lookback_days", 0) or 0), 0)
     shallow = max(int(getattr(spec, "shallow_reconciliation_lookback_days", 0) or 0), 0)
-    if shallow and not _deep_reconciliation_due(config, dataset, trade_date):
+    depth = _reconciliation_depth(config, dataset, trade_date) if shallow else None
+    if depth == "tip":
+        # Tail already walked today: from the watermark day to the run day.
+        lookback = 1
+    elif depth == "tail":
         # The deep tail is swept once, on its own day (see `_is_deep_reconciliation_day`);
         # every other run walks the near tail only. Coverage over a week is
         # unchanged — a late-indexed record is picked up by the next deep sweep
@@ -399,7 +423,7 @@ def fetch_incremental_daily(
     else:
         dates = incremental_trade_dates(config, dataset, trade_date)
     # Decided before the fetch, with the same state the window was built from.
-    deep_run = _deep_reconciliation_due(config, dataset, trade_date)
+    depth = _reconciliation_depth(config, dataset, trade_date)
     if (
         not dates
         and semantics == "snapshot"
@@ -469,9 +493,12 @@ def fetch_incremental_daily(
         findings.append(_dense_empty_day_finding(dataset, empty_days))
     if failed_days:
         findings.append(_fetch_failed_day_finding(dataset, failed_days))
-    elif deep_run:
-        # Only a clean deep sweep counts; a partial one is retried deep.
-        StateStore(config.meta_root).set_date(dataset, trade_date, field=_DEEP_RECONCILED_FIELD)
+    elif depth in {"deep", "tail"}:
+        # Only a clean sweep counts; a partial one is retried at the same depth.
+        state = StateStore(config.meta_root)
+        if depth == "deep":
+            state.set_date(dataset, trade_date, field=_DEEP_RECONCILED_FIELD)
+        state.set_date(dataset, trade_date, field=_TAIL_RECONCILED_FIELD)
     if not frames:
         return pl.DataFrame(), findings
     combined = pl.concat(frames, how="diagonal_relaxed")

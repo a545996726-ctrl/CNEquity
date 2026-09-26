@@ -75,7 +75,8 @@ def step_valuation_metrics(config: Config, trade_date: date, run_id: str, contex
     # never have a price bar (audit: valuation_bars_orphan_symbol). Pin the daily
     # snapshot to the same universe daily_bars actually realises so PE/PB rows are
     # only written for symbols that trade.
-    return run_incremental_fetched(
+    gap_fill = _fill_valuation_gaps(config, trade_date, run_id)
+    result = run_incremental_fetched(
         config,
         trade_date,
         run_id,
@@ -85,6 +86,92 @@ def step_valuation_metrics(config: Config, trade_date: date, run_id: str, contex
         allow_empty=False,
         universe=load_bar_universe(config),
     )
+    if gap_fill:
+        result["gap_fill"] = gap_fill
+        filled = set(gap_fill.get("sessions", []))
+        findings = (result.get("context_updates") or {}).get("audit_findings") or []
+        kept = []
+        for finding in findings:
+            if finding.get("check") == "coverage_gap":
+                left = [d for d in finding.get("gap_dates", []) if d not in filled]
+                if not left:
+                    continue
+                finding = {**finding, "gap_dates": left}
+            kept.append(finding)
+        extra = gap_fill.get("finding")
+        if extra:
+            kept.append(extra)
+        if kept:
+            result.setdefault("context_updates", {})["audit_findings"] = kept
+        elif "context_updates" in result:
+            result["context_updates"].pop("audit_findings", None)
+    return result
+
+
+# A daily run fills at most this many missed sessions (~2 datacenter requests
+# each); a longer outage is `cne backfill valuation_metrics --fill-em-outage`.
+_VALUATION_GAP_FILL_SESSIONS = 30
+
+
+def _fill_valuation_gaps(config: Config, trade_date: date, run_id: str) -> dict | None:
+    """Stage datacenter valuation for sessions a past run missed.
+
+    Valuation used to be a live snapshot: a session whose run failed was gone.
+    datacenter's ``RPT_VALUEANALYSIS_DET`` is keyed by date, so the sessions
+    between the last complete day and this one are read back automatically —
+    only the (symbol, session) pairs that have a bar and no valuation row. A
+    failure here never blocks the day's own fetch; it is reported instead.
+    """
+    from datetime import timedelta
+
+    from cnequity.quality.cross_checks import last_dense_valuation_date
+    from cnequity.steps.common import list_trading_dates
+
+    last = last_dense_valuation_date(config)
+    if last is None or last >= trade_date - timedelta(days=1):
+        return None
+    sessions = [
+        d
+        for d in list_trading_dates(config, last + timedelta(days=1), trade_date)
+        if d < trade_date
+    ]
+    if not sessions:
+        return None
+    sessions = sessions[-_VALUATION_GAP_FILL_SESSIONS:]
+    universe = [s for s in load_symbols(config) if _is_all_a(s)]
+    bar_universe = load_bar_universe(config)
+    if bar_universe:
+        universe = [s for s in universe if s in bar_universe]
+    try:
+        filled = _fill_em_outage_from_datacenter(
+            config, run_id, universe, sessions[0], sessions[-1], {}
+        )
+    except Exception as exc:  # noqa: BLE001 — the day's own fetch must still run
+        logger.warning(
+            "valuation_metrics: gap fill %s..%s failed: %s", sessions[0], sessions[-1], exc
+        )
+        return {
+            "sessions": [],
+            "finding": {
+                "dataset": "valuation_metrics",
+                "severity": "warning",
+                "check": "valuation_gap_fill_failed",
+                "message": (
+                    f"valuation_metrics: could not read back {len(sessions)} missed session(s) "
+                    f"{sessions[0].isoformat()}..{sessions[-1].isoformat()} from datacenter: {exc}"
+                ),
+            },
+        }
+    logger.info(
+        "valuation_metrics: filled %s row(s) for missed session(s) %s..%s from datacenter",
+        filled.get("rows_written"),
+        sessions[0],
+        sessions[-1],
+    )
+    return {
+        "sessions": [d.isoformat() for d in sessions],
+        "rows_written": filled.get("rows_written", 0),
+    }
 
 
 def _valuation_history_end(config: Config, trade_date: date) -> date:

@@ -52,7 +52,7 @@ def test_weekend_empty_news_has_real_wire_capture(tmp_path, monkeypatch):
                 json={"data": {"fastNewsList": [], "sortEnd": ""}},
             )
 
-    monkeypatch.setattr("cnequity.adapters.eastmoney.rotation.EastMoneyClient", Client)
+    monkeypatch.setattr("cnequity.adapters.eastmoney.news_feed.EastMoneyClient", Client)
     result = step_news_headlines(config, date(2024, 6, 30), "weekend-empty", {})
     assert len(requests) == 1
     assert result["rows_written"] == 0

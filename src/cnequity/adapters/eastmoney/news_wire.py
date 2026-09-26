@@ -37,6 +37,15 @@ def fetch_flash_news_wire(
             run_id=run_id,
             archive_dataset="flash_news_wire",
         )
+    return flash_rows_from_news(base, trade_date)
+
+
+def flash_rows_from_news(base: pl.DataFrame, trade_date: date | None = None) -> pl.DataFrame:
+    """``flash_news_wire`` rows from ``news_headlines``-shaped rows.
+
+    Shared by the per-day fetch above and the shared incremental news feed
+    (``steps/news_feed.py``), so both datasets come from one request.
+    """
     if base.is_empty():
         return base
 

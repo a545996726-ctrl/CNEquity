@@ -102,7 +102,8 @@ def test_the_deep_tail_is_walked_once_per_deep_day(tmp_path):
     first = len(asked)
     asked.clear()
     _sweep(cfg, SATURDAY, _fetch)
-    assert first == 30 and len(asked) == 7
+    # The deep sweep covered the tail too: the next run only reaches the watermark day.
+    assert first == 30 and len(asked) == 1
     # The next deep day walks the full window again.
     assert (
         date(2026, 9, 26) - incremental_window(cfg, "announcement_index", date(2026, 9, 26))
@@ -118,3 +119,36 @@ def test_a_failed_deep_sweep_is_retried_deep(tmp_path):
     with pytest.raises(RuntimeError):
         _sweep(cfg, SATURDAY, _boom)
     assert (SATURDAY - incremental_window(cfg, "announcement_index", SATURDAY)).days + 1 == 30
+
+
+def test_the_near_tail_is_walked_once_a_day_then_only_the_tip(tmp_path):
+    """The events job re-walked 7 days on each of its four daily runs."""
+    import polars as pl
+
+    cfg = _cfg(tmp_path)
+    asked: list[date] = []
+
+    def _fetch(d):
+        asked.append(d)
+        return pl.DataFrame()
+
+    _sweep(cfg, TUESDAY, _fetch)
+    first = len(asked)
+    asked.clear()
+    _sweep(cfg, TUESDAY, _fetch)
+    assert (first, len(asked)) == (7, 1)
+    # The next day walks its tail again.
+    assert (
+        date(2026, 9, 16) - incremental_window(cfg, "announcement_index", date(2026, 9, 16))
+    ).days + 1 == 7
+
+
+def test_a_failed_tail_is_walked_again(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def _boom(d):
+        raise RuntimeError("cninfo 502")
+
+    with pytest.raises(RuntimeError):
+        _sweep(cfg, TUESDAY, _boom)
+    assert (TUESDAY - incremental_window(cfg, "announcement_index", TUESDAY)).days + 1 == 7

@@ -203,10 +203,19 @@ def fetch_corporate_actions_eastmoney(
     config: Config | None = None,
     run_id: str | None = None,
     request_scope: str | None = None,
+    dates: list[date] | None = None,
 ) -> pl.DataFrame:
+    """Ex-dividend events for *trade_date*, or for every day in *dates*.
+
+    *dates* asks for a whole daily reconciliation window in one query — an
+    equality ``in`` list, which the report parses where a range once failed
+    (see below) — instead of one query per day: the 30-day window cost ~30
+    requests on every daily run.
+    """
     owns = client is None
     if client is None:
         client = EastMoneyClient(config=config)
+    wanted = set(dates) if dates else {trade_date}
 
     # No range predicate on the backfill path. EastMoney's datacenter rejects
     # range comparisons on date columns — "参数预处理错误: org.antlr.v4.runtime.
@@ -228,6 +237,9 @@ def fetch_corporate_actions_eastmoney(
                 if parsed is not None:
                     return parsed < floor
             return False
+    elif dates:
+        listed = ",".join(f"'{d.isoformat()}'" for d in sorted(wanted))
+        date_filter = f"({_EX_DATE_COL} in ({listed}))"
     else:
         ds = trade_date.isoformat()
         date_filter = f"({_EX_DATE_COL}='{ds}')"
@@ -300,7 +312,7 @@ def fetch_corporate_actions_eastmoney(
             if not parsed_rows:
                 continue
             for parsed in parsed_rows:
-                if not backfill and parsed["ex_date"] != trade_date:
+                if not backfill and parsed["ex_date"] not in wanted:
                     outside_daily += 1
                     continue
                 if backfill and not (floor <= parsed["ex_date"] <= ceiling):
@@ -310,7 +322,7 @@ def fetch_corporate_actions_eastmoney(
         if not backfill and outside_daily and not rows:
             raise EastMoneyDatacenterError(
                 "EastMoney corporate_actions response contains no "
-                f"EX_DIVIDEND_DATE row for {trade_date.isoformat()}"
+                f"EX_DIVIDEND_DATE row for {', '.join(sorted(d.isoformat() for d in wanted))}"
             )
     finally:
         if owns:

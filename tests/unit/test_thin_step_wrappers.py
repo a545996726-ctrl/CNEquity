@@ -224,29 +224,22 @@ def test_newsboard_and_commodity(cfg, monkeypatch):
         newsboard.step_economic_calendar(cfg, date(2024, 6, 28), "r", {})
 
 
-def test_flash_news_wire_passes_config_to_fetcher(cfg, monkeypatch):
+def test_flash_news_wire_uses_the_shared_news_fetch(cfg, monkeypatch):
     seen = {}
 
-    def fake_fetch(trade_date, config=None):
-        seen["trade_date"] = trade_date
-        seen["config"] = config
-        return pl.DataFrame({"value": [1]})
+    def fake_stage(config, trade_date, run_id, dataset):
+        seen.update(config=config, trade_date=trade_date, run_id=run_id, dataset=dataset)
+        return {"rows_written": 1}
 
-    def fake_run(config, trade_date, run_id, dataset, fetch_fn, **kwargs):
-        assert config is cfg
-        assert trade_date == date(2024, 6, 28)
-        assert run_id == "r"
-        assert dataset == "flash_news_wire"
-        assert kwargs["source"] == "eastmoney"
-        assert kwargs["allow_empty"] is False
-        frame = fetch_fn(trade_date)
-        return {"rows_written": frame.height}
-
-    monkeypatch.setattr(newsboard, "fetch_flash_news_wire", fake_fetch)
-    monkeypatch.setattr(newsboard, "run_incremental_fetched", fake_run)
+    monkeypatch.setattr("cnequity.steps.news_feed.stage_news", fake_stage)
 
     assert newsboard.step_flash_news_wire(cfg, date(2024, 6, 28), "r", {}) == {"rows_written": 1}
-    assert seen == {"trade_date": date(2024, 6, 28), "config": cfg}
+    assert seen == {
+        "config": cfg,
+        "trade_date": date(2024, 6, 28),
+        "run_id": "r",
+        "dataset": "flash_news_wire",
+    }
 
 
 def test_rotation_snapshot_steps_reject_empty_feeds(cfg, monkeypatch):

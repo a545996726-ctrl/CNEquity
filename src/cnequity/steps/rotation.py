@@ -10,7 +10,6 @@ from datetime import date, timedelta
 
 from cnequity.adapters.eastmoney.rotation import (
     fetch_hot_rank,
-    fetch_news_headlines,
     fetch_sector_fund_flow,
 )
 from cnequity.config import Config
@@ -367,15 +366,10 @@ def _step_sector_fund_flow(config: Config, trade_date: date, run_id: str) -> dic
 
 @register_step("news_headlines", group="research")
 def step_news_headlines(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
-    return _run_rotation_step(
-        config,
-        trade_date,
-        run_id,
-        "news_headlines",
-        fetch_news_headlines,
-        allow_empty=True,
-        date_col="publish_date",
-    )
+    # One incremental fetch shared with flash_news_wire (steps/news_feed.py).
+    from cnequity.steps.news_feed import stage_news
+
+    return stage_news(config, trade_date, run_id, "news_headlines")
 
 
 def resource_sector_bars_ths_official(

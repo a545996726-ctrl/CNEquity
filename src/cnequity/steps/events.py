@@ -600,6 +600,52 @@ def _heal_unrecorded_ex_events(config: Config, trade_date: date, run_id: str, ra
         return 0
 
 
+def _window_fetcher(config: Config, trade_date: date, run_id: str):
+    """Per-day fetch for the reconciliation window, served by one query.
+
+    The first call asks for the whole window (``incremental_trade_dates``) in a
+    single ``in``-list request and later days are sliced from it; if that
+    request fails, each day falls back to its own exact-date query as before.
+    """
+    from cnequity.steps.common import incremental_trade_dates
+
+    state: dict = {}
+
+    def _one(d: date) -> pl.DataFrame:
+        return fetch_corporate_actions_eastmoney(
+            d,
+            backfill=False,
+            config=config,
+            run_id=run_id,
+            request_scope=f"daily:{d.isoformat()}",
+        )
+
+    def fetch(d: date) -> pl.DataFrame:
+        if "window" not in state:
+            window = incremental_trade_dates(config, "corporate_actions", trade_date)
+            state["window"] = set(window)
+            try:
+                state["frame"] = fetch_corporate_actions_eastmoney(
+                    trade_date,
+                    backfill=False,
+                    config=config,
+                    run_id=run_id,
+                    request_scope=f"daily:{trade_date.isoformat()}",
+                    dates=window,
+                )
+            except Exception as exc:  # noqa: BLE001 — per-day queries still work
+                logger.warning(
+                    "corporate_actions: window query failed (%s); falling back to per-day", exc
+                )
+                state["frame"] = None
+        frame = state["frame"]
+        if frame is None or d not in state["window"]:
+            return _one(d)
+        return frame.filter(pl.col("ex_date") == d) if frame.height else pl.DataFrame()
+
+    return fetch
+
+
 @register_step("corporate_actions", group="core", depends_on=["instruments"])
 def step_corporate_actions(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if getattr(config, "_corporate_actions_payment_repair", False):
@@ -1120,13 +1166,7 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
             config,
             "corporate_actions",
             trade_date,
-            lambda d: fetch_corporate_actions_eastmoney(
-                d,
-                backfill=False,
-                config=config,
-                run_id=run_id,
-                request_scope=f"daily:{d.isoformat()}",
-            ),
+            _window_fetcher(config, trade_date, run_id),
             allow_empty=True,
             date_col="ex_date",
         )
