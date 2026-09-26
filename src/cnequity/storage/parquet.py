@@ -4,6 +4,7 @@ from pathlib import Path
 
 import polars as pl
 
+from cnequity.domain.action_evidence import clear_invalid_payment_evidence
 from cnequity.domain.canonical import dedupe_by_primary_key
 from cnequity.domain.datasets import granularity_for_dataset
 from cnequity.domain.partitions import Granularity
@@ -165,6 +166,12 @@ def compact_dataset(
         ],
         how="diagonal_relaxed",
     )
+    if dataset == "corporate_actions":
+        # A payment before the ex-date is a source typo, not a fact, so a new
+        # row never stores one.  Only staged rows are cleaned: rewriting the
+        # committed side here would hide the change from the diff below and a
+        # stored typo would never be republished without it.
+        combined = clear_invalid_payment_evidence(combined)
     pk = PRIMARY_KEYS.get(dataset, [])
     if pk:
         combined = dedupe_by_primary_key(combined, dataset)

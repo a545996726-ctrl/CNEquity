@@ -59,10 +59,16 @@ def _legacy_record_date(meta_root: Path, entry: dict) -> date:
 
 
 def reviewed_rights_inventory(
-    *, data_root: Path, start: date, end: date, revision_id: str | None = None
+    *,
+    data_root: Path,
+    start: date,
+    end: date,
+    revision_id: str | None = None,
+    holdout_start: date | None = None,
 ) -> dict:
     """Build a revision-bound view of exact reviewed notices in a safe window."""
-    check_research_window(start, end)  # guard before any lake or metadata read
+    # Guard before any lake or metadata read.
+    check_research_window(start, end, holdout_start=holdout_start)
     root = Path(data_root)
     revision = committed_revision(
         root / "curated" / "corporate_actions",

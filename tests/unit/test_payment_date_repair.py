@@ -11,7 +11,13 @@ from cnequity.adapters.cninfo.payment_notices import (
     parse_payment_notice_text,
 )
 from cnequity.domain.canonical import dedupe_by_primary_key, dedupe_lazy_by_primary_key
-from cnequity.steps.payment_dates import match_payment_dates
+from cnequity.steps.payment_dates import match_payment_dates, unique_payment_issues
+
+
+def test_payment_report_keeps_one_copy_of_each_distinct_failure():
+    missing = {"symbol": "920926.BJ", "ex_date": "2024-05-20", "reason": "source_missing"}
+    correction = {**missing, "reason": "correction_requires_review"}
+    assert unique_payment_issues([missing, correction, missing]) == [missing, correction]
 
 
 def event(**kwargs):
@@ -122,6 +128,18 @@ def test_issuer_notice_reads_cash_after_bonus_shares_without_inventing_date():
         "cash_dividend": 0.015,
     }
     assert parse_payment_notice_text(text.replace("除权除息日为2017年5月31日。", "")) is None
+
+
+def test_issuer_notice_payment_before_ex_date_is_a_template_typo():
+    text = (
+        "证券代码：002627。每10股派1.500000元人民币现金（含税）。"
+        "股权登记日为：2016年7月5日，除权除息日为：2016年7月6日。"
+        "代派的现金红利将于2015年7月6日通过股东托管证券公司直接划入其资金账户。"
+    )
+    assert parse_payment_notice_text(text) is None
+    assert parse_payment_notice_text(text.replace("2015年7月6日", "2016年7月6日"))[
+        "payment_date"
+    ] == date(2016, 7, 6)
 
 
 def test_issuer_notice_uses_issuer_final_amount_after_fixed_total_adjustment():
@@ -381,7 +399,7 @@ def test_match_refuses_changed_cash_and_conflicting_dates():
     assert ok.is_empty() and bad[0]["reason"] == "existing_payment_date_conflict"
 
 
-def test_refresh_preserves_payment_only_for_identical_economics():
+def test_dateless_refresh_cannot_displace_a_row_with_payment_evidence():
     old = event(
         payment_date=date(2023, 7, 25),
         payment_source="baostock:dividPayDate",
@@ -395,15 +413,23 @@ def test_refresh_preserves_payment_only_for_identical_economics():
         "source": "tdx_protocol",
         "fetched_at": datetime(2026, 2, 1, tzinfo=timezone.utc),
     }
-    for cash, expected in [(0.32, date(2023, 7, 25)), (0.33, None)]:
+    # A restated amount without evidence does not win on recency either: the
+    # stored amount already agreed with the vendor that reported the date.
+    for cash in (0.32, 0.33):
         df = pl.DataFrame([old, {**fresh, "cash_dividend": cash}])
         for out in [
             dedupe_by_primary_key(df, "corporate_actions"),
             dedupe_lazy_by_primary_key(df.lazy(), "corporate_actions").collect(),
         ]:
-            assert out["payment_date"].item() == expected
-            assert out["cash_dividend"].item() == cash
-            assert out["source"].item() == "tdx_protocol"
+            assert out["payment_date"].item() == date(2023, 7, 25)
+            assert out["cash_dividend"].item() == 0.32
+            assert out["source"].item() == "baostock"
+    # Without evidence on either side, the newer fetch still wins.
+    bare = {**old, "payment_date": None, "payment_source": None}
+    out = dedupe_by_primary_key(
+        pl.DataFrame([bare, {**fresh, "cash_dividend": 0.33}]), "corporate_actions"
+    )
+    assert (out["cash_dividend"].item(), out["source"].item()) == (0.33, "tdx_protocol")
 
 
 def test_repair_step_stages_only_matched_cash_and_reports_missing(tmp_path, monkeypatch):
@@ -436,6 +462,60 @@ def test_repair_step_stages_only_matched_cash_and_reports_missing(tmp_path, monk
     assert rows["cash_dividend"].item() == old["cash_dividend"]
     assert rows["payment_date"].item() == date(2023, 7, 25)
     assert rows["source"].item() == "baostock"
+
+
+def test_repair_treats_a_payment_before_ex_date_as_unknown(tmp_path, monkeypatch):
+    from cnequity.config import Config
+    from cnequity.steps import payment_dates
+
+    cfg = Config(data_root=tmp_path / "lake", sources={"baostock": True}, raw_archive_enabled=False)
+    cfg._backfill_symbols = ["600000.SH"]
+    cfg._backfill_start = date(2023, 1, 1)
+    cfg._backfill_end = date(2023, 12, 31)
+    typo = event(
+        payment_date=date(2022, 7, 21),
+        payment_source="issuer_notice:template-typo:A",
+        source="cninfo",
+        data_version="v1",
+        fetched_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        allotment_ratio=None,
+        allotment_price=None,
+        split_factor=1.0,
+    )
+    monkeypatch.setattr(payment_dates, "load", lambda *a, **kw: pl.DataFrame([typo]))
+    monkeypatch.setattr(
+        payment_dates,
+        "fetch_corporate_actions_baostock",
+        lambda *a, **kw: (pl.DataFrame([event()]).head(0), []),
+    )
+    result = payment_dates.repair_payment_dates(cfg, date(2024, 1, 1), "clear-run", {})
+    assert result["rows_written"] == 1
+    rows = pl.read_parquet(next(cfg.staging_root.rglob("*.parquet")))
+    assert rows.select("payment_date", "payment_source", "source").row(0) == (None, None, "cninfo")
+    report = (cfg.meta_root / "payment_date_repairs" / "clear-run.json").read_text()
+    assert "template-typo" in report
+
+    # When a source does report the real date, it replaces the typo instead.
+    fetched = event(payment_date=date(2023, 7, 21), payment_source="baostock:dividPayDate")
+    monkeypatch.setattr(
+        payment_dates,
+        "fetch_corporate_actions_baostock",
+        lambda *a, **kw: (pl.DataFrame([fetched]), []),
+    )
+    cfg2 = Config(
+        data_root=tmp_path / "lake2", sources={"baostock": True}, raw_archive_enabled=False
+    )
+    cfg2._backfill_symbols, cfg2._backfill_start, cfg2._backfill_end = (
+        cfg._backfill_symbols,
+        cfg._backfill_start,
+        cfg._backfill_end,
+    )
+    assert (
+        payment_dates.repair_payment_dates(cfg2, date(2024, 1, 1), "fix-run", {})["rows_written"]
+        == 1
+    )
+    rows = pl.read_parquet(next(cfg2.staging_root.rglob("*.parquet")))
+    assert rows["payment_date"].item() == date(2023, 7, 21)
 
 
 def test_source_plan_retains_more_precision_than_rounded_cash_field():
@@ -487,6 +567,35 @@ def test_reviewed_notice_is_bound_to_pdf_cash_and_a_share_identity():
             verified_notice_row(changed, notice, payload)
 
 
+def test_reviewed_bse_notice_accepts_only_exact_old_code_event():
+    import hashlib
+
+    import pytest
+
+    from cnequity.adapters.eastmoney.payment_notices import NOTICES, verified_notice_row
+
+    raw = b"%PDF-bse-issuer-notice"
+    notice = {
+        **NOTICES[("833874.BJ", date(2022, 5, 18))],
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    old = {
+        **event(),
+        "symbol": "833874.BJ",
+        "ex_date": date(2022, 5, 18),
+        "cash_dividend": 0.5,
+    }
+    repaired = verified_notice_row(old, notice, raw)
+    assert repaired["payment_date"] == date(2022, 5, 18)
+    assert repaired["payment_source"] == "issuer_notice:833874:2022-060:page1-2:A"
+    for changed in (
+        {**old, "symbol": "301192.SZ"},
+        {**old, "cash_dividend": 0.05},
+    ):
+        with pytest.raises(ValueError):
+            verified_notice_row(changed, notice, raw)
+
+
 def test_reviewed_notice_requires_every_document_in_correction_chain():
     import hashlib
 
@@ -521,24 +630,20 @@ def test_reviewed_notice_requires_every_document_in_correction_chain():
         verified_notice_row(old, notice, [originals[0], originals[1] + b"changed"])
 
 
-def test_reviewed_notice_preserves_issuer_payment_on_record_date():
+def test_reviewed_notice_rejects_a_payment_before_the_ex_date():
     import hashlib
 
     from cnequity.adapters.eastmoney.payment_notices import NOTICES, verified_notice_row
 
     raw = b"%PDF-record-date-payment"
     notice = {
-        **NOTICES[("002335.SZ", date(2018, 5, 16))],
+        **NOTICES[("833874.BJ", date(2022, 5, 18))],
         "sha256": hashlib.sha256(raw).hexdigest(),
+        "payment_date": date(2022, 5, 17),
     }
-    old = {
-        **event(),
-        "symbol": "002335.SZ",
-        "ex_date": date(2018, 5, 16),
-        "cash_dividend": 1.0,
-    }
-    repaired = verified_notice_row(old, notice, raw)
-    assert repaired["payment_date"] == date(2018, 5, 15)
+    old = {**event(), "symbol": "833874.BJ", "ex_date": date(2022, 5, 18), "cash_dividend": 0.5}
+    with pytest.raises(ValueError, match="before the ex-date"):
+        verified_notice_row(old, notice, raw)
 
 
 def test_incomplete_duplicate_is_unknown_but_explicit_conflict_still_fails():

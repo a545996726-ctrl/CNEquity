@@ -83,9 +83,12 @@ def test_protected_cash_rights_window_refused_before_lake_read(tmp_path, monkeyp
         raise AssertionError("protected range attempted a lake read")
 
     monkeypatch.setattr(cash_rights, "committed_revision", forbidden)
-    with pytest.raises(ValueError, match="2016-01-01..2024-12-31"):
+    with pytest.raises(ValueError, match="research holdout"):
         cash_rights.reviewed_rights_inventory(
-            data_root=tmp_path, start=date(2024, 1, 1), end=date(2025, 1, 1)
+            data_root=tmp_path,
+            start=date(2024, 1, 1),
+            end=date(2025, 1, 1),
+            holdout_start=date(2025, 1, 1),
         )
 
 

@@ -277,6 +277,11 @@ def parse_payment_notice_text(text: str) -> dict[str, Any] | None:
     cash = _pretax_cash_per_share(compact)
     if symbol_match is None or ex_date is None or payment_date is None or cash is None:
         return None
+    if payment_date < ex_date:
+        # China Clearing credits A-share cash on the ex-date.  An earlier date
+        # is a drafting error, typically last year's template left unedited
+        # ("登记日 2016年7月5日 … 红利将于 2015年7月6日"); it proves nothing.
+        return None
     return {
         "code": symbol_match.group(1),
         "ex_date": ex_date,

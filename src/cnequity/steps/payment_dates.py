@@ -8,9 +8,24 @@ from datetime import date
 import polars as pl
 
 from cnequity.adapters.baostock.corporate_actions import fetch_corporate_actions_baostock
+from cnequity.domain.action_evidence import clear_invalid_payment_evidence, valid_payment_expr
+from cnequity.domain.schemas import data_version_for, with_provenance
 from cnequity.domain.symbols import is_etf_symbol, parse_symbol
 from cnequity.query.reader import load
+from cnequity.steps.common import write_simple
 from cnequity.steps.http_common import verify_raw_archive, write_fetched
+
+
+def unique_payment_issues(issues: list[dict]) -> list[dict]:
+    """Report each distinct event/reason once, preserving source order."""
+    seen: set[tuple[str, str, str]] = set()
+    result = []
+    for issue in issues:
+        key = (issue["symbol"], issue["ex_date"], issue["reason"])
+        if key not in seen:
+            seen.add(key)
+            result.append(issue)
+    return result
 
 
 def match_payment_dates(existing: pl.DataFrame, fetched: pl.DataFrame):
@@ -59,16 +74,25 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
     start, end = getattr(config, "_backfill_start", None), getattr(config, "_backfill_end", None)
     if not symbols or start is None or end is None or start > end:
         raise ValueError("payment repair requires explicit symbols and valid start/end")
-    existing = load("corporate_actions", data_root=config.data_root, start=start, end=end)
-    existing = existing.filter(
+    # Reviewed stock terms are issuer evidence too; applying them here lets a
+    # new lake reproduce every reviewed correction through one entry point.
+    from cnequity.adapters.eastmoney.bse_stock_terms import repair_reviewed_bj_stock_terms
+
+    stock_terms = repair_reviewed_bj_stock_terms(config, run_id, symbols, start, end)
+    all_actions = load("corporate_actions", data_root=config.data_root, start=start, end=end)
+    existing = all_actions.filter(
         pl.col("symbol").is_in(symbols)
         & (pl.col("action_type") == "cash_dividend")
         & (pl.col("cash_dividend") > 0)
     )
+    invalid = existing.head(0)
     if "payment_date" in existing.columns:
-        existing = existing.filter(pl.col("payment_date").is_null())
+        # A date before the ex-date is a source typo, i.e. no evidence: look
+        # for the real date like any other gap, and clear it if none is found.
+        invalid = existing.filter(pl.col("payment_date").is_not_null() & ~valid_payment_expr())
+        existing = clear_invalid_payment_evidence(existing).filter(pl.col("payment_date").is_null())
     if existing.is_empty():
-        return {"rows_read": 0, "rows_written": 0}
+        return stock_terms
     unsupported = {
         symbol
         for symbol in existing["symbol"].unique().to_list()
@@ -99,6 +123,7 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
     # parser then accepts only PDFs whose code, ex-date, pretax amount and
     # payment date all agree with the stored event.
     from cnequity.adapters.cninfo.payment_notices import repair_cninfo_payment_notices
+    from cnequity.adapters.eastmoney.bse_payment_notices import repair_bj_payment_notices
     from cnequity.adapters.eastmoney.payment_notices import repair_reviewed_notices
 
     reviewed_keys = repair_reviewed_notices(config, run_id, pending)
@@ -108,8 +133,22 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
         "replayed_requests": 0,
         "cninfo_network_responses": 0,
     }
+    bj_keys, bj_diagnostics = repair_bj_payment_notices(
+        config, run_id, pending, all_actions=all_actions, metrics=metrics
+    )
+    diagnostics.extend(bj_diagnostics)
+    bj_economic_blockers = [
+        (issue["symbol"], date.fromisoformat(issue["ex_date"]))
+        for issue in bj_diagnostics
+        if issue["reason"] == "bj_stock_terms_require_reconciliation"
+    ]
+    pending = remove_keys(pending, [*bj_keys, *bj_economic_blockers])
+    # CNINFO's A-share directory does not identify historical BJ/NEEQ codes.
+    # Keep those rows for the remaining-source report, but do not spend a
+    # mainland CNINFO request on a different market's issuer directory.
+    cninfo_pending = pending.filter(~pl.col("symbol").str.ends_with(".BJ"))
     cninfo_keys, cninfo_diagnostics = repair_cninfo_payment_notices(
-        config, run_id, pending, metrics=metrics
+        config, run_id, cninfo_pending, metrics=metrics
     )
     diagnostics.extend(cninfo_diagnostics)
     pending = remove_keys(pending, cninfo_keys)
@@ -125,10 +164,10 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
         symbol: set(pending.filter(pl.col("symbol") == symbol)["ex_date"].dt.year().to_list())
         for symbol in windows
     }
-    cninfo_only = bool(getattr(config, "_corporate_actions_cninfo_notice_only", False))
-    if windows and not cninfo_only and not config.sources.get("baostock", False):
+    issuer_only = bool(getattr(config, "_corporate_actions_issuer_notice_only", False))
+    if windows and not issuer_only and not config.sources.get("baostock", False):
         raise ValueError("unresolved payment events require the baostock source")
-    if windows and not cninfo_only:
+    if windows and not issuer_only:
         fetched, failed = fetch_corporate_actions_baostock(
             sorted(windows),
             start,
@@ -154,11 +193,23 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
                 }
                 for row in pending.to_dicts()
             ]
-            if cninfo_only
+            if issuer_only
             else []
         )
     issues = {(r["symbol"], r["ex_date"]): r for r in diagnostics}
     unresolved = [issues.get((r["symbol"], r["ex_date"]), r) for r in unresolved]
+    repaired = [
+        *reviewed_keys,
+        *bj_keys,
+        *cninfo_keys,
+        *(
+            zip(enriched["symbol"].to_list(), enriched["ex_date"].to_list(), strict=True)
+            if not enriched.is_empty()
+            else ()
+        ),
+    ]
+    invalid = remove_keys(invalid, repaired)
+    cleared = clear_invalid_payment_evidence(invalid)
     report = config.meta_root / "payment_date_repairs" / f"{run_id}.json"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(
@@ -169,12 +220,27 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
                 "start": str(start),
                 "end": str(end),
                 "requested_events": existing.height,
-                "matched_events": enriched.height + len(reviewed_keys) + len(cninfo_keys),
+                "matched_events": enriched.height
+                + len(reviewed_keys)
+                + len(bj_keys)
+                + len(cninfo_keys),
                 "failed_symbols": failed,
                 "event_conflicts": diagnostics,
+                "cleared_invalid_payment_dates": [
+                    {
+                        "symbol": row["symbol"],
+                        "ex_date": str(row["ex_date"]),
+                        "payment_date": str(row["payment_date"]),
+                        "payment_source": row["payment_source"],
+                    }
+                    for row in invalid.to_dicts()
+                ],
                 "acquisition": metrics,
-                "unresolved": [*unresolved, *[r for r in diagnostics if r.get("ex_date")]],
+                "unresolved": unique_payment_issues(
+                    [*unresolved, *[r for r in diagnostics if r.get("ex_date")]]
+                ),
                 "reviewed_notice_events": len(reviewed_keys),
+                "bj_issuer_notice_events": len(bj_keys),
                 "cninfo_notice_events": len(cninfo_keys),
             },
             ensure_ascii=False,
@@ -192,9 +258,32 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
         # Avoid falsely acknowledging complete publication when a source query failed.
         raise RuntimeError(f"payment date fetch failed for {len(failed)} symbols; see {report}")
     result = {
-        "rows_read": fetched.height + len(reviewed_keys) + len(cninfo_keys),
-        "rows_written": len(reviewed_keys) + len(cninfo_keys),
+        "rows_read": fetched.height
+        + len(reviewed_keys)
+        + len(bj_keys)
+        + len(cninfo_keys)
+        + stock_terms["rows_read"],
+        "rows_written": len(reviewed_keys)
+        + len(bj_keys)
+        + len(cninfo_keys)
+        + stock_terms["rows_written"],
     }
+    if not cleared.is_empty():
+        # Not a source observation, so no wire evidence is claimed: the stored
+        # row is restated without the impossible date, keeping its own source.
+        for source, rows in cleared.group_by("source"):
+            staged = write_simple(
+                config,
+                run_id,
+                "corporate_actions",
+                with_provenance(
+                    rows.drop("fetched_at", strict=False),
+                    source=str(source[0]),
+                    data_version=data_version_for("corporate_actions"),
+                ),
+                batch_id=f"{context.get('_batch_id') or 'payment-dates'}-clear-{source[0]}",
+            )
+            result["rows_written"] += int(staged.get("rows_written", 0))
     if not enriched.is_empty():
         staged = write_fetched(
             config,

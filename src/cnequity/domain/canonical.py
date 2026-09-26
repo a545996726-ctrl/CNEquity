@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import polars as pl
 
+from cnequity.domain.action_evidence import evidence_level_expr as _action_evidence_level
+from cnequity.domain.action_evidence import valid_payment_expr as _valid_payment
 from cnequity.domain.datasets import DATASETS
 from cnequity.domain.schemas import PRIMARY_KEYS
 from cnequity.domain.trading_status import evidence_rank_expr as _trading_status_evidence_rank
@@ -35,10 +37,14 @@ def _evidence_rank_expr(dataset: str, schema) -> pl.Expr | None:
     correction. ``trading_status`` is the exception — two of its feeds report
     current state rather than what happened in a given session, so a fresher
     row there can be a *worse* answer. See ``domain/trading_status`` for the
-    classes and why the derived history depends on them.
+    classes and why the derived history depends on them. ``corporate_actions``
+    is the other: a vendor sweep must not displace a row an issuer notice or a
+    reported payment date already settled (``domain/action_evidence``).
     """
     if dataset == "trading_status":
         return _trading_status_evidence_rank(schema)
+    if dataset == "corporate_actions":
+        return _action_evidence_level(set(schema.names()))
     return None
 
 
@@ -81,6 +87,8 @@ def _retain_payment_evidence(frame, dataset):
 
     Only propagate within identical event keys AND economic amounts. Changed
     cash amounts require new evidence; no cross-event/date/source inference.
+    A date before the ex-date is never carried to another row, and a row's own
+    stored value is never rewritten here: reads return what is stored.
     """
     schema = frame.collect_schema() if isinstance(frame, pl.LazyFrame) else frame.schema
     columns = set(schema.names())
@@ -89,15 +97,24 @@ def _retain_payment_evidence(frame, dataset):
     if dataset != "corporate_actions" or not set(keys + evidence) <= columns:
         return frame
     stamp = (
-        pl.when(pl.col("payment_date").is_not_null())
+        pl.when(_valid_payment())
         .then(pl.struct(evidence))
         .otherwise(None)
         .forward_fill()
         .over(keys)
     )
+    own = pl.col("payment_date").is_not_null()
     return (
         frame.with_columns(stamp.alias("__payment_evidence"))
-        .with_columns([pl.col("__payment_evidence").struct.field(c).alias(c) for c in evidence])
+        .with_columns(
+            [
+                pl.when(own)
+                .then(pl.col(c))
+                .otherwise(pl.col("__payment_evidence").struct.field(c))
+                .alias(c)
+                for c in evidence
+            ]
+        )
         .drop("__payment_evidence")
     )
 

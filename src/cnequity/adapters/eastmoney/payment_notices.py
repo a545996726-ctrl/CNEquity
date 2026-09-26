@@ -19,33 +19,21 @@ from cnequity.storage.raw_archive import RawPayloadArchive, begin_capture
 # ex-date/payment 2024-09-11. B shares pay 2024-09-27 and are NOT this event.
 # The 0.028 virtual ex-price deduction on page 2 is NOT the cash entitlement.
 NOTICES = {
-    ("002227.SZ", date(2018, 6, 1)): {
-        "url": "https://static.cninfo.com.cn/finalpage/2018-05-24/1204998165.PDF",
-        "sha256": "e094fcc2539182506f40b695a18685d7a14e70cbb4cdad51f345549adfa82f4e",
-        "notice_id": "002227:2018-038",
-        "symbol": "002227.SZ",
-        "ex_date": date(2018, 6, 1),
+    # BSE issuer notice 2022-060, pages 1-2.  The issuer states the gross
+    # 10-share cash amount, 2022-05-17 record date, and that China Clearing's
+    # Beijing branch credits cash on the 2022-05-18 ex-date.  The PDF is an
+    # exact issuer-document mirror; the BSE listing points to the same notice.
+    ("833874.BJ", date(2022, 5, 18)): {
+        "url": "https://pdf.dfcfw.com/pdf/H2_AN202205101564715860_1.pdf",
+        "official_url": ("https://www.bse.cn/disclosure/2022/2022-05-10/1652167994_202674.pdf"),
+        "sha256": "ff302c430bf4d3e0f7ba7648ce35a97330484fae0600f873ddd0ea55830cec19",
+        "notice_id": "833874:2022-060",
+        "symbol": "833874.BJ",
+        "ex_date": date(2022, 5, 18),
         "share_class": "A",
-        "cash_dividend": 0.02,
-        "payment_date": date(2018, 5, 31),
-        "page": 2,
-        "source": "cninfo",
-    },
-    ("002335.SZ", date(2018, 5, 16)): {
-        "url": "https://static.cninfo.com.cn/finalpage/2018-05-10/1204927938.PDF",
-        "sha256": "253aa5623e33dffbc4a341ec89631426526f106acf9560fcc8dd58db0c4b357f",
-        "notice_id": "002335:2018-044",
-        "symbol": "002335.SZ",
-        "ex_date": date(2018, 5, 16),
-        "share_class": "A",
-        "cash_dividend": 1.0,
-        # The issuer's implementation notice explicitly states that China
-        # Clearing credits the cash on the 2018-05-15 record date.  Preserve
-        # that source fact; consumers determine entitlement from the ex-date
-        # holdings and can make the cash available at the following session.
-        "payment_date": date(2018, 5, 15),
-        "page": 2,
-        "source": "cninfo",
+        "cash_dividend": 0.5,
+        "payment_date": date(2022, 5, 18),
+        "page": "1-2",
     },
     ("002358.SZ", date(2019, 7, 5)): {
         "documents": [
@@ -119,7 +107,13 @@ def verified_notice_row(old: dict, notice: dict, raw: bytes | list[bytes]) -> di
         raise ValueError("cash-only notice cannot confirm stock distribution terms")
     if old["action_type"] != "cash_dividend" or old.get("payment_date") is not None:
         raise ValueError("notice repair only fills an unknown cash payment date")
-    if notice["share_class"] != "A" or not old["symbol"].startswith(("60", "00", "30", "68")):
+    if notice["payment_date"] < old["ex_date"]:
+        # China Clearing credits A-share cash on the ex-date; an earlier date
+        # (usually the record date or last year's template) is a notice typo.
+        raise ValueError("issuer payment notice pays before the ex-date")
+    if notice["share_class"] != "A" or not (
+        old["symbol"].startswith(("60", "00", "30", "68")) or old["symbol"].endswith(".BJ")
+    ):
         raise ValueError("issuer payment notice share class mismatch")
     if abs(old["cash_dividend"] - notice["cash_dividend"]) > max(
         1e-8, abs(old["cash_dividend"]) * 1e-7
@@ -168,6 +162,11 @@ def repair_reviewed_notices(config, run_id: str, existing: pl.DataFrame) -> list
                         "pdf_sha256": document["sha256"],
                         "reviewed_page": document["page"],
                         "share_class": "A",
+                        **(
+                            {"official_url": notice["official_url"]}
+                            if notice.get("official_url")
+                            else {}
+                        ),
                     },
                 )
             else:

@@ -84,13 +84,16 @@ from cnequity.orchestrator.engine import JobEngine
 @click.option(
     "--payment-date-repair",
     is_flag=True,
-    help="仅 corporate_actions：先核验发行人公告，再用 Baostock 匹配真实派息日；不改变既有金额。",
+    help=(
+        "仅 corporate_actions：先应用已审发行人公告，再用 Baostock 匹配真实派息日；"
+        "早于除息日的付款日视为未知。"
+    ),
 )
 @click.option(
-    "--cninfo-notice-repair",
+    "--issuer-notice-repair",
     is_flag=True,
     help=(
-        "仅 corporate_actions：只用巨潮发行人实施公告修复明确匹配的付款日；"
+        "仅 corporate_actions：只用发行人实施公告（已审清单、巨潮、北交所）修复付款日和已审送转条款；"
         "未匹配事件保留缺口，不请求 Baostock。"
     ),
 )
@@ -145,7 +148,7 @@ def backfill(
     workers: int,
     baostock_repair: bool,
     payment_date_repair: bool,
-    cninfo_notice_repair: bool,
+    issuer_notice_repair: bool,
     ths_repair: bool,
     eastmoney_bj_repair: bool,
     eastmoney_date_repair: bool,
@@ -168,19 +171,19 @@ def backfill(
             "请改为在交易日跑日更采集。"
         )
     cfg = _cfg(config_path)
-    if payment_date_repair or cninfo_notice_repair:
+    if payment_date_repair or issuer_notice_repair:
         if dataset != "corporate_actions" or not symbols_str or not start_str or not end_str:
             raise click.ClickException(
                 "付款日修复需要 corporate_actions、--symbols、--start 和 --end"
             )
-        if payment_date_repair and cninfo_notice_repair:
+        if payment_date_repair and issuer_notice_repair:
             raise click.ClickException("两种付款日修复模式不能同时使用")
         if any(
             (baostock_repair, ths_repair, eastmoney_bj_repair, eastmoney_date_repair, outstanding)
         ):
             raise click.ClickException("付款日修复必须独立运行")
         cfg._corporate_actions_payment_repair = True
-        cfg._corporate_actions_cninfo_notice_only = cninfo_notice_repair
+        cfg._corporate_actions_issuer_notice_only = issuer_notice_repair
     attach_log_file(cfg, f"backfill-{dataset}")
     if workers < 1:
         raise click.ClickException("--workers 至少为 1")
