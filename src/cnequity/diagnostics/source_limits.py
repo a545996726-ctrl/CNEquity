@@ -37,13 +37,14 @@ def effective_source_policy(config, source: str, aliases: set[str] | None = None
         for name in names
         if name in mapping
     ]
-    configured_cap = min(configured_caps) if configured_caps else int(config.workers)
-    if family == "tdx_protocol" and config.tdx_enabled:
-        # The direct wire adapter uses the daily worker cap as its fallback,
-        # which can be narrower than the HTTP source helper's global default.
-        wire_spec = config.tdx_rate_limit_spec()
-        if wire_spec and wire_spec.concurrency_limit:
-            configured_cap = min(configured_cap, wire_spec.concurrency_limit)
+    if configured_caps:
+        configured_cap = min(configured_caps)
+    elif family == "tdx_protocol" and config.tdx_enabled:
+        # Match the direct wire adapter and the shared source-request helper.
+        # A macOS process-pool budget of one does not imply one TDX socket.
+        configured_cap = config.tdx_rate_limit_spec().concurrency_limit
+    else:
+        configured_cap = int(config.workers)
     day = _policy_day(time.time())
     concurrency = _read_json(
         config.rate_limit_root / f"concurrency-{_safe_source_name(family)}.json"
@@ -124,6 +125,13 @@ def _cache_reuse_today(config, family: str) -> dict:
     return {"hits": payload.get("hits", 0), "caches": payload.get("caches", {})}
 
 
+def _request_events_today(config, family: str) -> dict:
+    payload = _read_json(config.rate_limit_root / f"events-{_safe_source_name(family)}.json")
+    if payload.get("policy_day") != _policy_day(time.time()):
+        return {"retry": 0, "fallback": 0}
+    return {"retry": payload.get("retry", 0), "fallback": payload.get("fallback", 0)}
+
+
 def _latest_run_metrics(config) -> dict | None:
     path = config.manifest_path
     if not path.is_file():
@@ -136,12 +144,16 @@ def _latest_run_metrics(config) -> dict | None:
             ).fetchone()
         if row is None:
             return None
-        metrics = json.loads(row[1] or "{}").get("metrics", {})
+        metadata = json.loads(row[1] or "{}")
+        metrics = metadata.get("metrics", {}) if isinstance(metadata, dict) else {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+        source_metrics = metrics.get("source_metrics", {})
         return {
             "run_id": row[0],
             "requests": metrics.get("requests"),
             "request_retries": metrics.get("request_retries"),
-            "source_metrics": metrics.get("source_metrics", {}),
+            "source_metrics": source_metrics if isinstance(source_metrics, dict) else {},
         }
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
@@ -156,7 +168,7 @@ def build_source_limits(config) -> dict:
         | set(config.http_workers)
         | set(config.source_workers)
     )
-    names.add("tdx_protocol")
+    names.update({"tdx_protocol", "eastmoney_push2", "eastmoney_dc"})
     # Futures files pace and meter per exchange host, not under the generic
     # config lane. Include those effective lanes so a one-file check is visible
     # in `sources limits` instead of disappearing from the request accounting.
@@ -196,6 +208,7 @@ def build_source_limits(config) -> dict:
             "metered_attempts_today": _metered_attempts_today(config, family),
             "wire_responses_today": _wire_responses_today(config, family),
             "cache_reuse_today": _cache_reuse_today(config, family),
+            "request_events_today": _request_events_today(config, family),
         }
     outstanding = {}
     for dataset in DATASETS:
@@ -219,6 +232,7 @@ def build_source_limits(config) -> dict:
             "wire_responses_today 只统计已接入响应钩子的返回响应及解码后正文大小，"
             "端点为域名加路径哈希，避免保存查询参数；未返回响应的发包不在其中。"
             "cache_reuse_today 是已接入响应缓存的本地复用次数，不当作新的源观察。"
+            "request_events_today 仅统计已标记的额外重试与直连 fallback，覆盖尚不完整。"
             "最近 run 的 requests/retries 仍是适配器已记录遥测，不是全源发包总数。"
         ),
     }

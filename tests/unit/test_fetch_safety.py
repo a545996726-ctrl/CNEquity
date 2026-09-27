@@ -14,6 +14,7 @@ from cnequity.config import Config, load_config, validate_config
 from cnequity.domain.http_policy import (
     SourceCoolingDown,
     record_http_response,
+    record_request_event,
     retry_after_seconds,
 )
 from cnequity.domain.rate_limit import RateLimiter
@@ -102,6 +103,20 @@ def test_response_meter_aggregates_body_and_keeps_query_out_of_state(tmp_path):
     assert report["body_bytes"] == 7
     assert report["statuses"] == {"200": 1, "503": 1}
     assert len(report["endpoints"]) == 1
+
+
+def test_extra_request_events_are_scoped_and_reported(tmp_path):
+    from cnequity.diagnostics.source_limits import build_source_limits
+
+    cfg = Config(data_root=tmp_path / "lake")
+    record_request_event(cfg, "eastmoney_push2", "fallback")
+    record_request_event(cfg, "eastmoney_push2", "retry")
+    assert build_source_limits(cfg)["sources"]["eastmoney_push2"]["request_events_today"] == {
+        "retry": 1,
+        "fallback": 1,
+    }
+    with pytest.raises(ValueError, match="unknown request event"):
+        record_request_event(cfg, "eastmoney_push2", "ordinary")
 
 
 def test_optional_response_meter_failure_does_not_hide_refusal(tmp_path, monkeypatch):
@@ -355,6 +370,45 @@ def test_source_limits_reports_shared_budget_without_creating_a_lake(tmp_path, m
     assert payload["latest_run_metrics"] is None
     assert not cfg.data_root.exists()
     assert not shared.exists()
+
+
+@pytest.mark.parametrize(
+    "metadata_json", ["[]", "null", '{"metrics": []}', '{"metrics": {"source_metrics": []}}']
+)
+def test_source_limits_tolerates_legacy_non_object_metrics(tmp_path, monkeypatch, metadata_json):
+    import sqlite3
+
+    from cnequity.orchestrator.manifest import Manifest
+
+    cfg = Config(data_root=tmp_path / "lake")
+    run_id = Manifest(cfg.manifest_path).start_run("fixture")
+    with sqlite3.connect(cfg.manifest_path) as conn:
+        conn.execute(
+            "UPDATE ingestion_runs SET metadata_json = ? WHERE run_id = ?",
+            (metadata_json, run_id),
+        )
+    monkeypatch.setattr("cnequity.cli.quality_cmds._cfg", lambda _: cfg)
+
+    result = CliRunner().invoke(cli, ["sources", "limits"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["latest_run_metrics"] == {
+        "run_id": run_id,
+        "requests": None,
+        "request_retries": None,
+        "source_metrics": {},
+    }
+
+
+def test_tdx_limits_use_daily_wire_width_when_global_workers_is_one(tmp_path):
+    from cnequity.diagnostics.source_limits import effective_source_policy
+
+    cfg = Config(data_root=tmp_path / "lake", workers=1, tdx_daily_workers=4)
+    policy = effective_source_policy(cfg, "tdx_protocol")
+    assert policy["configured_max_concurrency"] == 4
+
+    with cfg.source_request("tdx_protocol"):
+        state = json.loads((cfg.rate_limit_root / "concurrency-tdx_protocol.json").read_text())
+        assert state["limit"] == 4
 
 
 def test_source_limits_reports_effective_same_day_shared_policy(tmp_path, monkeypatch):

@@ -86,7 +86,13 @@ class SourceRateLimiters:
             self.config.source_workers,
         ):
             values.extend(int(mapping[name]) for name in names if name in mapping)
-        return max(1, min(values) if values else int(self.config.workers))
+        if values:
+            return max(1, min(values))
+        if family == "tdx_protocol":
+            # TDX's wire adapter uses the daily lane width, including on
+            # macOS where the unrelated process-pool budget is one worker.
+            return self.config.tdx_daily_worker_count()
+        return max(1, int(self.config.workers))
 
     def wait(self, source: str) -> None:
         limiter = self._limiters.get(source)

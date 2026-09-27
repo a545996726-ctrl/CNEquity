@@ -315,3 +315,31 @@ def record_cache_reuse(config: object | None, source: str, cache_name: str) -> N
             _write_json(path, saved)
     except Exception as exc:
         logger.warning("%s: could not save cache reuse meter: %s", source, exc)
+
+
+def record_request_event(config: object | None, source: str, event: str) -> None:
+    """Count a tagged extra send after the shared request gate admits it.
+
+    This complements admitted scopes and response receipts. It only covers
+    explicitly instrumented retry/fallback branches; the event is not a claim
+    about transport-level packet counts.
+    """
+    if event not in {"retry", "fallback"}:
+        raise ValueError(f"unknown request event {event!r}")
+    root = getattr(config, "rate_limit_root", None)
+    if not isinstance(root, Path):
+        return
+    family = source_family(source)
+    name = _safe_source_name(family)
+    path = root / f"events-{name}.json"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with exclusive_lock(root / f"events-{name}.lock"):
+            today = time.strftime("%Y-%m-%d", time.localtime())
+            saved = _read_json(path)
+            if saved.get("policy_day") != today:
+                saved = {"version": 1, "policy_day": today, "family": family}
+            saved[event] = int(saved.get(event, 0)) + 1
+            _write_json(path, saved)
+    except Exception as exc:
+        logger.warning("%s: could not save request event meter: %s", source, exc)
