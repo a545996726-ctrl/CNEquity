@@ -152,6 +152,39 @@ def test_health_counts_every_registered_dataset(client):
     assert body["rows"] == 7
 
 
+def test_http_read_returns_a_replayable_receipt_for_the_exact_rows(lake):
+    from cnequity.storage.revisions import RevisionStore
+
+    files = sorted((lake.curated_root / "daily_bars").rglob("*.parquet"))
+    committed = RevisionStore(lake.meta_root, lake.curated_root).commit(
+        "daily_bars",
+        run_id="http-receipt-fixture",
+        changed_files=files,
+        schema_version=1,
+        contract_fingerprint="http-receipt-fixture",
+    )
+    assert committed is not None
+    app_client = TestClient(create_app(lake))
+    response = app_client.get(
+        "/api/read/daily_bars",
+        params={"start": "2026-07-30", "end": "2026-07-31", "symbol": "600519.SH"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["rows"]) == 2
+    assert body["receipt"]["replayable"] is True
+    assert body["receipt"]["dependencies"]["daily_bars"]["revision_id"] == committed.revision_id
+    assert body["receipt"]["coverage"]["row_count"] == 2
+    assert body["receipt"]["coverage"]["completeness"] == "not_assessed"
+    assert (
+        app_client.get(
+            "/api/read/daily_bars",
+            params={"start": "2026-07-30", "end": "2026-07-31"},
+        ).status_code
+        == 422
+    )
+
+
 def test_health_separates_optional_and_required_empties(client):
     """An opt-in dataset nobody enabled looks identical on disk to a failure."""
     body = client.get("/api/health").json()

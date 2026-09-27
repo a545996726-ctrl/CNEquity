@@ -19,15 +19,20 @@ from cnequity.query.reader import (
     resolve_config,
     scan,
 )
+from cnequity.query.receipt import ReadReceiptError, ReadResult, load_with_receipt
 from cnequity.query.resample import resample_trade_bars
-from cnequity.query.state import DatasetState, dataset_state
+from cnequity.query.state import DatasetState, dataset_attempt, dataset_state
 
 __all__ = [
     "DatasetState",
     "dataset_schema",
     "dataset_state",
+    "dataset_attempt",
     "list_datasets",
     "load",
+    "load_with_receipt",
+    "ReadReceiptError",
+    "ReadResult",
     "resolve_config",
     "resample_trade_bars",
     "scan",

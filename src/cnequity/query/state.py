@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
 from cnequity.config import Config
 from cnequity.domain.datasets import DATASETS
-from cnequity.storage.state import StateStore
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,13 @@ def dataset_state(
     from cnequity.query.reader import resolve_config
 
     cfg = resolve_config(config=config, data_root=data_root)
-    payload = StateStore(cfg.meta_root).get_payload(dataset)
+    # StateStore is a writer-oriented helper: its constructor creates
+    # meta/state and get_payload creates a lock file. Dataset identity is a
+    # public read API and must also work on a read-only mounted snapshot.
+    path = cfg.meta_root / "state" / f"{dataset}.json"
+    payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"state for {dataset!r} must be an object")
     revision = payload.get("revision")
     if revision is not None and (
         isinstance(revision, bool) or not isinstance(revision, int) or revision < 1
@@ -65,3 +73,52 @@ def dataset_state(
         changed_partitions=tuple(partitions),
         updated_at=payload.get("updated_at"),
     )
+
+
+def dataset_attempt(
+    dataset: str,
+    *,
+    config: Config | None = None,
+    data_root: str | Path | None = None,
+) -> dict | None:
+    """Read the latest dataset-stage outcome without opening the writer manifest.
+
+    A published revision may remain available after a failed new fetch. This
+    separate operational state lets consumers display that failure without
+    changing, deleting or falsely refreshing the last good snapshot.
+    """
+    if dataset not in DATASETS:
+        raise ValueError(f"unknown dataset {dataset!r}")
+    from cnequity.query.reader import resolve_config
+
+    cfg = resolve_config(config=config, data_root=data_root)
+    path = cfg.manifest_path
+    if not path.exists():
+        return None
+    if path.is_symlink():
+        raise ValueError("manifest path must not be a symlink")
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute(
+                """
+                SELECT r.run_id, r.started_at, r.finished_at, r.status AS run_status,
+                       d.stage, d.status, d.error_code, d.error_message
+                FROM dataset_results d
+                JOIN ingestion_runs r ON r.run_id = d.run_id
+                WHERE d.dataset = ?
+                ORDER BY r.started_at DESC, r.run_id DESC,
+                    CASE d.status
+                        WHEN 'failed' THEN 5 WHEN 'blocked' THEN 4
+                        WHEN 'degraded' THEN 3 WHEN 'warning' THEN 2
+                        WHEN 'success' THEN 1 ELSE 0
+                    END DESC
+                LIMIT 1
+                """,
+                (dataset,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return None
+            raise
+    return dict(row) if row is not None else None

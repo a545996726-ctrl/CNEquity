@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -103,6 +103,13 @@ class Health(BaseModel):
     stats_stale: bool
     stats_reason: str | None
     stats_generated_at: datetime | None
+
+
+class ReadReceiptPage(BaseModel):
+    """A bounded dataset read and the exact identity/coverage of those rows."""
+
+    rows: list[dict[str, Any]]
+    receipt: dict[str, Any]
 
 
 class Tier(BaseModel):
@@ -483,6 +490,50 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
 
         if dataset not in DATASETS:
             raise HTTPException(404, f"unknown dataset {dataset!r}")
+
+    @app.get("/api/read/{dataset}", response_model=ReadReceiptPage)
+    def read_with_receipt(
+        dataset: str,
+        view: View,
+        start: date,
+        end: date,
+        symbol: str | None = None,
+        as_of: date | None = None,
+        adjust: Annotated[str | None, Query(pattern="^(hfq|qfq)$")] = None,
+        pit_mode: Annotated[str | None, Query(pattern="^(strict|best_effort)$")] = None,
+    ) -> ReadReceiptPage:
+        """Read a bounded window with retained revision and row provenance."""
+        from cnequity.domain.datasets import DATASETS
+        from cnequity.query import ReadReceiptError, load_with_receipt
+        from cnequity.query.reader import ReaderError
+
+        _known(dataset)
+        spec = DATASETS[dataset]
+        if spec.query_date_col is None:
+            raise HTTPException(422, "dataset has no date-range query axis; use the Python API")
+        if end < start or (end - start).days > 366:
+            raise HTTPException(422, "read window must be 0–366 calendar days")
+        if symbol is None and end != start:
+            raise HTTPException(422, "multi-day HTTP reads require a symbol")
+        if spec.pit and as_of is None:
+            raise HTTPException(422, "PIT dataset requires as_of")
+        try:
+            result = load_with_receipt(
+                dataset,
+                config=view.config,
+                start=start,
+                end=end,
+                symbols=[symbol] if symbol else None,
+                as_of=as_of,
+                adjust=adjust,
+                pit_mode=pit_mode or ("strict" if spec.pit else None),
+                require_replayable=True,
+            )
+        except (ReaderError, ReadReceiptError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if result.frame.height > 1000:
+            raise HTTPException(413, "read exceeds 1000 rows; narrow the window or use Python")
+        return ReadReceiptPage(rows=result.frame.to_dicts(), receipt=result.receipt)
 
     @app.get("/api/datasets/{dataset}", response_model=DatasetDetail)
     def dataset_detail(dataset: str, view: View) -> DatasetDetail:

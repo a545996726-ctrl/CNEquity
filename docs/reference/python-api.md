@@ -65,6 +65,36 @@ def load(
 长期研究还应保存依赖版本映射、查询参数、profile、配置和软件版本；旧 generation
 受保留期限制。不要以水位或 `fetched_at` 代替完整依赖的 revision 身份。
 
+### 带读取凭证的查询
+
+```python
+from cnequity.query import load_with_receipt
+
+result = load_with_receipt(
+    "daily_bars",
+    start="2024-01-01",
+    end="2024-12-31",
+    symbols=["600519.SH"],
+    adjust="hfq",
+    require_replayable=True,
+    data_root="/path/to/lake",
+)
+bars, receipt = result.frame, result.receipt
+```
+
+`load_with_receipt()` 使用与 `load()` 相同的筛选参数，先捕获各依赖数据集的已提交
+修订，再以该映射读取。凭证记录实际选中的修订与合同指纹、返回行的来源和采集时间、
+PIT 模式/质量、请求窗口与实际行的日期边界。`receipt_id` 是这些内容的稳定摘要。
+`coverage.completeness="not_assessed"` 明确表示行的起止日期**不能**证明全市场或逐日完整。
+旧湖缺少修订时 `replayable=false` 并列出 `unpinned_datasets`；设置
+`require_replayable=True` 会在扫描前拒绝。此凭证固定数据版本，但不会冻结质量报告、
+操作配置或软件版本；长期复现仍需研究快照及研究产物清单。
+
+本地 HTTP 服务也提供 `GET /api/read/{dataset}`：传入 `start`、`end` 和通常所需的
+`symbol`，返回 `rows` 与同一次读取的 `receipt`。PIT 数据还须传 `as_of`，默认使用
+严格模式。HTTP 窗口最长 366 天、多日查询必须给出证券代码，超过 1000 行会拒绝；
+批量研究仍使用 Python API。该接口要求所有读取依赖有可重放修订，不会默默降级。
+
 ### 返回
 
 - 未复权数据集：原始列
@@ -144,6 +174,8 @@ assert report["universe_ready"]
 ## dataset_state() 与分钟重采样
 
 `dataset_state(dataset, config=..., data_root=...)` 返回 `DatasetState`，用于取得下游缓存身份。字段见 `query/state.py`，可用标准库 `dataclasses.asdict()` 转为字典；不要只用最大日期判断数据是否变化。
+
+`dataset_attempt(dataset, config=..., data_root=...)` 只读最近一次采集运行中该数据集最严重的步骤收据（阶段、状态、时间、错误原因和 run ID）。它与已发布修订是两个维度：采集失败不会删除上一份可读快照，消费端应同时显示快照日期与失败原因。旧湖没有采集收据时返回 `None`。
 
 `resample_trade_bars(frame, "5m")` 从完整 1m 成交数据重采样，支持 5m / 15m / 30m / 60m，按上午和下午分别对齐。它不覆写原始湖，缺组成分钟会报错，详见[查询指南](../datasets/query-guide.md#成交口径的分钟重采样)。
 
