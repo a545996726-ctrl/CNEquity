@@ -1,0 +1,243 @@
+"""Official ETF catalogues must not turn a code prefix into eligibility."""
+
+import io
+import json
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from cnequity.adapters.exchange.etf_profiles import (
+    CNI_DOMESTIC_INDEX_METHODOLOGIES,
+    parse_cni_domestic_index_methodology,
+    parse_sse_profiles,
+    parse_szse_fund_classes,
+    parse_szse_profiles,
+)
+from cnequity.config import Config
+from cnequity.domain.schemas import frame_from_rows
+from cnequity.steps.etf_profiles import step_etf_profiles
+
+
+def _sse_payload(rows, total=None):
+    return json.dumps(
+        {
+            "actionErrors": [],
+            "fieldErrors": {},
+            "pageHelp": {"total": len(rows) if total is None else total},
+            "result": rows,
+        }
+    ).encode()
+
+
+def _szse_workbook(rows):
+    stream = io.BytesIO()
+    pd.DataFrame(rows).to_excel(stream, index=False)
+    return stream.getvalue()
+
+
+def test_sse_subclass_controls_eligibility_not_etf_name():
+    today = date(2026, 9, 27)
+    rows = parse_sse_profiles(
+        _sse_payload(
+            [
+                {
+                    "fundCode": "510050",
+                    "fundType": "00",
+                    "subClass": "01",
+                    "secNameFull": "上证50ETF",
+                    "listingDate": "20050223",
+                    "INDEX_CODE": "000016",
+                    "INDEX_NAME": "上证50指数",
+                },
+                {
+                    "fundCode": "513000",
+                    "fundType": "00",
+                    "subClass": "33",
+                    "secNameFull": "境外股票ETF",
+                    "INDEX_CODE": "HSTECH",
+                },
+                {
+                    "fundCode": "501000",
+                    "fundType": "00",
+                    "subClass": "05",
+                    "secNameFull": "名称含ETF但类别未证实",
+                },
+            ]
+        ),
+        today,
+    )
+    assert [item["eligibility_status"] for item in rows] == ["eligible", "excluded", "unverified"]
+    assert rows[0]["tracking_index_code"] == "000016"
+    assert rows[0]["list_date"] == date(2005, 2, 23)
+    assert all(item["as_of_date"] == today for item in rows)
+
+
+def test_szse_listing_is_not_domestic_equity_proof():
+    rows = parse_szse_profiles(
+        _szse_workbook(
+            [
+                {"证券代码": "159915", "证券简称": "创业板ETF", "拟合指数": "399006 创业板指"},
+                {"证券代码": "159920", "证券简称": "恒生ETF", "拟合指数": "HSI"},
+            ]
+        ),
+        date(2026, 9, 27),
+    )
+    assert {item["symbol"]: item["tracking_index_code"] for item in rows} == {
+        "159915.SZ": "399006",
+        "159920.SZ": "HSI",
+    }
+    assert rows[0]["tracking_index_name"] == "创业板指"
+    assert {item["eligibility_status"] for item in rows} == {"unverified"}
+
+
+def test_incomplete_sse_directory_is_rejected():
+    with pytest.raises(ValueError, match="incomplete"):
+        parse_sse_profiles(_sse_payload([{"fundCode": "510050"}], total=100), date(2026, 9, 27))
+
+
+def test_szse_classification_excludes_nonstock_but_does_not_guess_geography():
+    directory = _szse_workbook(
+        [
+            {"证券代码": "159915", "证券简称": "创业板ETF", "拟合指数": "399006"},
+            {"证券代码": "159920", "证券简称": "恒生ETF", "拟合指数": "HSI"},
+            {"证券代码": "159400", "证券简称": "债券ETF", "拟合指数": "BOND"},
+        ]
+    )
+    classes = parse_szse_fund_classes(
+        _szse_workbook(
+            [
+                {
+                    "基金代码": "159915",
+                    "基金类别": "ETF",
+                    "投资类别": "股票基金",
+                    "上市日期": "2011-12-09",
+                },
+                {
+                    "基金代码": "159920",
+                    "基金类别": "ETF",
+                    "投资类别": "股票基金",
+                    "上市日期": "2012-10-22",
+                },
+                {
+                    "基金代码": "159400",
+                    "基金类别": "ETF",
+                    "投资类别": "债券基金",
+                    "上市日期": "2025-01-01",
+                },
+            ]
+        )
+    )
+    rows = parse_szse_profiles(directory, date(2026, 9, 27), fund_classes=classes)
+    by_code = {row["symbol"]: row for row in rows}
+    assert by_code["159915.SZ"]["eligibility_status"] == "unverified"
+    assert by_code["159920.SZ"]["eligibility_status"] == "unverified"
+    assert by_code["159400.SZ"]["eligibility_status"] == "excluded"
+    assert by_code["159915.SZ"]["list_date"] == date(2011, 12, 9)
+    with pytest.raises(ValueError, match="disagree"):
+        parse_szse_profiles(
+            directory, date(2026, 9, 27), fund_classes={"159915": classes["159915"]}
+        )
+
+
+def test_index_methodology_is_code_matched_and_only_promotes_domestic_stock(tmp_path, monkeypatch):
+    class Page:
+        def extract_text(self):
+            return (
+                "Index Code: 399006 3. Index Universe All A shares listed on the "
+                "ChiNext Market of Shenzhen Stock Exchange"
+            )
+
+    class Reader:
+        def __init__(self, _stream):
+            self.pages = [Page()]
+
+    monkeypatch.setattr("cnequity.adapters.exchange.etf_profiles.PdfReader", Reader)
+    url = CNI_DOMESTIC_INDEX_METHODOLOGIES["399006"]
+    evidence = parse_cni_domestic_index_methodology(b"%PDF-example", "399006", url)
+    assert evidence["asset_scope"] == "domestic_a_shares"
+    with pytest.raises(ValueError, match="URL"):
+        parse_cni_domestic_index_methodology(b"%PDF-example", "399006", "https://wrong.test")
+    with pytest.raises(ValueError, match="unrecognized"):
+        parse_cni_domestic_index_methodology(b"%PDF-example", "HSI", url)
+
+    directory = _szse_workbook(
+        [
+            {"证券代码": "159915", "证券简称": "A", "拟合指数": "399006 创业板指"},
+            {"证券代码": "159920", "证券简称": "B", "拟合指数": "HSI"},
+            {"证券代码": "159400", "证券简称": "C", "拟合指数": "399006"},
+            {"证券代码": "159401", "证券简称": "D", "拟合指数": "399300"},
+        ]
+    )
+    classes = {
+        "159915": {"fund_category": "ETF", "investment_category": "股票基金"},
+        "159920": {"fund_category": "ETF", "investment_category": "股票基金"},
+        "159400": {"fund_category": "ETF", "investment_category": "债券基金"},
+        "159401": {"fund_category": "ETF", "investment_category": "股票基金"},
+    }
+    rows = parse_szse_profiles(
+        directory,
+        date(2026, 9, 27),
+        fund_classes=classes,
+        index_evidence={"399006": evidence},
+    )
+    statuses = {row["symbol"]: row["eligibility_status"] for row in rows}
+    assert statuses == {
+        "159915.SZ": "eligible",
+        "159920.SZ": "unverified",
+        "159400.SZ": "excluded",
+        "159401.SZ": "unverified",
+    }
+    eligible = rows[0]
+    assert eligible["classification_basis"].endswith(
+        f"sha256={evidence['payload_sha256']}:url={url}"
+    )
+
+
+def test_step_archives_all_three_wire_sources_before_staging(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "lake")
+    observed = date(2026, 9, 27)
+    sse = _sse_payload(
+        [{"fundCode": "510050", "fundType": "00", "subClass": "01", "secNameFull": "上证50ETF"}]
+    )
+    szse = _szse_workbook([{"证券代码": "159915", "证券简称": "创业板ETF", "拟合指数": "399006"}])
+    funds = _szse_workbook(
+        [
+            {
+                "基金代码": "159915",
+                "基金类别": "ETF",
+                "投资类别": "股票基金",
+                "上市日期": "2011-12-09",
+            }
+        ]
+    )
+
+    def fake_fetch(_config, day):
+        assert day == observed
+        rows = parse_sse_profiles(sse, day) + parse_szse_profiles(
+            szse, day, fund_classes=parse_szse_fund_classes(funds)
+        )
+        return frame_from_rows(rows, "etf_profiles"), [
+            ("https://query.sse.com.cn/commonSoaQuery.do", sse, {"sqlId": "FUND_LIST"}, "json"),
+            ("https://www.szse.cn/api/report/ShowReport", szse, {"CATALOGID": "fund_etf"}, "xlsx"),
+            ("https://www.szse.cn/api/report/ShowReport", funds, {"CATALOGID": "1000_lf"}, "xlsx"),
+        ]
+
+    monkeypatch.setattr("cnequity.steps.etf_profiles.shanghai_today", lambda: observed)
+    monkeypatch.setattr("cnequity.steps.etf_profiles.fetch_exchange_etf_profiles", fake_fetch)
+    result = step_etf_profiles(cfg, observed, "etf-test-run", {})
+
+    assert result["rows_written"] == 2
+    assert len(list((cfg.meta_root / "raw" / "etf_profiles").rglob("*.json"))) >= 3
+    assert list(cfg.staging_root.rglob("*.parquet"))
+
+
+def test_step_refuses_to_publish_without_raw_archive(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "lake", raw_archive_enabled=False)
+    monkeypatch.setattr(
+        "cnequity.steps.etf_profiles.fetch_exchange_etf_profiles",
+        lambda *_args: pytest.fail("source should not be fetched without archive"),
+    )
+    with pytest.raises(RuntimeError, match="requires raw archive"):
+        step_etf_profiles(cfg, date(2026, 9, 27), "etf-test-run", {})
+    assert not list(cfg.staging_root.rglob("*.parquet"))

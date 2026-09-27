@@ -55,6 +55,7 @@
 | 数据集 | 主键 |
 |---------|-------------|
 | instruments | `(symbol)` |
+| etf_profiles | `(symbol, as_of_date)` |
 | trading_calendar | `(trade_date)` |
 | trading_status | `(symbol, trade_date)` |
 | daily_bars | `(symbol, trade_date)` |
@@ -82,13 +83,36 @@
 | symbol | string | 主键 |
 | name | string |  |
 | exchange | string | SH/SZ/BJ |
-| asset_type | string | stock/etf/index |
+| asset_type | string | stock/etf/index；旧 `etf` 值也包含部分 LOF，不可据此判定 ETF 研究资格 |
 | list_date | date | 可空 |
 | delist_date | date | 可空 |
 | prev_symbol | string | 可空 |
 | source | string |  |
 | data_version | string |  |
 | fetched_at | timestamp |  |
+
+#### etf_profiles
+
+交易所**当前目录快照**，不回填过去的分类。上交所目录给出 ETF 细分类和跟踪指数；
+仅其单市场股票、沪深京跨市场股票及科创板股票类别标为 `eligible`。跨境、债券、
+商品等明确不在范围内的类别为 `excluded`。深交所 ETF 列表提供基金和拟合指数，
+另一份官方基金列表给出投资类别：债券、货币等非股票基金可排除；股票基金还需按
+跟踪指数代码关联官方编制方案。目前仅 [399006 创业板指编制方案](https://www.cnindex.com.cn/docs/gz_399006_e.pdf)
+明确 A 股样本空间并通过核验；其他指数仍为 `unverified`。两份深交所清单必须逐代码一致。
+缺少目录记录也不能按代码前缀推断资格。数据来自[上交所 ETF 列表](https://www.sse.com.cn/assortment/fund/etf/list/)、
+[深交所 ETF 列表](https://fund.szse.cn/marketdata/etf/)和[深交所基金列表](https://fund.szse.cn/marketdata/fundslist/)。
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol, as_of_date | string, date | 快照主键；日期为本湖观察日 |
+| exchange, name | string | 交易所和基金简称 |
+| list_date | date | 来源给出的上市日期，可空 |
+| tracking_index_code, tracking_index_name | string | 来源指数标识，可空 |
+| fund_category, investment_category | string | 官方基金类别和投资类别；后者无法单独证明股票指数的市场范围 |
+| eligibility_status | string | `eligible` / `excluded` / `unverified` |
+| classification_basis | string | 分类依据；深市已核验行包含指数代码、官方方案 PDF 的 SHA-256 与 URL；不能仅用名称或代码前缀 |
+| source_url | string | 官方目录页面 |
+| source, data_version, fetched_at | string, string, timestamp | 来源与本湖采集时间 |
 
 #### trading_calendar
 

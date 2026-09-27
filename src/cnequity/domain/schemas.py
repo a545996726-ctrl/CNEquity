@@ -326,6 +326,24 @@ INSTRUMENTS_SCHEMA = {
     "fetched_at": FETCHED_AT_DTYPE,
 }
 
+ETF_PROFILES_SCHEMA = {
+    "symbol": pl.Utf8,
+    "as_of_date": pl.Date,
+    "exchange": pl.Utf8,
+    "name": pl.Utf8,
+    "list_date": pl.Date,
+    "tracking_index_code": pl.Utf8,
+    "tracking_index_name": pl.Utf8,
+    "fund_category": pl.Utf8,
+    "investment_category": pl.Utf8,
+    "eligibility_status": pl.Utf8,
+    "classification_basis": pl.Utf8,
+    "source_url": pl.Utf8,
+    "source": pl.Utf8,
+    "data_version": pl.Utf8,
+    "fetched_at": FETCHED_AT_DTYPE,
+}
+
 TRADING_CALENDAR_SCHEMA = {
     "trade_date": pl.Date,
     "is_trading": pl.Boolean,
@@ -851,6 +869,7 @@ DELISTING_EVENTS_SCHEMA = {
 
 DATASET_SCHEMAS = {
     "instruments": INSTRUMENTS_SCHEMA,
+    "etf_profiles": ETF_PROFILES_SCHEMA,
     "trading_calendar": TRADING_CALENDAR_SCHEMA,
     "trading_status": TRADING_STATUS_SCHEMA,
     "daily_bars": DAILY_BARS_SCHEMA,
@@ -905,6 +924,7 @@ DATASET_SCHEMAS = {
 
 PRIMARY_KEYS = {
     "instruments": ["symbol"],
+    "etf_profiles": ["symbol", "as_of_date"],
     "trading_calendar": ["trade_date"],
     "trading_status": ["symbol", "trade_date"],
     "daily_bars": ["symbol", "trade_date"],
@@ -1008,6 +1028,13 @@ _CORE_BAR_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 # null; allowing that through would make calendar consumers treat an unknown
 # session as non-trading and would make status history silently incomplete.
 _CORE_SEMANTIC_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "etf_profiles": (
+        "exchange",
+        "name",
+        "eligibility_status",
+        "classification_basis",
+        "source_url",
+    ),
     "trading_calendar": ("is_trading",),
     "trading_status": ("is_trading", "status"),
     "trade_ticks": ("trade_time", "direction"),

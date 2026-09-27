@@ -40,7 +40,7 @@ cne query --config configs/cnequity.sample.toml --sql "SELECT * FROM daily_bars 
 
 ## 数据与研究口径
 
-当前开发树所有 51 个数据集的字段与历史能力见[数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/)；注册数包含可选、兼容和停用源占位，已安装版本以本机契约为准。
+当前开发树所有 52 个数据集的字段与历史能力见[数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/)；注册数包含可选、兼容和停用源占位，已安装版本以本机契约为准。
 
 - 行情、复权、证券身份与交易状态；公司行为、财报、估值与股东；资金面、行业成分、宏观、新闻与监管事件。
 - 可选分钟线、分笔及期货/期权数据，默认关闭；实际来源能力见[数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/)。

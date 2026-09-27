@@ -9,6 +9,7 @@ API 签名见 [Python API 参考](../reference/python-api.md)。
 | 入口 | 提供的能力 | 需要自己处理 |
 |---|---|---|
 | `load()` | 物化数据，按参数做复权、PIT、股票池与严格校验 | 显式选择模式和证据窗口 |
+| `load_with_receipt()` | 固定可用修订，并返回行来源、PIT 与观察覆盖凭证 | 将凭证与研究产物一起保存；另核验完整性 |
 | `scan()` | 原始 LazyFrame，日期与标的过滤、版本选择 | 不含复权、PIT、股票池 |
 | `cne query --sql` | 本地视图上的只读 SELECT | SQL 的口径与覆盖校验 |
 | 直读 Parquet | 脱离运行时读取开放文件 | 版本、去重、PIT、复权和股票池 |
@@ -30,6 +31,13 @@ meta = list_datasets()  # 或 list_datasets(config=cfg)
 ```
 
 配置解析顺序：`config=` → `data_root=` → `configs/cnequity.toml`
+
+境内股票指数 ETF 使用单独的 `etf_profiles` 当前快照。按研究日筛掉之后的快照，
+再选每只基金当时最新的记录；只有 `eligibility_status="eligible"` 可进入该范围。
+深交所目录本身未提供足以核实指数资产类别的字段；仅按指数代码匹配并归档了明确
+境内 A 股样本空间的官方编制方案后才可升级资格，其余行保持 `unverified`；
+历史没有快照的日期也不能用今天的分类倒填。`instruments.asset_type="etf"` 是旧报价
+口径，还混有 LOF，不是资格证明。
 
 `list_datasets()` 是研究侧的**数据发现入口**，边界不证明中间无缺口：`history_mode` 区分 `by_date` / `snapshot_with_backfill` / `snapshot_only`；`coverage_start` 按已发布数据与分区边界解析（含 `report_period=YYYYQn`）。详见 [数据集目录 — 历史可用性](catalog.md#历史可用性history_mode)。
 

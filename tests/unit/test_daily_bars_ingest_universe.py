@@ -12,7 +12,9 @@ every run.
 
 from __future__ import annotations
 
-from datetime import date
+import json
+from datetime import date, timedelta
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -21,10 +23,17 @@ from cnequity.config import Config, load_config, validate_config
 from cnequity.domain.schemas import with_provenance
 from cnequity.domain.symbols import filter_ingest_universe, in_ingest_universe
 from cnequity.orchestrator.manifest import Manifest
-from cnequity.steps.bars import _finish_daily_bars, step_daily_bars
+from cnequity.steps.bars import (
+    _eligible_etf_bar_symbols,
+    _finish_daily_bars,
+    _settle_official_etf_prelisting_debts,
+    step_daily_bars,
+)
 from cnequity.steps.common import load_negative_evidence
+from cnequity.steps.reference import _enrich_etf_list_dates_from_profiles
 from cnequity.storage import StagingWriter
 from cnequity.storage.layout import init_data_layout
+from cnequity.storage.state import StateStore
 
 D1 = date(2026, 7, 20)
 D2 = date(2026, 7, 21)
@@ -98,6 +107,7 @@ def test_filter_preserves_order_and_drops_unparseable_symbols():
 def test_ingest_universe_defaults_to_all_a_and_is_validated(tmp_path):
     cfg = _cfg(tmp_path)
     assert cfg.ingest_universe == "all_a"
+    assert cfg.ingest_eligible_etfs is False
     # Only the universe verdict matters here; a bare Config has no waves.
     assert not [error for error in validate_config(cfg) if "[universe].ingest" in error]
 
@@ -107,6 +117,13 @@ def test_ingest_universe_defaults_to_all_a_and_is_validated(tmp_path):
     )
     errors = validate_config(load_config(path))
     assert any("[universe].ingest" in error for error in errors)
+
+    path.write_text(
+        f'[data]\nroot = "{(tmp_path / "lake").as_posix()}"\n'
+        '[universe]\ningest_eligible_etfs = "false"\n'
+    )
+    with pytest.raises(ValueError, match="ingest_eligible_etfs must be true or false"):
+        load_config(path)
 
 
 def _instrument_lake(tmp_path, **kwargs) -> Config:
@@ -180,6 +197,135 @@ def test_all_instruments_restores_the_previous_fetch_scope(tmp_path, monkeypatch
         step_daily_bars(cfg, D3, run_id, {})
 
     assert {"158030.SZ", "512740.SH"} <= set(requested)
+
+
+def test_eligible_etf_scope_uses_only_fresh_latest_published_snapshot(tmp_path, monkeypatch):
+    cfg = _instrument_lake(tmp_path, ingest_eligible_etfs=True)
+    directory = pl.DataFrame(
+        {
+            "symbol": ["512740.SH", "158030.SZ", "512999.SH", "512740.SH"],
+            "as_of_date": [D2, D2, D2, D1],
+            "eligibility_status": ["eligible", "unverified", "excluded", "eligible"],
+        }
+    )
+    monkeypatch.setattr("cnequity.query.dataset_attempt", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "cnequity.query.load_with_receipt",
+        lambda *a, **k: SimpleNamespace(frame=directory),
+    )
+    assert _eligible_etf_bar_symbols(cfg, D3) == ["512740.SH"]
+    assert _eligible_etf_bar_symbols(cfg, D1) == ["512740.SH"]
+    assert _eligible_etf_bar_symbols(cfg, D2 + timedelta(days=15)) == []
+
+    requested = _capture_fetch_scope(monkeypatch)
+    run_id = Manifest(cfg.manifest_path).start_run("daily:core")
+    with pytest.raises(RuntimeError):
+        step_daily_bars(cfg, D3, run_id, {})
+    assert "512740.SH" in requested
+    assert "158030.SZ" not in requested
+
+
+def test_failed_directory_does_not_admit_etfs_to_daily_bars(tmp_path, monkeypatch):
+    cfg = _instrument_lake(tmp_path, ingest_eligible_etfs=True)
+    monkeypatch.setattr(
+        "cnequity.query.dataset_attempt",
+        lambda *a, **k: {"status": "failed", "started_at": "2026-07-21T16:00:00+08:00"},
+    )
+    monkeypatch.setattr(
+        "cnequity.query.load_with_receipt",
+        lambda *a, **k: pytest.fail("failed directory must not be read for ETF bar scope"),
+    )
+    assert _eligible_etf_bar_symbols(cfg, D3) == []
+
+    # A failed collector after the original plan cannot silently supersede
+    # an ETF batch that the run already committed to fetch.
+    monkeypatch.setattr(
+        "cnequity.query.load_with_receipt",
+        lambda *a, **k: SimpleNamespace(
+            frame=pl.DataFrame(
+                {
+                    "symbol": ["512740.SH"],
+                    "as_of_date": [D2],
+                    "eligibility_status": ["eligible"],
+                }
+            )
+        ),
+    )
+    assert _eligible_etf_bar_symbols(cfg, D3, retry=True) == ["512740.SH"]
+
+
+def test_official_etf_listing_date_fills_only_missing_fund_metadata(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["512470.SH", "515470.SH", "600519.SH", "512999.SH"],
+            "asset_type": ["etf", "etf", "stock", "etf"],
+            "list_date": [None, D1, None, None],
+        },
+        schema_overrides={"list_date": pl.Date},
+    )
+    profiles = pl.DataFrame(
+        {
+            "symbol": ["512470.SH", "515470.SH", "600519.SH", "512999.SH"],
+            "as_of_date": [D3] * 4,
+            "list_date": [D2, D2, D2, D3 + timedelta(days=1)],
+        }
+    )
+    monkeypatch.setattr(
+        "cnequity.query.load_with_receipt",
+        lambda *a, **k: SimpleNamespace(frame=profiles),
+    )
+
+    enriched = _enrich_etf_list_dates_from_profiles(cfg, instruments, D3)
+    dates = dict(enriched.select("symbol", "list_date").iter_rows())
+
+    assert dates == {
+        "512470.SH": D2,
+        "515470.SH": D1,
+        "600519.SH": None,
+        "512999.SH": None,
+    }
+
+
+def test_official_listing_proof_retires_only_prelisting_debts_with_receipt(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, ingest_eligible_etfs=True)
+    store = StateStore(cfg.meta_root)
+    store.record_outstanding_keys(
+        "daily_bars",
+        [("512470.SH", D1), ("512470.SH", D3), ("600519.SH", D1)],
+        run_id="old-run",
+        reason="interior_gap",
+    )
+    monkeypatch.setattr(
+        "cnequity.query.load_with_receipt",
+        lambda *a, **k: SimpleNamespace(
+            frame=pl.DataFrame({"symbol": ["512470.SH"], "as_of_date": [D3], "list_date": [D2]}),
+            receipt={
+                "receipt_id": "evidence-id",
+                "dependencies": {"etf_profiles": {"revision_id": "revision-id"}},
+            },
+        ),
+    )
+
+    finding = _settle_official_etf_prelisting_debts(cfg, D3, "repair-run")
+
+    assert finding["keys_settled"] == 1
+    remaining = {
+        (row["symbol"], row["trade_date"]) for row in store.get_outstanding_keys("daily_bars")
+    }
+    assert remaining == {("512470.SH", D3.isoformat()), ("600519.SH", D1.isoformat())}
+    receipts = list((cfg.meta_root / "repairs" / "etf_prelisting_debts").glob("repair-run-*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["profile_receipt_id"] == "evidence-id"
+    assert receipt["status"] == "settled"
+    assert receipt["resolved_keys"] == [
+        {
+            "symbol": "512470.SH",
+            "trade_date": D1.isoformat(),
+            "official_list_date": D2.isoformat(),
+        }
+    ]
 
 
 def test_a_security_listing_today_is_fetched_the_same_day(tmp_path, monkeypatch):

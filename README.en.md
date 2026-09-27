@@ -87,7 +87,7 @@ If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https:
 
 ## Data coverage
 
-The current development tree registers **51 datasets: 46 curated + 5 derived**, organized into L0–L9. This includes compatibility entries, optional datasets and an inactive-source placeholder; it does **not** promise 51 complete historical tables after installation. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
+The current development tree registers **52 datasets: 47 curated + 5 derived**, organized into L0–L9. This includes compatibility entries, optional datasets and an inactive-source placeholder; it does **not** promise 52 complete historical tables after installation. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
 
 | Tier | Research use | Representative datasets |
 |---|---|---|

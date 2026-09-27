@@ -116,6 +116,7 @@ def test_nothing_stale_is_a_clean_no_op(config, monkeypatch):
     # marker proves that their finite window was observed.
     _snapshot_capture(config, "economic_calendar", ANCHOR)
     _snapshot_capture(config, "share_unlock_schedule", ANCHOR)
+    _snapshot_capture(config, "etf_profiles", ANCHOR)
     monkeypatch.setattr("cnequity.cli.run_cmds._last_trading_day", lambda cfg, today: ANCHOR)
 
     result = CliRunner().invoke(

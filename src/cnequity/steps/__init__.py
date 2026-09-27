@@ -4,6 +4,7 @@ from cnequity.steps import (  # noqa: F401
     capital,
     commodity,
     derivatives,
+    etf_profiles,
     events,
     finalize,
     fundamentals,

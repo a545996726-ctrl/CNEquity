@@ -707,6 +707,19 @@ _SPECS = [
         watermark=False,
         backfill_source="baostock",
     ),
+    # Official exchange fund directories are current snapshots. A row first
+    # observed today cannot be backdated into yesterday's ETF universe.
+    DatasetSpec(
+        "etf_profiles",
+        primary_source="exchange",
+        tier="L0",
+        partition_col="as_of_date",
+        partition_granularity="year",
+        fetch_semantics="snapshot",
+        watermark=False,
+        required=False,
+        empty_severity="info",
+    ),
     DatasetSpec(
         "trading_calendar",
         primary_source="tdx_protocol",

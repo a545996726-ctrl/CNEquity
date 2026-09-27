@@ -1,6 +1,7 @@
 from datetime import date
 
 import polars as pl
+import pytest
 
 from cnequity.config import Config
 from cnequity.orchestrator.manifest import Manifest
@@ -173,6 +174,40 @@ def test_retry_only_etf_placeholder_is_audited_and_unblocks_original_batch(tmp_p
         finding["check"] == "daily_bars_placeholder_skipped"
         for finding in result["context_updates"]["audit_findings"]
     )
+
+
+def test_eligible_etf_retry_is_not_superseded_as_outside_ingest_scope(tmp_path, monkeypatch):
+    cfg, run_id = _etf_retry_lake(tmp_path, ingest_eligible_etfs=True)
+    monkeypatch.setattr(
+        "cnequity.steps.bars._eligible_etf_bar_symbols", lambda *_, **__: ["589430.SH"]
+    )
+
+    result = step_daily_bars(cfg, date(2024, 6, 28), run_id, dict(_ETF_RETRY_CONTEXT))
+
+    batch = Manifest(cfg.manifest_path).get_batch(run_id, "placeholder-retry")
+    assert "ingest-universe-excluded" not in (batch["error_message"] or "")
+    assert result["context_updates"]["daily_bars_ownership"]["placeholder"] == 1
+
+
+def test_explicit_etf_backfill_retry_preserves_named_symbol(tmp_path, monkeypatch):
+    cfg, run_id = _etf_retry_lake(tmp_path)
+    cfg._backfill = True
+    cfg._backfill_symbols = ["589430.SH"]
+
+    class ScopeCaptured(Exception):
+        pass
+
+    def capture_scope(*_args, **kwargs):
+        assert kwargs["batch_specs"][0][1] == ["589430.SH"]
+        raise ScopeCaptured
+
+    monkeypatch.setattr("cnequity.steps.bars.fetch_daily_bars_parallel", capture_scope)
+
+    with pytest.raises(ScopeCaptured):
+        step_daily_bars(cfg, date(2024, 6, 28), run_id, dict(_ETF_RETRY_CONTEXT))
+
+    batch = Manifest(cfg.manifest_path).get_batch(run_id, "placeholder-retry")
+    assert "ingest-universe-excluded" not in (batch["error_message"] or "")
 
 
 def test_incomplete_delisted_ownership_blocks_compaction_and_retries(tmp_path, monkeypatch):

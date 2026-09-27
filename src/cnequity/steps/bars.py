@@ -7,8 +7,9 @@ import json
 import logging
 import time
 from collections.abc import Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 
@@ -436,6 +437,7 @@ def _merge_ownership_result(
     ownership: DailyBarOwnership,
     start: date,
     end: date,
+    run_id: str,
 ) -> dict:
     updates, delegated_complete = _ownership_context(config, ownership, start, end)
     context = out.setdefault("context_updates", {})
@@ -444,6 +446,9 @@ def _merge_ownership_result(
     if ownership.delegated_delisted and not delegated_complete:
         out["status"] = "warning"
         out["delegated_symbols"] = len(ownership.delegated_delisted)
+    settlement = _settle_official_etf_prelisting_debts(config, end, run_id)
+    if settlement:
+        context.setdefault("audit_findings", []).append(settlement)
     return out
 
 
@@ -463,6 +468,146 @@ def _resolve_daily_bar_scope(config: Config, symbols: list[str]) -> list[str]:
             f"daily_bars backfill symbols are not present in instruments: {preview}{suffix}"
         )
     return requested
+
+
+_ETF_PROFILE_MAX_AGE_DAYS = 14
+
+
+def _eligible_etf_bar_symbols(config: Config, on: date, *, retry: bool = False) -> list[str]:
+    """Extend bar ingestion only from a current, published ETF classification.
+
+    The directory is an observed snapshot, never a historical eligibility
+    service. A missing or failed collector leaves the stock ingest untouched
+    and does not admit a fund code. The pinned read receipt makes the exact
+    classification used for the fetch independently replayable.
+    """
+    if not config.ingest_eligible_etfs:
+        return []
+    from cnequity.query import dataset_attempt, load_with_receipt
+    from cnequity.query.receipt import ReadReceiptError
+
+    attempt = dataset_attempt("etf_profiles", config=config) if not retry else None
+    if attempt and attempt.get("status") in {"failed", "blocked", "degraded"}:
+        started = datetime.fromisoformat(attempt["started_at"])
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if started.astimezone(ZoneInfo("Asia/Shanghai")).date() <= on:
+            logger.warning(
+                "ETF bar scope held after failed directory attempt %s", attempt.get("run_id")
+            )
+            return []
+    try:
+        read = load_with_receipt("etf_profiles", config=config, end=on, require_replayable=True)
+    except (ReadReceiptError, FileNotFoundError, ValueError) as exc:
+        logger.warning("ETF bar scope unavailable: %s", exc)
+        return []
+    frame = read.frame
+    required = {"symbol", "as_of_date", "eligibility_status"}
+    if not required.issubset(frame.columns) or frame.is_empty():
+        logger.warning("ETF bar scope has no valid directory rows by %s", on)
+        return []
+    current = frame.filter(pl.col("as_of_date") <= on)
+    if current.is_empty():
+        return []
+    observed = current["as_of_date"].max()
+    if (on - observed).days > _ETF_PROFILE_MAX_AGE_DAYS:
+        logger.warning("ETF bar scope held: directory dated %s is stale on %s", observed, on)
+        return []
+    return sorted(
+        set(
+            current.filter(
+                (pl.col("as_of_date") == observed) & (pl.col("eligibility_status") == "eligible")
+            )["symbol"].to_list()
+        )
+    )
+
+
+def _settle_official_etf_prelisting_debts(config: Config, on: date, run_id: str) -> dict | None:
+    """Retire only owed ETF sessions predating an exchange-proven listing.
+
+    The debt ledger originally treats an undated ETF as live for every session
+    in a repair window. A later official directory can establish that these
+    sessions never existed. Save the pinned source and exact keys before
+    removing them; source-empty or unverified price gaps remain owed.
+    """
+    if not config.ingest_eligible_etfs:
+        return None
+    from cnequity.query import load_with_receipt
+    from cnequity.query.receipt import ReadReceiptError
+    from cnequity.storage.atomic import write_json_atomic
+
+    store = StateStore(config.meta_root)
+    owed = store.get_outstanding_keys("daily_bars")
+    if not owed:
+        return None
+    try:
+        read = load_with_receipt("etf_profiles", config=config, end=on, require_replayable=True)
+    except (ReadReceiptError, FileNotFoundError, ValueError):
+        return None
+    frame = read.frame
+    if not {"symbol", "as_of_date", "list_date"} <= set(frame.columns):
+        return None
+    listings = (
+        frame.filter(
+            (pl.col("as_of_date") <= on)
+            & pl.col("list_date").is_not_null()
+            & (pl.col("list_date") <= on)
+        )
+        .sort("as_of_date")
+        .unique(subset=["symbol"], keep="last")
+    )
+    list_dates = dict(listings.select("symbol", "list_date").iter_rows())
+    resolved = sorted(
+        (row["symbol"], date.fromisoformat(row["trade_date"]))
+        for row in owed
+        if row.get("symbol") in list_dates
+        and row.get("trade_date")
+        and row["trade_date"] < list_dates[row["symbol"]].isoformat()
+    )
+    if not resolved:
+        return None
+    receipt = {
+        "run_id": run_id,
+        "dataset": "daily_bars",
+        "reason": "official_etf_list_date_proves_prelisting_session",
+        "profile_receipt_id": read.receipt["receipt_id"],
+        "profile_revision": read.receipt["dependencies"]["etf_profiles"]["revision_id"],
+        "as_of": on.isoformat(),
+        "status": "prepared",
+        "resolved_keys": [
+            {
+                "symbol": symbol,
+                "trade_date": day.isoformat(),
+                "official_list_date": list_dates[symbol].isoformat(),
+            }
+            for symbol, day in resolved
+        ],
+    }
+    receipt_digest = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    path = config.meta_root / "repairs" / "etf_prelisting_debts" / f"{run_id}-{receipt_digest}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(path, receipt, ensure_ascii=False, indent=2)
+    remaining = store.clear_outstanding_keys("daily_bars", resolved)
+    receipt["status"] = "settled"
+    receipt["remaining_outstanding"] = remaining
+    write_json_atomic(path, receipt, ensure_ascii=False, indent=2)
+    logger.info(
+        "Retired %d ETF prelisting debt(s) using exchange directory receipt %s; %d remain",
+        len(resolved),
+        read.receipt["receipt_id"],
+        remaining,
+    )
+    return {
+        "dataset": "daily_bars",
+        "severity": "info",
+        "check": "official_etf_prelisting_debts_settled",
+        "message": f"{len(resolved)} ETF prelisting keys settled from official directory dates",
+        "keys_settled": len(resolved),
+        "profile_receipt_id": read.receipt["receipt_id"],
+        "repair_receipt": str(path.relative_to(config.meta_root)),
+    }
 
 
 # TDX counts Beijing volume in lots; anything further apart is a different row.
@@ -996,8 +1141,27 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         remaining: list[tuple[str, list[str], date, date]] = []
         fallback_specs: list[tuple[str, list[str], date, date]] = []
         ownership = DailyBarOwnership()
+        etf_retry_scopes: dict[date, set[str]] = {}
+        explicit_retry = bool(
+            getattr(config, "_backfill", False)
+            and getattr(config, "_backfill_symbols", None) is not None
+        )
         for batch_id, symbols, spec_start, spec_end in batch_specs:
-            symbols = filter_ingest_universe(symbols, config.ingest_universe)
+            if explicit_retry:
+                symbols = _resolve_daily_bar_scope(config, symbols)
+            else:
+                if spec_end not in etf_retry_scopes:
+                    # A later directory failure stops new admissions, but it
+                    # must not erase work already planned in this failed run.
+                    etf_retry_scopes[spec_end] = set(
+                        _eligible_etf_bar_symbols(config, spec_end, retry=True)
+                    )
+                eligible_etfs = etf_retry_scopes[spec_end]
+                symbols = [
+                    symbol
+                    for symbol in symbols
+                    if in_ingest_universe_symbol(symbol, config) or symbol in eligible_etfs
+                ]
             if not symbols:
                 # Every symbol in this batch has left the ingest scope. Retrying
                 # it would re-fetch codes this lake no longer ingests, and
@@ -1154,7 +1318,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
             ),
             probe_symbols=ownership.probe,
         )
-        return _merge_ownership_result(out, config, ownership, start, end)
+        return _merge_ownership_result(out, config, ownership, start, end, run_id)
 
     if getattr(config, "_backfill", False):
         start, end = _backfill_window(config, trade_date)
@@ -1184,12 +1348,21 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
     explicit_scope = (
         getattr(config, "_backfill_symbols", None) if getattr(config, "_backfill", False) else None
     )
+    catalog_etfs = set(_eligible_etf_bar_symbols(config, end)) if explicit_scope is None else set()
+    known_symbols = load_symbols(config)
     symbols = (
         # An explicit repair scope is the operator's own request and is never
         # narrowed; the implicit full-market scope is.
         _resolve_daily_bar_scope(config, explicit_scope)
         if explicit_scope is not None
-        else filter_ingest_universe(load_symbols(config), config.ingest_universe)
+        else list(
+            dict.fromkeys(
+                [
+                    *filter_ingest_universe(known_symbols, config.ingest_universe),
+                    *(symbol for symbol in known_symbols if symbol in catalog_etfs),
+                ]
+            )
+        )
     )
     rebackfill = context.get("symbols_to_rebackfill") or []
     if rebackfill:
@@ -1203,7 +1376,8 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         discovered = [
             row
             for row in context.get("new_instruments") or ()
-            if row.get("symbol") and in_ingest_universe_symbol(row["symbol"], config)
+            if row.get("symbol")
+            and (in_ingest_universe_symbol(row["symbol"], config) or row["symbol"] in catalog_etfs)
         ]
         for row in discovered:
             spans.setdefault(
@@ -1343,7 +1517,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
     out.setdefault("metrics", {})["cache_hits"] = int(
         out.get("metrics", {}).get("cache_hits", 0) or 0
     ) + len(reused_symbols)
-    return _merge_ownership_result(out, config, ownership, start, end)
+    return _merge_ownership_result(out, config, ownership, start, end, run_id)
 
 
 def _owed_keys_for_symbols(

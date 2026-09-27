@@ -62,6 +62,8 @@ def test_legacy_tables_match_registry():
         # The rolling calendar contains future event dates, so event_date is
         # not a valid freshness watermark.
         "economic_calendar",
+        # Exchange ETF directories are observed snapshots, not dated history.
+        "etf_profiles",
         # Fetched per report period, not per date — a watermark over trade dates
         # would advance daily and mean nothing.
         "share_structure",
@@ -70,6 +72,7 @@ def test_legacy_tables_match_registry():
         "share_unlock_schedule",
     }
     assert set(FETCH_SEMANTICS) == {
+        "etf_profiles",
         "trading_status",
         "fund_flow",
         "share_unlock_schedule",

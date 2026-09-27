@@ -479,6 +479,10 @@ max_payload_bytes = 33554432
 #   all_a_sh_sz     — drop the Beijing exchange as well
 #   all_instruments — everything `instruments` lists, including ETF/LOF quotes
 ingest = "all_a"
+# Optional: also fetch daily bars for ETFs in the latest replayable, positively
+# eligible exchange directory (at most 14 calendar days old). This does not
+# change all_a stock queries or admit other ETF/LOF/fund codes.
+ingest_eligible_etfs = false
 
 # Wave DAG for daily job (see docs/datasets/catalog.md)
 [[job.daily.waves]]
@@ -588,7 +592,7 @@ parallel = true
 # `sentiment_scores` reads committed announcements and headlines out of the
 # lake, so it needs those feeds published — not fetched in the same run. They
 # are ingested by [job.events.groups] on their own calendar-day cadence.
-steps = ["institutional_holdings", "analyst_consensus",
+steps = ["etf_profiles", "institutional_holdings", "analyst_consensus",
   "hot_rank", "sector_bars", "sector_fund_flow",
   "sentiment_scores", "compact"]
 

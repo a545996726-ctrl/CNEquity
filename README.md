@@ -1,9 +1,9 @@
 <div align="center">
-  <h1>CNEquity · 把 A 股数据留在自己的研究底座里</h1>
-  <p><strong>采集一次，持续更新，用同一份可溯源的本地数据做研究。</strong></p>
+  <h1>CNEquity · 中国市场金融数据湖</h1>
+  <p><strong>打破数据垄断，构建属于每个人的本地金融数据集</strong></p>
 </div>
 
-CNEquity 将行情、财报、公司事件和资金面等多源数据整理为本地 Parquet 数据湖，提供增量采集、失败续跑、质量审计与统一查询。适合反复回测、积累历史数据，以及让 Python、SQL 和 AI agent 共用数据的个人研究者与小团队。
+CNEquity 将股票行情、期货合约数据、财报、公司事件和资金面等多源数据整理为本地 Parquet 数据湖，提供增量采集、失败续跑、质量审计与统一查询。适合反复回测、积累历史数据。提供个人研究者和AI Agent一套完整的金融数据解决方案。
 
 [![CI](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg)](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cnequity?logo=pypi&logoColor=white)](https://pypi.org/project/cnequity/)
@@ -87,7 +87,7 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 
 ## 数据范围
 
-当前开发树注册 **51 个数据集：46 个 curated + 5 个 derived**，按用途分为 L0–L9。注册数量包括兼容入口、可选数据集和停用源占位，**不等于开箱即有 51 张完整历史表**。完整字段、主键、历史起点和来源集中在[数据集目录](docs/datasets/catalog.md)与[数据源说明](docs/datasets/sources.md)。
+当前开发树注册 **52 个数据集：47 个 curated + 5 个 derived**，按用途分为 L0–L9。注册数量包括兼容入口、可选数据集和停用源占位，**不等于开箱即有 52 张完整历史表**。完整字段、主键、历史起点和来源集中在[数据集目录](docs/datasets/catalog.md)与[数据源说明](docs/datasets/sources.md)。
 
 | 层次 | 研究用途 | 代表数据集 |
 |---|---|---|
@@ -110,6 +110,7 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 | 数据集 | 层次 | 登记主源 | 登记备源 |
 |---|---|---|---|
 | `instruments` | L0 | tdx_protocol | baostock |
+| `etf_profiles` | L0 | exchange | — |
 | `trading_calendar` | L0 | tdx_protocol | exchange |
 | `trading_status` | L0 | eastmoney | exchange |
 | `adj_factors` | L1 | sina | baostock |

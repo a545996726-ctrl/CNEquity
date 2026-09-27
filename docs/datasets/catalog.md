@@ -1,6 +1,6 @@
 # 数据集目录
 
-cnequity 交付 **51 个注册数据集**（46 curated + 5 derived：`adj_factors`、`industry_index`、`futures_continuous`、`option_greeks`、`delisting_events`），按选股用途分为 L0–L9 十类。另有 **on-demand** 数据集不进 curated 主路径。其中日内数据集 `minute_bars` / `minute_bars_5m` 默认关闭，需在 `[minute_bars]` 显式开启；分笔 `trade_ticks` 同样默认关闭，开关在**独立的** `[trade_ticks]`。期货/期权主表（`futures_contracts`、`option_contracts`、`futures_bars`、`option_bars`）默认关闭，开关在 `[futures]`，不进 `cne init`（见 [产品边界](../architecture/overview.md)）。
+cnequity 交付 **52 个注册数据集**（47 curated + 5 derived：`adj_factors`、`industry_index`、`futures_continuous`、`option_greeks`、`delisting_events`），按选股用途分为 L0–L9 十类。另有 **on-demand** 数据集不进 curated 主路径。其中日内数据集 `minute_bars` / `minute_bars_5m` 默认关闭，需在 `[minute_bars]` 显式开启；分笔 `trade_ticks` 同样默认关闭，开关在**独立的** `[trade_ticks]`。期货/期权主表（`futures_contracts`、`option_contracts`、`futures_bars`、`option_bars`）默认关闭，开关在 `[futures]`，不进 `cne init`（见 [产品边界](../architecture/overview.md)）。
 
 注册表包含可选、兼容和停用源占位入口：`flash_news_wire` 是新闻兼容读取，`economic_calendar` 为停用源占位。注册数不是物理独立表数，也不是默认采集完成数。
 
@@ -16,7 +16,7 @@ cnequity 交付 **51 个注册数据集**（46 curated + 5 derived：`adj_factor
 
 | 层次 | 说明 | 代表数据集 |
 |------|------|------------|
-| **L0** 基础参考 | Universe、日历、交易状态 | instruments, trading_calendar, trading_status |
+| **L0** 基础参考 | Universe、ETF 目录、日历、交易状态 | instruments, etf_profiles, trading_calendar, trading_status |
 | **L1** 行情 | 未复权价量 + 复权因子 + 可选分钟/分笔 + 退市形态 | daily_bars, index_bars, minute_bars*, minute_bars_5m*, trade_ticks*, adj_factors, delisting_events |
 | **L2** 公司事件 | 除权除息、公告、预约披露 | corporate_actions, announcement_index, earnings_disclosure_schedule |
 | **L3** 基本面 | 财报、估值、一致预期 | financial_statement_items, valuation_metrics, analyst_consensus |
@@ -173,7 +173,8 @@ THS 官方估值快照只能从启用后按日积累，不能用旧日期重放�
 
 | 数据集 | 分区键 | 主键 | 语义 | 水位 | 主源 | 备注 |
 |--------|--------|------|------|------|------|------|
-| instruments | —（单文件 merge） | symbol | by_date | — | tdx_protocol | EM 分别从 A 股与 ETF/LOF clist 补 list_date；baostock 回填退市股（`cne backfill instruments`）；merge 保留退市 |
+| instruments | —（单文件 merge） | symbol | by_date | — | tdx_protocol | EM 分别从 A 股与 ETF/LOF clist 补 list_date；已发布交易所 ETF 目录补基金缺失上市日；baostock 回填退市股（`cne backfill instruments`）；merge 保留退市 |
+| etf_profiles | as_of_date（按年） | symbol, as_of_date | snapshot | — | exchange | 上交所 ETF 细分类、深交所 ETF/基金目录及逐代码核验的官方指数方案；仅有充分境内股票指数证据的记录进入研究池。未知类别保留 unverified，不能回填未观测的历史快照 |
 | trading_calendar | trade_date | trade_date | by_date | ✓ | tdx_protocol | 备源交易所 CSV；种子 2016–2027 |
 | trading_status | trade_date（按月） | symbol, trade_date | by_date | ✓ | eastmoney | baostock ST 回填；派生停牌写月分区。`status`（normal/suspended/**delisted**）与 `risk_warning`（ST/*ST）是两列——旧版单列会让停牌冲掉 ST 标记；退市行由 `instruments` 判定并标 `derived_delisted`。旧湖读取自动兼容，物理迁移见 [schema](schema.md#trading_status) |
 
@@ -181,7 +182,7 @@ THS 官方估值快照只能从启用后按日积累，不能用旧日期重放�
 
 | 数据集 | 分区键 | 主键 | 语义 | 水位 | 主源 | 备注 |
 |--------|--------|------|------|------|------|------|
-| daily_bars | trade_date | symbol, trade_date | by_date | ✓ | tdx_protocol | tip 缺口东财 clist 路由进 curated；多日 kline；BJ→sina；snapshot 仍留 audit |
+| daily_bars | trade_date | symbol, trade_date | by_date | ✓ | tdx_protocol | tip 缺口东财 clist 路由进 curated；多日 kline；BJ→sina；显式开启后只追加正式目录已核验 ETF，其他基金不进入默认日更；snapshot 仍留 audit |
 | index_bars | trade_date | symbol, trade_date, frequency | by_date | ✓ | tdx_protocol | |
 | minute_bars | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 1m。**可选**，默认关；`[minute_bars]` 配置范围；**源端只有 95 个交易日**（见下「历史视野」）；落盘量随标的数与窗口增长；required=false |
 | minute_bars_5m | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 5m。同上可选；**491 个交易日（约 2 年），是唯一有真历史的日内频率**；落盘量随标的数与窗口增长；required=false |

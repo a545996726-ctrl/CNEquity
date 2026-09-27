@@ -84,6 +84,7 @@ def step_instruments(config: Config, trade_date: date, run_id: str, context: dic
     df = _merge_untdxable_instruments(config, df)
     _require_beijing_instrument_scope(config, df, trade_date)
     df = enrich_instrument_list_dates(config, df)
+    df = _enrich_etf_list_dates_from_profiles(config, df, trade_date)
     if getattr(config, "_backfill", False):
         df = _merge_delisted_instruments(config, df)
     df = _carry_lake_facts(config, df)
@@ -92,6 +93,53 @@ def step_instruments(config: Config, trade_date: date, run_id: str, context: dic
     if new:
         result["context_updates"] = {"new_instruments": new}
     return result
+
+
+def _enrich_etf_list_dates_from_profiles(
+    config: Config, instruments: pl.DataFrame, on: date
+) -> pl.DataFrame:
+    """Fill missing ETF listing dates from a published exchange directory.
+
+    A fund's first price must not create an obligation for sessions before its
+    official listing. The market-wide instrument sources can omit that date,
+    while ``etf_profiles`` records it with a replayable exchange response.
+    Classification eligibility is separate: even an unverified ETF has a
+    factual listing date. Never rewrite a date already supplied by instruments.
+    """
+    if not {"symbol", "asset_type", "list_date"} <= set(instruments.columns):
+        return instruments
+    from cnequity.query import load_with_receipt
+    from cnequity.query.receipt import ReadReceiptError
+
+    try:
+        read = load_with_receipt("etf_profiles", config=config, end=on, require_replayable=True)
+    except (ReadReceiptError, FileNotFoundError, ValueError):
+        return instruments
+    profiles = read.frame
+    if not {"symbol", "as_of_date", "list_date"} <= set(profiles.columns):
+        return instruments
+    listings = (
+        profiles.filter(
+            (pl.col("as_of_date") <= on)
+            & pl.col("list_date").is_not_null()
+            & (pl.col("list_date") <= on)
+        )
+        .sort("as_of_date")
+        .unique(subset=["symbol"], keep="last")
+        .select("symbol", pl.col("list_date").alias("_exchange_list_date"))
+    )
+    if listings.is_empty():
+        return instruments
+    return (
+        instruments.join(listings, on="symbol", how="left")
+        .with_columns(
+            pl.when((pl.col("asset_type") == "etf") & pl.col("list_date").is_null())
+            .then(pl.col("_exchange_list_date"))
+            .otherwise(pl.col("list_date"))
+            .alias("list_date")
+        )
+        .drop("_exchange_list_date")
+    )
 
 
 def new_instrument_rows(config: Config, df: pl.DataFrame) -> list[dict]:

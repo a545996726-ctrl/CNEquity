@@ -37,7 +37,7 @@ cne query --config configs/cnequity.demo.toml --sql "SELECT symbol, trade_date, 
 
 | 概念 | 含义 |
 |---|---|
-| 注册 ≠ 已采集 | 当前开发树有 51 个数据集（46 curated + 5 derived），包括可选、兼容与占位入口；安装不会附带数据 |
+| 注册 ≠ 已采集 | 当前开发树有 52 个数据集（47 curated + 5 derived），包括可选、兼容与占位入口；安装不会附带数据 |
 | 新鲜 ≠ 完整 | `fresh` 反映更新日期；历史缺口、ST 与退市证据、PIT 质量需要分别核验 |
 | 日更 ≠ 事件流 | `run daily --all-groups` 遍历日更组；公告和新闻另用 `run events`，周末也运行 |
 | 回填 ≠ 严格 PIT | 今日回填的财报不能证明过去已观察到该版本；研究显式使用 `pit_mode="strict"` |
