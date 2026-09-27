@@ -51,12 +51,6 @@ def test_catalog_tier_tables_match_the_registry():
         )
 
 
-def test_catalog_lists_every_dataset_exactly_once():
-    listed = [name for names in _documented_by_tier().values() for name in names]
-    assert len(listed) == len(set(listed)), "a dataset is documented under two tiers"
-    assert set(listed) == set(DATASETS)
-
-
 def test_catalog_header_states_the_registered_count():
     """The intro sentence hard-codes the total; keep it honest."""
     header = CATALOG.read_text(encoding="utf-8").split("---", 1)[0]

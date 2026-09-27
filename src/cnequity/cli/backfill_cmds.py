@@ -82,18 +82,16 @@ from cnequity.orchestrator.engine import JobEngine
     "start_str",
     default=None,
     help=(
-        "按日期推进的回填（margin_trading、financial_statement_items 报告期推进、minute_bars）"
-        "及衍生品日线的区间起点（YYYY-MM-DD），也用来收窄 sector_bars 的 K 线窗口（默认往前 400 天）。有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。"
+        "回填区间起点（YYYY-MM-DD），包括 daily_bars、minute_bars、衍生品日线、"
+        "日期/报告期推进及 sector_bars。sector_bars 默认往前 400 天；"
+        "有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。"
     ),
 )
 @click.option(
     "--end",
     "end_str",
     default=None,
-    help=(
-        "按日期推进的回填（margin_trading、financial_statement_items 报告期推进）与 sector_bars "
-        "的区间终点（YYYY-MM-DD，默认今天）。"
-    ),
+    help=("回填区间终点（YYYY-MM-DD，默认今天），与 --start 配合限定历史窗口。"),
 )
 @click.option(
     "--outstanding",
@@ -576,8 +574,8 @@ def backfill(
         cfg.st_history_symbols_per_run = 0
 
     spec = get_dataset(dataset)
-    # Tip-paged sources (intraday) must chunk by symbol, not by date: the wire
-    # always walks tip → start, so date slices re-fetch every newer page.
+    # Offset-paged sources (intraday) chunk by symbol, not by date, so each
+    # symbol pays for locating the window only once.
     if spec.backfill_chunk_symbols and start_d and end_d:
         result = _backfill_symbol_chunked(cfg, dataset, start_d, end_d, spec.backfill_chunk_symbols)
     elif spec.backfill_chunk_days and start_d and end_d:
@@ -696,6 +694,14 @@ def _backfill_plan(cfg, dataset, start, end, symbols, workers, repair_modes) -> 
         "requests": None,
         "cold_request_lower_bound": cold_minimum,
         "broad_tip_snapshots": broad_tip,
+        "tdx_history_window": {
+            "strategy": "exponential-bracket-binary-seek-then-scan",
+            "applies_when": "TDX K 线回填且 end 早于最新完整页；其他来源沿用各自策略",
+            "cost": "每标的：对数级定位页 + 目标窗口页；跳页后额外校验一次最新页",
+            "limits": "仅限源仍保留的历史；未知日期退回顺序读取，失败不提交该标的的部分结果",
+        }
+        if dataset in {"daily_bars", "index_bars", "minute_bars", "minute_bars_5m"}
+        else None,
         "cost_note": "分页、缺口和缓存决定请求数；单日窗口不等于单个请求。先用少量 --symbols 验证",
         "pacing_seconds": cfg.source_intervals,
         "rate_limit_root": str(cfg.rate_limit_root),
@@ -807,6 +813,10 @@ def _repair_outstanding(cfg, dataset: str, workers: int) -> dict:
     from cnequity.steps.bars import _last_final_session
     from cnequity.storage.state import StateStore
 
+    # A later ordinary run may already have published many owed keys. Reconcile
+    # against committed rows before grouping months, or those keys would drive
+    # unnecessary source requests. This is not a repair attempt for missing keys.
+    _settle_outstanding(cfg, dataset, note_missing_attempt=False)
     owed = StateStore(cfg.meta_root).get_outstanding_keys(dataset)
     if not owed:
         return {"dataset": dataset, "status": "success", "outstanding": 0, "note": "nothing owed"}
@@ -878,7 +888,7 @@ def _repair_outstanding(cfg, dataset: str, workers: int) -> dict:
     }
 
 
-def _settle_outstanding(cfg, dataset: str) -> dict:
+def _settle_outstanding(cfg, dataset: str, *, note_missing_attempt: bool = True) -> dict:
     """Strike off the owed keys that are now in the lake, and report the rest.
 
     Checked against what actually landed rather than against the run's exit
@@ -931,7 +941,8 @@ def _settle_outstanding(cfg, dataset: str) -> dict:
     # nothing here expires, so the attempt count is the only thing that will
     # ever distinguish last night's blip from a vendor that has stopped
     # serving the symbol at all.
-    store.note_repair_attempt(dataset, missed)
+    if note_missing_attempt:
+        store.note_repair_attempt(dataset, missed)
     stubborn = sum(
         1 for row in store.get_outstanding_keys(dataset) if int(row.get("attempts", 0) or 0) >= 3
     )
@@ -1296,11 +1307,9 @@ def _backfill_once(cfg, dataset: str) -> dict:
 def _backfill_symbol_chunked(cfg, dataset: str, start: date, end: date, chunk_symbols: int) -> dict:
     """Backfill a tip-paged dataset as compacted symbol slices over [start, end].
 
-    TDX intraday pages backwards from the live tip. A date-sliced sweep of the
-    same window therefore re-walks tip → each slice_start for every symbol —
-    measured ~8× the wire traffic of one tip→horizon walk on CSI300 1m. Chunking
-    by symbol keeps one walk per name, bounds compact memory, and makes a kill
-    cost only the current symbol batch.
+    TDX intraday locates old windows by offset before scanning their pages.
+    Chunking by symbol pays that positioning cost once per name, bounds compact
+    memory, and makes an interruption cost only the current symbol batch.
     """
     from cnequity.steps.intraday import (
         _filter_all_scope_to_listed_symbols,

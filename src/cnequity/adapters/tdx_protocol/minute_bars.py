@@ -32,7 +32,6 @@ and a threaded one did (181).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 from collections.abc import Callable
@@ -42,6 +41,7 @@ import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
 from cnequity.adapters.tdx_protocol._decode import decoded_quantity_or_none
+from cnequity.adapters.tdx_protocol.history_window import window_pages
 from cnequity.domain.rate_limit import RateLimitSpec, source_request_slot_spec, wait_spec
 
 logger = logging.getLogger(__name__)
@@ -185,11 +185,6 @@ def _rows_to_dicts(
     return out, off_session
 
 
-def _page_min_date(rows: list[dict]) -> date | None:
-    stamps = [s for s in (_parse_stamp(r) for r in rows) if s is not None]
-    return min(s.date() for s in stamps) if stamps else None
-
-
 def fetch_minute_bars_paginated(
     client,
     sym: str,
@@ -206,9 +201,9 @@ def fetch_minute_bars_paginated(
     """Intraday bars for *sym* in [start, end], paging back through the tip.
 
     ``max_pages`` bounds the walk for callers that know the horizon; without it
-    the loop still terminates on a short page or on reaching *start*, but a
-    symbol whose history runs deeper than the window costs pages that are then
-    discarded. When a caller needs a complete window, ``require_complete``
+    the loop still terminates on a short page or on reaching *start*. Backfills
+    seek to *end* before reading consecutive pages. The cap still bounds depth
+    from the tip, not request count. ``require_complete``
     turns reaching that cap before observing *start* into an error instead of
     returning a plausible-looking prefix.
     """
@@ -221,24 +216,10 @@ def fetch_minute_bars_paginated(
         raise TdxMinuteBarsError(f"{sym}: TDX serves no Beijing-exchange intraday bars")
     market = 1 if exch == "SH" else 0
 
-    offset_pos = 0
     all_rows: list[dict] = []
     off_session_total = 0
-    page = 0
-    seen_page_signatures: set[str] | None = set() if max_pages is None else None
 
-    while True:
-        if max_pages is None and page >= _MAX_PAGES:
-            raise TdxMinuteBarsError(
-                f"TDX {frequency} pagination exceeded {_MAX_PAGES} pages for {sym}"
-            )
-        if max_pages is not None and page >= max_pages:
-            if require_complete:
-                raise TdxMinuteBarsError(
-                    f"TDX {frequency} page limit {max_pages} reached for {sym} "
-                    f"before reaching window start {start}"
-                )
-            break
+    def fetch_page(offset_pos: int) -> list[dict]:
         try:
             with source_request_slot_spec(rate_limit):
                 wait_spec(rate_limit)
@@ -258,30 +239,32 @@ def fetch_minute_bars_paginated(
                 f"TDX {frequency} page failed for {sym} at start={offset_pos}"
             ) from exc
 
-        if not raw:
-            break
+        return raw or []
 
-        if seen_page_signatures is not None:
-            page_signature = hashlib.sha256(repr(raw).encode()).hexdigest()
-            if page_signature in seen_page_signatures:
-                raise TdxMinuteBarsError(
-                    f"TDX {frequency} pagination did not advance for {sym} at start={offset_pos}"
-                )
-            seen_page_signatures.add(page_signature)
-
+    limit_message = (
+        f"TDX {frequency} pagination exceeded {_MAX_PAGES} pages for {sym}"
+        if max_pages is None
+        else f"TDX {frequency} page limit {max_pages} reached for {sym} "
+        f"before reaching window start {start}"
+    )
+    for raw in window_pages(
+        fetch_page,
+        lambda rows: [_parse_stamp(row) for row in rows],
+        start,
+        end,
+        page_size=_PAGE_SIZE,
+        page_limit=_MAX_PAGES if max_pages is None else max_pages,
+        seek=backfill,
+        strict_limit=max_pages is None or require_complete,
+        detect_repeats=max_pages is None,
+        error=TdxMinuteBarsError,
+        label=f"TDX {frequency} for {sym}",
+        limit_message=limit_message,
+        on_page=on_page,
+    ):
         page_rows, off_session = _rows_to_dicts(raw, sym, frequency, start, end)
         off_session_total += off_session
         all_rows.extend(page_rows)
-
-        page_min = _page_min_date(raw)
-        if page_min is not None and page_min < start:
-            break
-        if len(raw) < _PAGE_SIZE:
-            break
-        offset_pos += _PAGE_SIZE
-        page += 1
-        if on_page is not None:
-            on_page()
 
     if off_session_total:
         logger.warning(

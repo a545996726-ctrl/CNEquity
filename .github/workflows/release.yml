@@ -81,6 +81,11 @@ jobs:
         env:
           TAG_VERSION: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          [[ "$TAG_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "only stable vMAJOR.MINOR.PATCH tags may publish to PyPI" >&2
+            exit 1
+          }
           package_version=$(python - <<'PY'
           import tomllib
           with open("pyproject.toml", "rb") as fh:
@@ -89,6 +94,10 @@ jobs:
           )
           test "${TAG_VERSION#v}" = "$package_version" || {
             echo "tag ${TAG_VERSION} does not match pyproject version ${package_version}" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "release tag must point to a commit already on main" >&2
             exit 1
           }
       - name: Build distributions

@@ -196,6 +196,8 @@ def test_registered_fetch_steps_cover_curated_datasets():
     # their dataset names; instruments etc. match step names directly.
     missing = [name for name in curated_dataset_names() if name not in STEP_REGISTRY]
     assert not missing, f"curated datasets without a registered step: {missing}"
+    invalid = [name for name in curated_dataset_names() if not callable(STEP_REGISTRY[name].fn)]
+    assert not invalid, f"curated datasets without a callable fetch step: {invalid}"
 
 
 def test_is_stale_respects_per_dataset_tolerance():

@@ -17,7 +17,6 @@ from cnequity.adapters.eastmoney.earnings_disclosure import (
 from cnequity.config import Config
 from cnequity.domain.datasets import get_dataset
 from cnequity.domain.schemas import validate_dataframe
-from cnequity.orchestrator.registry import get_step
 
 
 def test_report_period_from_date():
@@ -159,8 +158,7 @@ def test_fetch_earnings_disclosure_rejects_rows_from_another_report_period(monke
         fetch_earnings_disclosure_schedule(date(2026, 7, 16))
 
 
-def test_earnings_disclosure_step_registered():
-    assert get_step("earnings_disclosure_schedule").fn is not None
+def test_earnings_disclosure_uses_report_period_without_watermark():
     spec = get_dataset("earnings_disclosure_schedule")
     assert spec.partition_col == "report_period"
     assert spec.watermark is False

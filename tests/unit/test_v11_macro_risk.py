@@ -10,7 +10,6 @@ from cnequity.adapters.macro.indicators import fetch_macro_indicators
 from cnequity.config import Config
 from cnequity.derive.market_breadth import compute_market_breadth
 from cnequity.domain.schemas import validate_dataframe
-from cnequity.orchestrator.registry import get_step
 from cnequity.query import load
 
 
@@ -63,16 +62,6 @@ class FakeCninfoClient:
 
     def close(self):
         return None
-
-
-def test_v11_steps_registered():
-    for name in (
-        "macro_indicators",
-        "market_breadth",
-        "share_unlock_schedule",
-        "regulatory_events",
-    ):
-        assert get_step(name).fn is not None
 
 
 def _no_social_financing(monkeypatch):

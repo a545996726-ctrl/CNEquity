@@ -9,7 +9,7 @@ writes to ``meta/source_snapshots`` and never to curated, so it only feeds the
 arbitration checks in `cne audit`. ``backfill`` and ``repair-bars`` change what
 the lake holds and are gated separately, on ``[sources.ths_official].backfill``.
 
-See ``docs/development/ths-official-integration.md`` for the measurements these
+See ``docs/getting-started/ths-official.md`` for the user-facing boundaries these
 commands act on.
 """
 

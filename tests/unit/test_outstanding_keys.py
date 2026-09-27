@@ -163,7 +163,9 @@ def test_a_repair_settles_after_every_pass(tmp_path, monkeypatch):
         bf, "_backfill_once", lambda cfg, ds: passes.append(ds) or {"status": "success"}
     )
     monkeypatch.setattr(
-        bf, "_settle_outstanding", lambda cfg, ds: settled.append(len(passes)) or {"still_owed": 0}
+        bf,
+        "_settle_outstanding",
+        lambda cfg, ds, **kwargs: settled.append(len(passes)) or {"still_owed": 0},
     )
     monkeypatch.setattr(
         bf,
@@ -186,4 +188,52 @@ def test_a_repair_settles_after_every_pass(tmp_path, monkeypatch):
     bf._repair_outstanding(cfg, "daily_bars", 1)
 
     assert len(passes) == 3, "one pass per month present in the ledger"
-    assert settled == [1, 2, 3], "settled after each pass, not only at the end"
+    assert settled == [0, 1, 2, 3], "reconciled before requests, then after each pass"
+
+
+def test_outstanding_reconciles_published_keys_without_fetching(tmp_path, monkeypatch):
+    """An old ledger entry is not a reason to request a row already committed."""
+    import polars as pl
+
+    from cnequity.cli import backfill_cmds as bf
+
+    cfg = Config(data_root=tmp_path / "lake")
+    init_data_layout(cfg)
+    store = StateStore(cfg.meta_root)
+    store.record_outstanding_keys(
+        "daily_bars", [("000001.SZ", date(2026, 9, 15))], run_id="r1", reason="interior_gap"
+    )
+    root = cfg.curated_root / "daily_bars" / "trade_date=2026-09-15"
+    root.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["000001.SZ"], "trade_date": [date(2026, 9, 15)]}).write_parquet(
+        root / "part.parquet"
+    )
+    monkeypatch.setattr(
+        bf, "_backfill_once", lambda cfg, ds: pytest.fail("published key caused a source fetch")
+    )
+
+    result = bf._repair_outstanding(cfg, "daily_bars", 1)
+
+    assert result["outstanding"] == 0
+    assert store.get_outstanding_keys("daily_bars") == []
+
+
+def test_reconcile_does_not_count_a_missing_key_as_a_repair_attempt(tmp_path):
+    import polars as pl
+
+    from cnequity.cli.backfill_cmds import _settle_outstanding
+
+    cfg = Config(data_root=tmp_path / "lake")
+    init_data_layout(cfg)
+    store = StateStore(cfg.meta_root)
+    store.record_outstanding_keys(
+        "daily_bars", [("000001.SZ", date(2026, 9, 15))], run_id="r1", reason="interior_gap"
+    )
+    root = cfg.curated_root / "daily_bars" / "trade_date=2026-09-15"
+    root.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["600519.SH"], "trade_date": [date(2026, 9, 15)]}).write_parquet(
+        root / "part.parquet"
+    )
+
+    assert _settle_outstanding(cfg, "daily_bars", note_missing_attempt=False)["still_owed"] == 1
+    assert "attempts" not in store.get_outstanding_keys("daily_bars")[0]

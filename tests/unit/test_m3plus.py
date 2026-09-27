@@ -10,7 +10,6 @@ from cnequity.adapters.eastmoney.industry import fetch_industry_members
 from cnequity.adapters.eastmoney.sectors import fetch_sector_members
 from cnequity.config import Config
 from cnequity.domain.schemas import validate_dataframe
-from cnequity.orchestrator.registry import get_step
 from cnequity.query import load
 
 
@@ -36,11 +35,6 @@ class FakeDatacenterClient:
 
     def close(self):
         return None
-
-
-def test_m3plus_steps_registered():
-    for name in ("financial_statement_items", "index_constituents", "industry_members"):
-        assert get_step(name).fn is not None
 
 
 def test_financial_statement_items_parses_notice_date():

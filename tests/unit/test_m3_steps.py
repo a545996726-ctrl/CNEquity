@@ -6,23 +6,6 @@ import pytest
 import cnequity.steps  # noqa: F401
 from cnequity.config import Config, ScheduleGroup, WaveConfig, validate_config
 from cnequity.domain.schemas import validate_dataframe
-from cnequity.orchestrator.registry import get_step
-
-
-def test_m3_steps_are_registered():
-    for name in (
-        "fund_flow",
-        "northbound_holdings",
-        "northbound_flows",
-        "margin_trading",
-        "valuation_metrics",
-        "sector_members",
-        "announcement_index",
-        "dragon_tiger",
-        "block_trades",
-    ):
-        entry = get_step(name)
-        assert entry.fn is not None
 
 
 def test_fund_flow_schema_normalization():

@@ -16,16 +16,16 @@ their own contract; scaling it on a guess would only move the break.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 
 import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
 from cnequity.adapters.tdx_protocol._decode import decoded_quantity_or_none
+from cnequity.adapters.tdx_protocol.history_window import window_pages
 from cnequity.domain.rate_limit import RateLimitSpec, source_request_slot_spec, wait_spec
 from cnequity.domain.units import lots_to_shares
 
@@ -44,6 +44,8 @@ def _date_column(pdf: pl.DataFrame) -> str:
 
 
 def _coerce_date(val) -> date:
+    if isinstance(val, datetime):
+        return val.date()
     if isinstance(val, date):
         return val
     if hasattr(val, "date"):
@@ -53,22 +55,17 @@ def _coerce_date(val) -> date:
     raise TypeError(f"unsupported bar date value: {val!r}")
 
 
-def _page_min_date(pdf: pl.DataFrame) -> date | None:
+def _page_dates(pdf: pl.DataFrame) -> list[date | None]:
     col = _date_column(pdf)
-    if col not in pdf.columns or pdf.is_empty():
-        return None
-    series = pdf[col]
-    if series.dtype == pl.Date:
-        return series.min()
-    mins: list[date] = []
-    for val in series:
-        if val is None:
-            continue
+    if col not in pdf.columns:
+        return [None] * len(pdf)
+    dates = []
+    for val in pdf[col]:
         try:
-            mins.append(_coerce_date(val))
+            dates.append(_coerce_date(val))
         except (TypeError, ValueError, OverflowError):
-            continue
-    return min(mins) if mins else None
+            dates.append(None)
+    return dates
 
 
 def _parse_bar_rows(
@@ -141,22 +138,17 @@ def fetch_bars_paginated(
     Indices must use the ``index()`` call — ``bars()`` with a stock
     market id returns corrupt datetimes for index codes (e.g. 399001.SZ).
 
+    Backfills locate old windows by date before reading consecutive pages.
+    Incremental fetches retain their sequential walk from the tip.
+
     Stock rows come back with ``volume`` in 股; index rows keep TDX's own unit.
     See the module docstring for why the two differ.
     """
     code, exch = sym.split(".")
     market = 1 if exch == "SH" else (0 if exch == "SZ" else 2)
-    offset_pos = 0
     all_rows: list[dict] = []
-    seen_pages: set[str] = set()
-    page_count = 0
 
-    while True:
-        page_count += 1
-        if page_count > _MAX_PAGES:
-            raise TdxBarsPaginationError(
-                f"TDX bars pagination exceeded {_MAX_PAGES} pages for {sym}"
-            )
+    def fetch_page(offset_pos: int) -> pl.DataFrame:
         if metrics is not None:
             metrics["requests"] = int(metrics.get("requests", 0)) + 1
             metrics["pages"] = int(metrics.get("pages", 0)) + 1
@@ -190,35 +182,29 @@ def fetch_bars_paginated(
             ) from exc
 
         if raw is None or len(raw) == 0:
-            break
-
+            return pl.DataFrame()
         if isinstance(raw, pl.DataFrame):
-            pdf = raw
-        elif hasattr(raw, "columns"):
-            pdf = pl.from_pandas(raw)
-        else:
-            pdf = pl.DataFrame(raw)
+            return raw
+        if hasattr(raw, "columns"):
+            return pl.from_pandas(raw)
+        return pl.DataFrame(raw)
 
-        page_signature = hashlib.sha256(repr(pdf.to_dicts()).encode()).hexdigest()
-        if page_signature in seen_pages:
-            raise TdxBarsPaginationError(
-                f"TDX bars pagination did not advance for {sym} at start={offset_pos}"
-            )
-        seen_pages.add(page_signature)
-
-        page_rows = _parse_bar_rows(pdf, sym, start, end, volume_in_lots=not is_index)
-        if page_rows:
-            all_rows.extend(page_rows)
-
-        page_min = _page_min_date(pdf)
-        if page_min is not None and page_min < start:
-            break
-
-        if len(pdf) < _PAGE_SIZE:
-            break
-        offset_pos += _PAGE_SIZE
-        if on_page is not None:
-            on_page()
+    for pdf in window_pages(
+        fetch_page,
+        _page_dates,
+        start,
+        end,
+        page_size=_PAGE_SIZE,
+        page_limit=_MAX_PAGES,
+        seek=backfill,
+        strict_limit=True,
+        detect_repeats=True,
+        error=TdxBarsPaginationError,
+        label=f"TDX bars for {sym}",
+        limit_message=f"TDX bars pagination exceeded {_MAX_PAGES} pages for {sym}",
+        on_page=on_page,
+    ):
+        all_rows.extend(_parse_bar_rows(pdf, sym, start, end, volume_in_lots=not is_index))
 
     if not all_rows:
         return []

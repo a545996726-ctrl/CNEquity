@@ -31,8 +31,8 @@
 | `--refresh` | `False` | 仅衍生品日线：忽略完成收据与响应缓存，重新核对指定区间；不绕过熔断。 |
 | `--retry-failed` | `False` | 续跑 sector_bars 回填（跳过 checkpoint 里已写过的板块）。 |
 | `--force` | `False` | 清掉 sector_bars 回填 checkpoint，重抓全部板块。 |
-| `--start` | `—` | 按日期推进的回填（margin_trading、financial_statement_items 报告期推进、minute_bars）及衍生品日线的区间起点（YYYY-MM-DD），也用来收窄 sector_bars 的 K 线窗口（默认往前 400 天）。有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。 |
-| `--end` | `—` | 按日期推进的回填（margin_trading、financial_statement_items 报告期推进）与 sector_bars 的区间终点（YYYY-MM-DD，默认今天）。 |
+| `--start` | `—` | 回填区间起点（YYYY-MM-DD），包括 daily_bars、minute_bars、衍生品日线、日期/报告期推进及 sector_bars。sector_bars 默认往前 400 天；有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。 |
+| `--end` | `—` | 回填区间终点（YYYY-MM-DD，默认今天），与 --start 配合限定历史窗口。 |
 | `--outstanding` | `False` | 只修复被容忍缺口欠下的那些 key，范围和窗口都取自欠账台账，不看 --symbols/--start/--end。补上的 key 会销账，仍然缺的继续欠着。 |
 | `--symbols` | `—` | 限定范围的标的列表，逗号分隔：用于 intraday、trading_status、corporate_actions 的限定回填，以及 financial_statement_items、daily_bars 的限定修复。trading_status 的 checkpoint 与覆盖证据会记下确切范围；daily_bars 会把这个显式范围写进 backfill 元数据。 |
 | `--workers` | `1` | 仅 margin_trading 的日期推进并发数。每个请求仍然走配置里共享的源限流器；其它数据集必须为 1。 |

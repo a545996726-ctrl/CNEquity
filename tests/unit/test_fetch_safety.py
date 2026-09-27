@@ -342,16 +342,30 @@ def test_generic_backfill_plan_is_offline_and_does_not_create_lake(tmp_path, mon
     cfg = Config(data_root=tmp_path / "lake", sources={"tdx_protocol": False})
     monkeypatch.setattr("cnequity.cli.backfill_cmds._cfg", lambda path: cfg)
     result = CliRunner().invoke(
-        cli, ["backfill", "daily_bars", "--symbols", "000001.SZ,000001.SZ", "--plan"]
+        cli,
+        [
+            "backfill",
+            "daily_bars",
+            "--symbols",
+            "000001.SZ,000001.SZ",
+            "--start",
+            "2018-01-01",
+            "--end",
+            "2018-01-31",
+            "--plan",
+        ],
     )
     assert result.exit_code == 0, result.output
     plan = json.loads(result.stdout)
     assert plan["symbols"] == ["000001.SZ"]
+    assert plan["data_root"] == str(cfg.data_root)
+    assert (plan["start"], plan["end"]) == ("2018-01-01", "2018-01-31")
     assert plan["registered_sources"]["primary"] == "tdx_protocol"
     assert plan["source_status"]["tdx_protocol"]["enabled"] is False
     assert set(plan["source_status"]["tdx_protocol"]["pacing_seconds"]) == {"tdx_protocol"}
     assert plan["cold_request_lower_bound"] == 1
     assert plan["broad_tip_snapshots"]["exchange"] == "skip"
+    assert plan["tdx_history_window"]["strategy"] == "exponential-bracket-binary-seek-then-scan"
     assert plan["checkpoint"]["outstanding_keys"] == 0
     assert plan["writes"] is False
     assert not cfg.data_root.exists()

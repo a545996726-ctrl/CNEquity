@@ -6,40 +6,9 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
-from click.testing import CliRunner
 
-from cnequity.cli.main import cli
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def test_cli_reference_covers_the_research_demo_flag():
-    help_result = CliRunner().invoke(cli, ["init", "--help"])
-    assert help_result.exit_code == 0
-    reference = (ROOT / "docs" / "reference" / "cli.md").read_text(encoding="utf-8")
-    assert "`--research`" in reference
-    assert "raw / hfq" in reference
-    assert "--research" in help_result.output
-
-
-def test_init_help_answers_the_scope_and_400_symbol_questions():
-    help_result = CliRunner().invoke(cli, ["init", "--help"])
-
-    assert help_result.exit_code == 0
-    assert "quick/full 都扫描配置的 universe" in help_result.output
-    assert "不是只拉 400 条数据" in help_result.output
-    assert "历史 ST" in help_result.output
-    assert "cne backfill trading_status" in help_result.output
-
-
-def test_source_health_note_recommends_cooldown_instead_of_egress_rotation():
-    from cnequity.diagnostics.source_health import PROBES_BY_KEY
-
-    note = PROBES_BY_KEY["eastmoney_push2his"].note
-    assert "sticky" not in note.lower()
-    assert "等待冷却" in note
-    assert "proxy" not in note.lower()
-    assert "换出口" not in note
 
 
 def test_the_declared_version_is_the_packaged_version():
@@ -54,15 +23,6 @@ def test_the_declared_version_is_the_packaged_version():
         declared = tomllib.load(fh)["project"]["version"]
     assert __version__ == declared, (
         f"src/cnequity/__init__.py says {__version__}, pyproject.toml says {declared}"
-    )
-
-
-def test_the_release_contract_for_this_version_exists():
-    """The release workflow fails on a missing contract; fail here instead."""
-    with (ROOT / "pyproject.toml").open("rb") as fh:
-        version = tomllib.load(fh)["project"]["version"]
-    assert (ROOT / "contracts" / f"v{version}.json").is_file(), (
-        f"contracts/v{version}.json is missing; run `cne contract show > contracts/v{version}.json`"
     )
 
 

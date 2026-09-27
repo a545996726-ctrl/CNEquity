@@ -12,7 +12,6 @@ from cnequity.adapters.eastmoney.institutional import (
 from cnequity.config import Config
 from cnequity.derive.sentiment_scores import compute_sentiment_scores
 from cnequity.domain.schemas import validate_dataframe
-from cnequity.orchestrator.registry import get_step
 from cnequity.query import load
 
 
@@ -38,11 +37,6 @@ class FakeDatacenterClient:
 
     def close(self):
         return None
-
-
-def test_p2_steps_registered():
-    for name in ("institutional_holdings", "analyst_consensus", "sentiment_scores"):
-        assert get_step(name).fn is not None
 
 
 def test_quarter_end_dates_floor_is_2001_not_2016():

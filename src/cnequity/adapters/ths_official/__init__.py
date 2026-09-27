@@ -2,7 +2,7 @@
 
 Registered client, distinct from the ``ths`` adapter next door: that one reads
 10jqka's public pages unauthenticated. See
-``docs/development/ths-official-integration.md`` for the measured evidence and
+``docs/getting-started/ths-official.md`` for usage requirements and
 the constraints this source operates under.
 """
 

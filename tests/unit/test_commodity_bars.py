@@ -12,7 +12,7 @@ from cnequity.adapters.eastmoney.commodity_bars import (
     CONTINUOUS_CONTRACTS,
     fetch_commodity_bars_range,
 )
-from cnequity.domain.datasets import DATASETS, get_dataset
+from cnequity.domain.datasets import get_dataset
 from cnequity.domain.schemas import DATASET_SCHEMAS, PRIMARY_KEYS, validate_dataframe
 
 
@@ -261,10 +261,6 @@ def test_strict_daily_fetch_rejects_partial_contract_set(monkeypatch):
             include_offshore=False,
             strict=True,
         )
-
-
-def test_dataset_count_includes_commodity():
-    assert "commodity_bars" in DATASETS
 
 
 # --- Sina is the domestic source now ----------------------------------------
