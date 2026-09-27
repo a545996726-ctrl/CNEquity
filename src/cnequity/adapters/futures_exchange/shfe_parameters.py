@@ -9,6 +9,7 @@ complete daily, customer-level, or effective-session trading parameters.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import date, datetime
 from hashlib import sha256
@@ -194,8 +195,16 @@ def parse_daily_settlement_parameters(
             raise FuturesPayloadError(f"SHFE parameter row {index} repeats {code}")
         seen.add(code)
         product = source.get("PRODUCTID")
-        if not isinstance(product, str) or not product.endswith("_f"):
+        if not isinstance(product, str) or product != f"{code.rstrip('0123456789')}_f":
             raise FuturesPayloadError(f"SHFE parameter row {index} has invalid product")
+        try:
+            settlement_price = float(source["SETTLEMENTPRICE"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FuturesPayloadError(
+                f"SHFE parameter row {index} has no settlement price"
+            ) from exc
+        if not math.isfinite(settlement_price) or settlement_price <= 0:
+            raise FuturesPayloadError(f"SHFE parameter row {index} has invalid settlement price")
         fields = {}
         for key, name in (
             ("SPECLONGMARGINRATIO", "margin_general_long"),
@@ -223,6 +232,7 @@ def parse_daily_settlement_parameters(
                 "contract_code": code.upper(),
                 "product_id": product,
                 "settlement_date": report_date,
+                "settle": settlement_price,
                 "source_updated_at": updated,
                 "source_url": source_url,
                 "raw_sha256": digest,

@@ -33,9 +33,8 @@ PRE_ARCHIVE_DECOUPLING_PARSER = "6defea465c530310b260c6c0d42cb9919a3c3610016a0ba
 # Adding INE's separate 2018 futures file changes only the SHF route for
 # those sessions. Other previously captured rows remain valid on exact match.
 PRE_INE_2018_ROUTE_PARSER = "9dd704704f99b99f9e5539b0ef1103cbb7714d2e83611ce06fb89dd73b8e2e30"
-# Receipts from the first 2026 historical batches preceded later reader
-# refactoring. Every one of the 273 real-lake receipts was checked against its
-# published row identity. Only their observed dates/routes may reuse this hash.
+# Historical receipts preceded later reader refactoring. Reuse this hash
+# only for the validated dates and routes below, with exact row matching.
 PRE_HISTORICAL_READER_REFACTOR_PARSER = (
     "7ecb159fb455912cb82a2a7bc7b14885dbe82c6f1f2443d09f6b506a87442115"
 )

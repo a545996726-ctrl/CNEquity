@@ -98,6 +98,7 @@ def _daily_payload():
             {
                 "INSTRUMENTID": "al2609",
                 "PRODUCTID": "al_f",
+                "SETTLEMENTPRICE": 20900,
                 "SPECLONGMARGINRATIO": 0.2,
                 "SPECSHORTMARGINRATIO": 0.2,
                 "HEDGLONGMARGINRATIO": 0.2,
@@ -126,6 +127,7 @@ def test_daily_report_keeps_post_settlement_timestamp_and_fee_unit():
     assert row["fee_unit"] == "cny_per_contract"
     assert row["fee_general_cny_per_contract"] == 3.0
     assert row["margin_general_long"] == 0.2
+    assert row["settle"] == 20900.0
 
 
 def test_daily_report_rejects_wrong_date_and_mixed_fee_units():
@@ -136,4 +138,18 @@ def test_daily_report_rejects_wrong_date_and_mixed_fee_units():
     payload["report_date"] = "20260910"
     payload["o_cursor"][0]["TRADEFEERATIO"] = 0.05
     with pytest.raises(FuturesPayloadError, match="ambiguous fee units"):
+        _parse_daily(payload)
+
+
+def test_daily_report_rejects_mismatched_product_or_missing_settlement():
+    payload = _daily_payload()
+    payload["o_cursor"][0]["PRODUCTID"] = "cu_f"
+    with pytest.raises(FuturesPayloadError, match="invalid product"):
+        _parse_daily(payload)
+    payload["o_cursor"][0]["PRODUCTID"] = "al_f"
+    payload["o_cursor"][0]["SETTLEMENTPRICE"] = 0
+    with pytest.raises(FuturesPayloadError, match="invalid settlement price"):
+        _parse_daily(payload)
+    del payload["o_cursor"][0]["SETTLEMENTPRICE"]
+    with pytest.raises(FuturesPayloadError, match="no settlement price"):
         _parse_daily(payload)
