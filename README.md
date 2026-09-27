@@ -1,7 +1,6 @@
 <div align="center">
   <h1>CNEquity · 中国市场金融数据湖</h1>
   <p><strong>打破数据垄断，构建属于每个人的本地金融数据集</strong></p>
-</div>
 
 CNEquity 将股票行情、期货合约数据、财报、公司事件和资金面等多源数据整理为本地 Parquet 数据湖，提供增量采集、失败续跑、质量审计与统一查询。适合反复回测、积累历史数据。提供个人研究者和AI Agent一套完整的金融数据解决方案。
 
@@ -11,83 +10,11 @@ CNEquity 将股票行情、期货合约数据、财报、公司事件和资金�
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 [English](README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [数据集目录](docs/datasets/catalog.md) · [更新日志](CHANGELOG.md)
-
-## 先拿到第一份数据
-
-需要 **Python 3.10+**，支持 macOS、Linux 和 Windows。基础体验无需账号或 token，也不必克隆仓库。
-
-```bash
-pip install cnequity
-cne init --profile demo
-```
-
-默认抓取 **5 只股票、最近约 30 个交易日**的真实日线，写入独立的 `data/cnequity-demo/`，并生成 `configs/cnequity.demo.toml`。耗时取决于 TDX 行情主机的可达性。
-
-接着在 Python 里读出结果：
-
-```python
-from cnequity.query import load
-
-bars = load("daily_bars", data_root="data/cnequity-demo")
-print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
-```
-
-或者打开本地控制台：
-
-```bash
-cne serve --config configs/cnequity.demo.toml
-# 浏览器访问 http://127.0.0.1:8787
-```
-
-<details>
-<summary>网络受限？先用离线样例验证安装</summary>
-
-```bash
-cne doctor
-cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
-cne query --config configs/cnequity.sample.toml --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
-```
-
-`sample` 不访问数据源，合成行标记为 `source=mock`，只能验证链路，不能用于研究。这里单独指定目录和配置，方便与真实 demo 并存。更多问题见[排障指南](docs/operations/troubleshooting.md)。
-
-</details>
-
-## 为什么值得把数据管起来
-
-- **少写重复的数据工程。** 代码、字段、分区和增量窗口由数据层管理；中断后保留成功批次，按失败范围续跑。22 条源探针路由帮助诊断可达性（高成本端点需显式选择）。
-- **把研究口径说清楚。** 原始价与复权因子分开存；历史股票池保留退市身份；财报查询区分严格 PIT 与事后重建。
-- **结果有来源，也有版本。** 行级 `source`、`data_version`、`fetched_at` 配合不可变数据版本与研究快照，支持复查和重现。
-- **数据留在自己手里。** 开放的 Parquet 文件，通过 Python、DuckDB、Polars、只读 MCP 和控制台消费。
-
-### 幸存者偏差：今天的名单不能代替历史股票池
-
-同一等权买入持有策略、同一时间窗口，仅按今天仍在交易的股票回看过去，会漏掉后来退市的标的。下图用历史样本展示两种股票池得到的结果差异：
-
-![含退市股与只留幸存者的历史等权持有结果对比](docs/assets/survivorship-gap.zh.svg)
-
-*历史样本仅用于说明股票池口径；图中收益和标的数量不代表当前湖覆盖或未来投资表现。退市股按最后一根可用行情计价，因子及退市覆盖限制见[股票池画像](docs/reference/universe-profiles.md)。*
-
-CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口径进入查询契约，避免下游研究在无意中丢掉这些标的。
-
-![CNEquity 只读控制台：健康状态、数据覆盖与待处理问题](docs/assets/cne-serve-hero-demo.png)
-
-*控制台示意截图（标有 ILLUSTRATIVE DEMO）；图中的 42/42、行数和容量均为虚构展示值，不是当前注册数量或实际覆盖。*
-
-如果这正是你一直在重复搭建的数据底座，欢迎给 [CNEquity 一个 ⭐ Star](https://github.com/rootSunc/CNEquity)，方便找回，也帮助更多研究者发现它。
-
-## 能用它研究什么
-
-| 你的问题 | 数据与入口 | 需要确认的口径 |
-|---|---|---|
-| 跨分红、送转后的历史收益 | `daily_bars` + `adj_factors` · [复权示例](docs/recipes/research-baseline.md) | `adjust="hfq"`，研究时开启 `strict_adj=True` |
-| 某个调仓日已经知道哪些财报信息 | `financial_statement_items` · [PIT 示例](docs/recipes/pit-rebalance.md) | 显式 `as_of` + `pit_mode="strict"`；新回填不等于当时可见 |
-| 历史股票池、退市前行情 | `instruments`、`trading_status`、`delisting_events` · [股票池画像](docs/reference/universe-profiles.md) | 历史 ST、退市和行情覆盖需另行核验 |
-| 估值、资金流、行业轮动 | `valuation_metrics`、资金面与结构数据 · [查询指南](docs/datasets/query-guide.md) | 分清可回补历史与启用后积累的快照 |
-| 期货期限结构、期权链与 Greeks | 逐合约行情和派生数据 · [衍生品指南](docs/recipes/derivatives.md) | 默认关闭，按交易所、合约生命周期与覆盖证据验收 |
+</div>
 
 ## 数据范围
 
-当前开发树注册 **52 个数据集：47 个 curated + 5 个 derived**，按用途分为 L0–L9。注册数量包括兼容入口、可选数据集和停用源占位，**不等于开箱即有 52 张完整历史表**。完整字段、主键、历史起点和来源集中在[数据集目录](docs/datasets/catalog.md)与[数据源说明](docs/datasets/sources.md)。
+当前开发树注册 **52 个数据集：47 个 curated + 5 个 derived**，按用途分为 L0–L9。完整字段、主键、历史起点和来源集中在[数据集目录](docs/datasets/catalog.md)与[数据源说明](docs/datasets/sources.md)。
 
 | 层次 | 研究用途 | 代表数据集 |
 |---|---|---|
@@ -165,6 +92,81 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 登记主备源是数据集元数据；日更 tip、历史回填和显式修复可能走不同路径。请结合[来源说明](docs/datasets/sources.md)使用。
 
 </details>
+
+
+## 先拿到第一份数据
+
+需要 **Python 3.10+**，支持 macOS、Linux 和 Windows。基础体验无需账号或token。
+
+```bash
+pip install cnequity
+cne init --profile demo
+```
+
+默认抓取 **5 只股票、最近约 30 个交易日**的真实日线，写入独立的 `data/cnequity-demo/`，并生成 `configs/cnequity.demo.toml`。耗时取决于 TDX 行情主机的可达性。
+
+接着在 Python 里读出结果：
+
+```python
+from cnequity.query import load
+
+bars = load("daily_bars", data_root="data/cnequity-demo")
+print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
+```
+
+或者打开本地控制台：
+
+```bash
+cne serve --config configs/cnequity.demo.toml
+# 浏览器访问 http://127.0.0.1:8787
+```
+
+<details>
+<summary>网络受限？先用离线样例验证安装</summary>
+
+```bash
+cne doctor
+cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
+cne query --config configs/cnequity.sample.toml --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
+```
+
+`sample` 不访问数据源，合成行标记为 `source=mock`，只能验证链路，不能用于研究。这里单独指定目录和配置，方便与真实 demo 并存。更多问题见[排障指南](docs/operations/troubleshooting.md)。
+
+</details>
+
+## 为什么值得把数据管起来
+
+- **少写重复的数据工程。** 代码、字段、分区和增量窗口由数据层管理；中断后保留成功批次，按失败范围续跑。22 条源探针路由帮助诊断可达性（高成本端点需显式选择）。
+- **把研究口径说清楚。** 原始价与复权因子分开存；历史股票池保留退市身份；财报查询区分严格 PIT 与事后重建。
+- **结果有来源，也有版本。** 行级 `source`、`data_version`、`fetched_at` 配合不可变数据版本与研究快照，支持复查和重现。
+- **数据留在自己手里。** 开放的 Parquet 文件，通过 Python、DuckDB、Polars、只读 MCP 和控制台消费。
+
+### 幸存者偏差：今天的名单不能代替历史股票池
+
+同一等权买入持有策略、同一时间窗口，仅按今天仍在交易的股票回看过去，会漏掉后来退市的标的。下图用历史样本展示两种股票池得到的结果差异：
+
+![含退市股与只留幸存者的历史等权持有结果对比](docs/assets/survivorship-gap.zh.svg)
+
+*历史样本仅用于说明股票池口径；图中收益和标的数量不代表当前湖覆盖或未来投资表现。退市股按最后一根可用行情计价，因子及退市覆盖限制见[股票池画像](docs/reference/universe-profiles.md)。*
+
+CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口径进入查询契约，避免下游研究在无意中丢掉这些标的。
+
+![CNEquity 只读控制台：健康状态、数据覆盖与待处理问题](docs/assets/cne-serve-hero-demo.png)
+
+*控制台示意截图（标有 ILLUSTRATIVE DEMO）；图中的 42/42、行数和容量均为虚构展示值，不是当前注册数量或实际覆盖。*
+
+如果这正是你一直在重复搭建的数据底座，欢迎给 [CNEquity 一个 ⭐ Star](https://github.com/rootSunc/CNEquity)，方便找回，也帮助更多研究者发现它。
+
+## 能用它研究什么
+
+| 你的问题 | 数据与入口 | 需要确认的口径 |
+|---|---|---|
+| 跨分红、送转后的历史收益 | `daily_bars` + `adj_factors` · [复权示例](docs/recipes/research-baseline.md) | `adjust="hfq"`，研究时开启 `strict_adj=True` |
+| 某个调仓日已经知道哪些财报信息 | `financial_statement_items` · [PIT 示例](docs/recipes/pit-rebalance.md) | 显式 `as_of` + `pit_mode="strict"`；新回填不等于当时可见 |
+| 历史股票池、退市前行情 | `instruments`、`trading_status`、`delisting_events` · [股票池画像](docs/reference/universe-profiles.md) | 历史 ST、退市和行情覆盖需另行核验 |
+| 估值、资金流、行业轮动 | `valuation_metrics`、资金面与结构数据 · [查询指南](docs/datasets/query-guide.md) | 分清可回补历史与启用后积累的快照 |
+| 期货期限结构、期权链与 Greeks | 逐合约行情和派生数据 · [衍生品指南](docs/recipes/derivatives.md) | 默认关闭，按交易所、合约生命周期与覆盖证据验收 |
+
 
 ## 架构
 

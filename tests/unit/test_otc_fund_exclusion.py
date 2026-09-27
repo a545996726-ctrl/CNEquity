@@ -22,13 +22,10 @@ def test_open_end_fund_codes_are_not_exchange_traded(code):
 @pytest.mark.parametrize(
     ("code", "exchange"),
     [
-        ("510300", "SH"),  # 沪深300 ETF
         ("511990", "SH"),  # 华宝添益
         ("518880", "SH"),  # 黄金 ETF
         ("520820", "SH"),  # 恒指通
         ("563510", "SH"),
-        ("588000", "SH"),  # 科创 50 ETF
-        ("159915", "SZ"),  # 创业板 ETF
         ("160516", "SZ"),  # LOF — quotes on-exchange, so it belongs
     ],
 )

@@ -300,13 +300,6 @@ push2_max_concurrency = 2
     assert load_config(path).eastmoney_push2_paused is True
 
 
-def test_the_late_stale_pass_pauses_push2():
-    from pathlib import Path
-
-    script = (Path(__file__).parents[2] / "scripts" / "stale_pipeline.sh").read_text()
-    assert 'export CNE_PUSH2_PAUSED="${CNE_PUSH2_PAUSED:-1}"' in script
-
-
 # ---- clist: primary host only ------------------------------------------------------
 
 

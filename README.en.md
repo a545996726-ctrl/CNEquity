@@ -1,7 +1,6 @@
 <div align="center">
   <h1>CNEquity · A local data foundation for China-market research</h1>
   <p><strong>Collect once, keep it current, and research from the same traceable data.</strong></p>
-</div>
 
 CNEquity turns market prices, financial statements, corporate events and capital-flow data into a local Parquet lake. It handles incremental ingestion, resumable batches, quality checks and consistent queries for individual researchers and small teams.
 
@@ -11,10 +10,30 @@ CNEquity turns market prices, financial statements, corporate events and capital
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 [中文](README.md) · [Documentation](https://rootsunc.github.io/CNEquity/) · [Dataset catalog](docs/datasets/catalog.md) · [Changelog](CHANGELOG.md)
+</div>
+
+## Data coverage
+
+The current development tree registers **52 datasets: 47 curated + 5 derived**, organized into L0–L9. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
+
+| Tier | Research use | Representative datasets |
+|---|---|---|
+| L0 | Reference | Instruments, trading calendar, trading status |
+| L1 | Market data | Daily and index bars, adjustment factors, optional minutes and trade snapshots, delisting events |
+| L2 | Corporate events | Actions, announcement index, disclosure schedule |
+| L3 | Fundamentals | Financials, valuations, share structure, holders, consensus |
+| L4 | Capital and flows | Northbound, margin trading, dragon-tiger lists, block trades, fund flows |
+| L5 | Industry structure | Index constituents, industry and sector membership, industry index |
+| L6 | Macro | Indicators and market breadth |
+| L7 | News and rotation | News, wires, sentiment, rankings, sector prices and flows |
+| L8 | Risk and regulation | Share unlocks and regulatory events |
+| L9 | Derivatives | Futures and options contracts, contract bars, continuous futures, Greeks and minutes |
+
+Minutes, trade snapshots and futures/options are disabled by default. Check each source's historical horizon and actual coverage after opting in.
 
 ## Start with real data
 
-Requires **Python 3.10+** on macOS, Linux or Windows. The basic demo needs no account, token or repository checkout.
+Requires **Python 3.10+** on macOS, Linux or Windows. The basic demo needs no account or token.
 
 ```bash
 pip install cnequity
@@ -84,25 +103,6 @@ If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https:
 | Historical universes and pre-delisting prices | `instruments`, `trading_status`, `delisting_events` · [profiles](docs/reference/universe-profiles.md) | Validate ST, delisting and price coverage |
 | Valuation, flows and sector rotation | Valuation, capital and structure datasets · [query guide](docs/datasets/query-guide.md) | Distinguish backfillable history from snapshots collected over time |
 | Futures curves, option chains and Greeks | Contract-level prices and derived datasets · [derivatives](docs/recipes/derivatives.md) | Opt in; verify exchange coverage and lifecycle evidence |
-
-## Data coverage
-
-The current development tree registers **52 datasets: 47 curated + 5 derived**, organized into L0–L9. This includes compatibility entries, optional datasets and an inactive-source placeholder; it does **not** promise 52 complete historical tables after installation. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
-
-| Tier | Research use | Representative datasets |
-|---|---|---|
-| L0 | Reference | Instruments, trading calendar, trading status |
-| L1 | Market data | Daily and index bars, adjustment factors, optional minutes and trade snapshots, delisting events |
-| L2 | Corporate events | Actions, announcement index, disclosure schedule |
-| L3 | Fundamentals | Financials, valuations, share structure, holders, consensus |
-| L4 | Capital and flows | Northbound, margin trading, dragon-tiger lists, block trades, fund flows |
-| L5 | Industry structure | Index constituents, industry and sector membership, industry index |
-| L6 | Macro | Indicators and market breadth |
-| L7 | News and rotation | News, wires, sentiment, rankings, sector prices and flows |
-| L8 | Risk and regulation | Share unlocks and regulatory events |
-| L9 | Derivatives | Futures and options contracts, contract bars, continuous futures, Greeks and minutes |
-
-Minutes, trade snapshots and futures/options are disabled by default. Check each source's historical horizon and actual coverage after opting in.
 
 ## Architecture
 

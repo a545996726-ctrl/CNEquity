@@ -192,24 +192,46 @@ def test_daily_bars_is_on_v2_and_other_datasets_are_not():
     assert data_version_for("anything_else") == "v1"
 
 
-def test_both_worker_paths_stamp_the_dataset_version():
-    """The pooled and serial fetch paths must agree on ``data_version``.
-
-    ``worker_pool`` fetches daily_bars two ways — one worker process per batch,
-    or serially in-process — and they differ only in that argument. When the
-    pooled one omitted it, every run with ``workers > 1`` wrote correctly
-    converted 股 stamped ``v1``, so the stamp stopped meaning "股 guaranteed"
-    and no ratio check could notice: the numbers were right, only the label
-    was wrong.
-    """
-    import inspect
+@pytest.mark.parametrize("execution", ["serial", "spawned-worker"])
+def test_worker_output_stamps_the_dataset_version(config, execution):
+    """Both normalization paths must write the volume contract into Parquet."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
 
     from cnequity.orchestrator import worker_pool
 
-    source = inspect.getsource(worker_pool)
-    calls = [line.strip() for line in source.splitlines() if "normalize_with_source(df" in line]
-    assert calls, "no normalize_with_source call found in worker_pool"
-    assert all("dataset=dataset" in call for call in calls), calls
+    day = date(2024, 6, 28)
+    symbols = ["600519.SH"]
+    assert config.tdx_allow_mock  # The child must never contact a live provider.
+    if execution == "serial":
+        result = worker_pool.fetch_daily_bars_parallel(config, symbols, day, day, "version-test")
+        assert not result["had_error"]
+    else:
+        args = (
+            symbols,
+            day.isoformat(),
+            day.isoformat(),
+            str(config.staging_root),
+            "daily_bars",
+            "version-test",
+            "batch-0",
+            None,
+            True,
+            None,
+            False,
+            str(config.config_path),
+        )
+        with ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn")
+        ) as pool:
+            result = pool.submit(worker_pool._worker_fetch_batch, args).result(timeout=30)
+    assert result["rows_written"] == 1
+    files = list(config.staging_root.glob("daily_bars/**/*.parquet"))
+    assert files
+    frame = pl.read_parquet(files)
+    assert frame["symbol"].to_list() == symbols
+    assert frame["data_version"].to_list() == ["v2"]
+    assert frame["source"].to_list() == ["mock"]
 
 
 # --- the audit check ---------------------------------------------------------

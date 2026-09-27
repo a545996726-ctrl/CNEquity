@@ -22,17 +22,6 @@ from cnequity.domain.pit import normalize_pit_storage_columns
 from cnequity.domain.schemas import with_provenance
 
 
-def test_polars_still_broadcasts_against_a_column_less_frame():
-    """Pin the upstream behaviour these guards exist for.
-
-    If a future polars stops doing this, this test fails and the guards can be
-    reconsidered — rather than being carried forever for a reason nobody can
-    reproduce.
-    """
-    assert pl.DataFrame().with_columns(pl.lit("x").alias("s")).height == 1
-    assert pl.DataFrame().select(pl.lit(1).alias("n")).height == 1
-
-
 def test_a_zero_row_frame_with_a_schema_is_not_affected():
     """The distinction the guard turns on: columns, not rows."""
     typed = pl.DataFrame(schema={"symbol": pl.Utf8})

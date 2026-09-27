@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager
@@ -546,3 +548,69 @@ def test_source_concurrency_is_cross_process_for_slow_requests(tmp_path):
     # delay * 0.8 = 0.064, which is still several times a no-op acquire.
     assert elapsed >= delay * 1.6
     assert max(entered - started for started, entered in entries) >= delay * 0.3
+
+
+def _write_foreign_lease(state_dir, pid: int) -> None:
+    state_dir.mkdir(parents=True)
+    (state_dir / "concurrency-tdx_protocol.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "limit": 1,
+                "leases": [
+                    {
+                        "token": "foreign-worker",
+                        "pid": pid,
+                        "thread_id": 1,
+                        "created_at": time.time() - 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_dead_process_lease_is_reclaimed(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait(timeout=10)
+    pid = proc.pid
+    del proc  # Release the Windows process handle, as a prior run would have.
+    state_dir = tmp_path / "rate_limits"
+    _write_foreign_lease(state_dir, pid)
+
+    limiter = SourceConcurrencyLimiter("tdx_protocol", 1, state_dir)
+    with limiter.slot(timeout=0.5):
+        pass
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process liveness regression")
+def test_exited_process_with_still_active_exit_code_is_reclaimed(tmp_path):
+    # Keep the process handle open so the liveness check must inspect its
+    # signaled state. An exit code of 259 must not mean "still running".
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(259)"])
+    proc.wait(timeout=10)
+    state_dir = tmp_path / "rate_limits"
+    _write_foreign_lease(state_dir, proc.pid)
+
+    limiter = SourceConcurrencyLimiter("tdx_protocol", 1, state_dir)
+    with limiter.slot(timeout=0.5):
+        pass
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process liveness regression")
+def test_live_process_lease_is_not_reclaimed_or_terminated(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        state_dir = tmp_path / "rate_limits"
+        _write_foreign_lease(state_dir, proc.pid)
+        limiter = SourceConcurrencyLimiter("tdx_protocol", 1, state_dir)
+
+        with pytest.raises(TimeoutError, match="tdx_protocol concurrency slot"):
+            with limiter.slot(timeout=0.2):
+                pass
+        assert proc.poll() is None
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=10)

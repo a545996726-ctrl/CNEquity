@@ -71,7 +71,12 @@ esac
 
 
 def _stale_env(tmp_path: Path, cne: Path, calls: Path) -> dict[str, str]:
-    env = os.environ.copy()
+    # Never inherit scheduler paths or switches from the operator's lake.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("CNE_") or key == "CNE_TEST_NO_NETWORK"
+    }
     env.update(
         {
             "CNE_BIN": str(cne),
@@ -580,3 +585,49 @@ def test_non_trading_skip_does_not_erase_a_soft_outage(tmp_path):
     assert (tmp_path / "streak/capital").read_text().strip() == "2026-09-11 1"
     _stub_cne(tmp_path)
     assert _run(DAILY, "2026-09-14", env=env).returncode == 1
+
+
+@pytest.mark.parametrize("override, expected", [(None, "1"), ("0", "0")])
+def test_stale_pass_exports_push2_pause_to_the_job(tmp_path, override, expected):
+    cne = _stub_cne(tmp_path)
+    cne.write_text(
+        '#!/bin/sh\nprintf "%s" "${CNE_PUSH2_PAUSED-unset}" > "$CNE_CALL_LOG"\n',
+        encoding="utf-8",
+    )
+    calls = tmp_path / "calls"
+    env = _stale_env(tmp_path, cne, calls)
+    if override is not None:
+        env["CNE_PUSH2_PAUSED"] = override
+    result = _run(STALE, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls.read_text(encoding="utf-8") == expected
+
+
+def test_daily_pipeline_reports_a_resting_group_as_skipped(tmp_path):
+    cne = _stub_cne(tmp_path)
+    cne.write_text(
+        """#!/bin/sh
+if [ "$1 $2" = "run daily" ]; then
+  printf '%s\n' '{"status": "skipped_not_scheduled"}'
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    streak = tmp_path / "streak"
+    streak.mkdir()
+    prior = "2026-09-23 2\n"
+    (streak / "research").write_text(prior, encoding="utf-8")
+    env = _daily_env(
+        tmp_path,
+        cne,
+        tmp_path / "calls",
+        CNE_GROUPS="research",
+        CNE_SOFT_STREAK_DIR=str(streak),
+        CNE_SOFT_FAIL_MAX_DAYS="3",
+    )
+    result = _run(DAILY, "2026-09-24", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "research: SKIPPED" in result.stdout
+    assert "research: OK" not in result.stdout
+    assert (streak / "research").read_text(encoding="utf-8") == prior

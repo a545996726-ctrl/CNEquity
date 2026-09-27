@@ -476,34 +476,81 @@ def _subcommands(group_name: str):
     }
 
 
-@pytest.mark.parametrize("group", FETCHING_GROUPS)
-def test_every_fetching_command_wires_progress(group):
-    """A command that runs for an hour must say so, in every group.
+@pytest.mark.parametrize(
+    "command", sorted(name for group in FETCHING_GROUPS for name in _subcommands(group))
+)
+def test_fetching_commands_persist_job_logs(tmp_path, monkeypatch, command):
+    """Exercise each CLI entry point; a failing offline job must leave its log."""
+    from click.testing import CliRunner
 
-    The original fix reached `init`, `run daily`/`run events` and `backfill`
-    and stopped there. `cne ths-official backfill` then ran 75 minutes writing
-    nothing to the terminal and nothing to `logs/` — the same
-    "完全不知道程序的死活" the issue was about, in a group the sweep had not
-    looked at. The old `cne delisted backfill` alias also had its own logging
-    path; delisted recovery now uses the canonical `backfill` command.
+    from cnequity.cli.main import cli
+    from cnequity.config.bootstrap import path_for_toml
 
-    Terminal progress is no longer each command's job — the root of the command
-    tree wires it for all of them, which is what
-    `test_every_command_gets_process_logging` holds. What a long command still
-    has to choose for itself is the file in the lake, because only it knows
-    which config to read. So that is what this asserts.
-    """
-    import inspect
+    # Enumerating the live command groups above also catches a new command
+    # without an offline scenario here. Only the work is stubbed, not logging.
+    scenarios = {
+        "backfill": (["daily_bars"], "cnequity.cli.backfill_cmds._backfill_once"),
+        "run daily": ([], "cnequity.orchestrator.engine.JobEngine.run_job"),
+        "run events": ([], "cnequity.orchestrator.engine.JobEngine.run_job"),
+        "run retry": (["--run-id", "offline"], "cnequity.cli.run_cmds._retry_single_run"),
+        "run compact": (["--run-id", "offline"], "cnequity.orchestrator.engine.JobEngine.run_step"),
+        "run clean": (["--dry-run"], "cnequity.cli.maintain_cmds.clean_staging"),
+        "ths-official capture": (
+            ["--what", "corporate-actions"],
+            "cnequity.steps.fundamentals.snapshot_corporate_actions_ths_official",
+        ),
+        "ths-official backfill": (
+            [],
+            "cnequity.steps.fundamentals.backfill_statement_gap_ths_official",
+        ),
+        "ths-official repair-bars": ([], "cnequity.steps.bars.repair_deep_history_ths_official"),
+        "ths-official resource-sectors": (
+            [],
+            "cnequity.steps.rotation.resource_sector_bars_ths_official",
+        ),
+    }
+    argv, target = scenarios[command]
+    marker = f"offline job reached: {command}"
 
-    missing = [
-        name
-        for name, command in _subcommands(group).items()
-        if "attach_log_file(" not in inspect.getsource(command.callback)
-    ]
-    assert not missing, (
-        f"`cne {group}` subcommands {missing} leave no log file behind; call "
-        "attach_log_file() as the rest of the group does"
+    class OfflineJobFailure(RuntimeError):
+        pass
+
+    def job(*args, **kwargs):
+        logging.getLogger("cnequity.test_job").info(marker)
+        raise OfflineJobFailure("controlled offline failure")
+
+    monkeypatch.setattr(target, job)
+    monkeypatch.delenv("CNE_LOG_DIR", raising=False)
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "offline-test-key")
+    lake = tmp_path / "lake"
+    cfg = tmp_path / "test.toml"
+    cfg.write_text(
+        f'[data]\nroot = "{path_for_toml(lake)}"\n'
+        "[orchestrator]\nworkers = 1\n"
+        '[[job.daily.waves]]\nname = "bars"\nsteps = ["daily_bars"]\n'
+        '[job.events.groups.news]\nsteps = ["news_headlines"]\n'
+        "[sources.ths_official]\nenabled = true\nbackfill = true\nverify = true\n",
+        encoding="utf-8",
     )
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    try:
+        result = CliRunner().invoke(cli, [*command.split(), *argv, "--config", str(cfg)])
+        assert isinstance(result.exception, OfflineJobFailure), result.output
+        logs = list((lake / "logs").glob("*.log"))
+        assert logs, result.output
+        assert any(marker in path.read_text(encoding="utf-8") for path in logs)
+    finally:
+        from cnequity.progress import stop_heartbeat
+
+        stop_heartbeat()
+        for handler in root.handlers[:]:
+            if handler not in prior_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        root.handlers = prior_handlers
+        root.setLevel(prior_level)
 
 
 def test_the_log_notice_never_contaminates_the_json_on_stdout(tmp_path, monkeypatch):

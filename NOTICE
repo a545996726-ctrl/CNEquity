@@ -6,10 +6,3 @@ under the Apache License, Version 2.0. A copy of the License is distributed
 with this product in the LICENSE file, and is also available at:
 
     http://www.apache.org/licenses/LICENSE-2.0
-
----------------------------------------------------------------------------
-THIRD-PARTY ATTRIBUTIONS
-
-This product includes software derived from tdxpy 0.2.7
-(https://github.com/mootdx/tdxpy), licensed under the MIT License.
-See src/cnequity/adapters/tdx_protocol/_wire/LICENSE.tdxpy for the full text.

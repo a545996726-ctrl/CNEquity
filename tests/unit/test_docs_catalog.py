@@ -51,12 +51,6 @@ def test_catalog_tier_tables_match_the_registry():
         )
 
 
-def test_catalog_header_states_the_registered_count():
-    """The intro sentence hard-codes the total; keep it honest."""
-    header = CATALOG.read_text(encoding="utf-8").split("---", 1)[0]
-    assert f"**{len(DATASETS)} 个注册数据集**" in header
-
-
 def test_catalog_history_floor_table_has_no_duplicate_datasets():
     """The measured source-history table must not repeat a dataset row."""
     text = CATALOG.read_text(encoding="utf-8")

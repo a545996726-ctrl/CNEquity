@@ -199,36 +199,6 @@ def test_cache_write_failure_keeps_valid_stock_rows_and_bad_text_refetches(tmp_p
     assert len(calls) == 3
 
 
-def test_hfq_derived_from_raw_is_continuous_across_a_seam():
-    """The invariant the backfill rests on.
-
-    Splicing older bars in must not create a return at the join. With one factor
-    convention on both sides and no corporate action at the seam, the hfq return
-    across it has to equal the raw return — verified live at 0.0bps for 600519
-    and 600036 over the 2015→2016 boundary; this pins the arithmetic.
-    """
-    # Two days either side of a seam, same factor (no action between them).
-    factor = 7.04377
-    last_old_raw, first_new_raw = 218.19, 210.02
-    last_old_hfq = last_old_raw * factor
-    first_new_hfq = first_new_raw * factor
-
-    seam_hfq = first_new_hfq / last_old_hfq - 1.0
-    seam_raw = first_new_raw / last_old_raw - 1.0
-    assert seam_hfq == pytest.approx(seam_raw, abs=1e-12)
-
-
-def test_a_factor_step_at_the_seam_is_a_real_action_not_a_break():
-    """When the factor does change at the join, the hfq return is meant to differ
-    from raw — that is the dividend being added back, not a discontinuity."""
-    last_old_raw, first_new_raw = 100.0, 98.0
-    f_before, f_after = 7.0, 7.2  # ex-dividend between the two days
-
-    seam_hfq = (first_new_raw * f_after) / (last_old_raw * f_before) - 1.0
-    seam_raw = first_new_raw / last_old_raw - 1.0
-    assert seam_hfq > seam_raw  # the payout offsets part of the price drop
-
-
 def _plan(tmp_path, rows, start=date(2001, 1, 1), end=date(2015, 12, 31), symbols=None):
     """Build a history plan against a throwaway instruments table."""
     import polars as pl

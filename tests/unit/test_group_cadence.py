@@ -141,13 +141,6 @@ steps = ["dragon_tiger", "compact"]
     assert any("fundamentals.weekday" in e for e in errors)
 
 
-def test_the_pipeline_reports_a_resting_group_as_skipped():
-    from pathlib import Path
-
-    script = (Path(__file__).parents[2] / "scripts" / "daily_pipeline.sh").read_text()
-    assert '"skipped_not_scheduled"' in script
-
-
 def test_rolling_derivative_minutes_capture_every_session_even_in_weekly_group(tmp_path):
     group = ScheduleGroup(
         at="18:30", steps=["futures_bars", "futures_minute_bars", "compact"], cadence="weekly"

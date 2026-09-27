@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -258,6 +259,35 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
+def _windows_pid_alive(pid: int) -> bool:
+    """Check a foreign process without sending it a Windows termination signal."""
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    error_invalid_parameter = 87
+    wait_object_0 = 0
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        # A missing PID is reclaimable; access denied or an unknown error is
+        # not evidence that another worker has stopped using its lease.
+        return ctypes.get_last_error() != error_invalid_parameter
+    try:
+        # Process objects become signaled on exit. A zero-time wait avoids the
+        # ambiguity of GetExitCodeProcess when a process exits with code 259.
+        return kernel32.WaitForSingleObject(handle, 0) != wait_object_0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _owner_is_alive(lease: Mapping[str, object]) -> bool:
     """Best-effort stale lease detection for crashed processes/threads."""
     try:
@@ -271,6 +301,8 @@ def _owner_is_alive(lease: Mapping[str, object]) -> bool:
         # A failed request must release in ``finally``; this check is only a
         # recovery path for a thread that was killed without unwinding.
         return any(item.ident == thread_id and item.is_alive() for item in threading.enumerate())
+    if sys.platform == "win32":
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
