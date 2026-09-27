@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import io
+import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from types import SimpleNamespace
 
+import httpx
 import polars as pl
+import pytest
 
 from cnequity.adapters.cni import index_constituents_history as cni
+from cnequity.config import Config
 
 
 def test_member_symbol_filters_non_a():
@@ -104,6 +110,96 @@ def test_fetch_cni_parses_xlsx_rows(monkeypatch):
     )
     assert df.height == 2
     assert set(df["symbol"].to_list()) == {"000001.SZ", "000002.SZ"}
+
+
+def test_cni_validated_cache_reuses_per_index_and_refreshes(tmp_path, monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setenv("CNE_RATE_LIMIT_ROOT", str(tmp_path / "egress"))
+    cfg = Config(data_root=tmp_path / "lake", source_intervals={"cni": 0})
+    buffer = io.BytesIO()
+    pd.DataFrame(
+        [
+            {
+                "开始日期": "2024-01-01",
+                "结束日期": "2025-01-01",
+                "样本代码": "000001",
+                "调整类型": "OLD",
+            }
+        ]
+    ).to_excel(buffer, index=False)
+    workbook = buffer.getvalue()
+    calls = []
+    real_client = httpx.Client
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, content=workbook)
+
+    def make_client(**_kwargs):
+        return real_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(cni.httpx, "Client", make_client)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        frames = list(
+            pool.map(lambda _: cni.fetch_cni_index_adjustments("399001.SZ", config=cfg), range(2))
+        )
+    assert len(calls) == 1
+    assert frames[0].to_dicts() == frames[1].to_dicts()
+    assert frames[0].height == 1
+
+    other = cni.fetch_cni_index_adjustments("399006.SZ", config=cfg)
+    assert other.height == 1
+    assert other["index_symbol"].to_list() == ["399006.SZ"]
+    assert len(calls) == 2
+    assert "indexcode=399001" in calls[0]
+    assert "indexcode=399006" in calls[1]
+
+    from cnequity.domain.rate_limit import _read_json
+
+    assert _read_json(cfg.rate_limit_root / "reuse-cni.json")["hits"] == 1
+    cached = cfg.meta_root / "source_cache" / "cni" / "adjustments-399001-"
+    path = next(cached.parent.glob(cached.name + "*.json"))
+    saved = json.loads(path.read_text())
+    saved["sha256"] = "0" * 64
+    path.write_text(json.dumps(saved))
+    assert cni.fetch_cni_index_adjustments("399001.SZ", config=cfg).height == 1
+    assert len(calls) == 3
+    saved = json.loads(path.read_text())
+    saved["captured_at"] = "2020-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(saved))
+    assert cni.fetch_cni_index_adjustments("399001.SZ", config=cfg).height == 1
+    assert len(calls) == 4
+
+    def fail_cache(*_args, **_kwargs):
+        raise OSError("cache volume full")
+
+    monkeypatch.setattr(cni, "write_json_atomic", fail_cache)
+    fresh = Config(data_root=tmp_path / "fresh-lake", source_intervals={"cni": 0})
+    assert cni.fetch_cni_index_adjustments("399001.SZ", config=fresh).height == 1
+    assert len(calls) == 5
+
+
+def test_cni_invalid_workbook_does_not_enter_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("CNE_RATE_LIMIT_ROOT", str(tmp_path / "egress"))
+    cfg = Config(data_root=tmp_path / "lake", source_intervals={"cni": 0})
+    real_client = httpx.Client
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=b"invalid workbook" * 20)
+
+    monkeypatch.setattr(
+        cni.httpx,
+        "Client",
+        lambda **_kwargs: real_client(transport=httpx.MockTransport(handler)),
+    )
+    for _ in range(2):
+        with pytest.raises(cni.CniAdjustmentPayloadError, match="malformed"):
+            cni.fetch_cni_index_adjustments("399001.SZ", config=cfg)
+    assert len(calls) == 2
+    assert not list((cfg.meta_root / "source_cache" / "cni").glob("*.json"))
 
 
 def test_expand_cni_constituents_as_of():

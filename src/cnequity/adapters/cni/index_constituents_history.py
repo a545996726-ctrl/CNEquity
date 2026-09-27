@@ -8,16 +8,25 @@ reconstruct membership for 399001/399006 (and peers) from late 2021.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import io
-from datetime import date
+import json
+import logging
+from datetime import date, datetime, timezone
 
 import httpx
 import polars as pl
 
 from cnequity.adapters.sw.industry_history import exchange_from_code
-from cnequity.domain.http_policy import record_http_response
+from cnequity.domain.http_policy import record_cache_reuse, record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol
+from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import write_json_atomic
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CNI_ADJUST_URL",
@@ -33,6 +42,8 @@ CNI_ADJUST_URL = "https://www.cnindex.com.cn/sample-detail/download-adjustment"
 CNI_BACKFILL_INDICES: tuple[str, ...] = ("399001.SZ", "399006.SZ")
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; cnequity/0.1)"}
+_ADJUSTMENT_CACHE_SECONDS = 86400
+_CACHE_PARSER_VERSION = 1
 
 
 class CniAdjustmentPayloadError(RuntimeError):
@@ -89,34 +100,100 @@ def fetch_cni_index_adjustments(
             "(or `pip install -e .` from a source checkout)."
         ) from exc
 
-    owns = client is None
-    if client is None:
-        client = httpx.Client(timeout=120.0, follow_redirects=True)
-    try:
-        with source_request(config, "cni"):
-            resp = client.get(
-                CNI_ADJUST_URL,
-                params={"indexcode": _index_code(index_symbol)},
-                headers=_HEADERS,
-            )
-            record_http_response(config, "cni", resp)
-        resp.raise_for_status()
-        if not resp.content:
+    def download() -> bytes:
+        session = (
+            client if client is not None else httpx.Client(timeout=120.0, follow_redirects=True)
+        )
+        try:
+            with source_request(config, "cni"):
+                resp = session.get(
+                    CNI_ADJUST_URL,
+                    params={"indexcode": _index_code(index_symbol)},
+                    headers=_HEADERS,
+                )
+                record_http_response(config, "cni", resp)
+            resp.raise_for_status()
+            return resp.content
+        finally:
+            if client is None:
+                session.close()
+
+    def parse(content: bytes) -> pl.DataFrame:
+        if not content:
             raise CniAdjustmentPayloadError(f"CNI adjustment response for {index_symbol} is empty")
-        if len(resp.content) < 100:
+        if len(content) < 100:
             raise CniAdjustmentPayloadError(
                 f"CNI adjustment response for {index_symbol} is truncated"
             )
         try:
-            pdf = pd.read_excel(io.BytesIO(resp.content), engine="openpyxl")
+            pdf = pd.read_excel(io.BytesIO(content), engine="openpyxl")
         except Exception as exc:  # noqa: BLE001 — empty/corrupt payload
             raise CniAdjustmentPayloadError(
                 f"CNI adjustment workbook for {index_symbol} is malformed"
             ) from exc
-    finally:
-        if owns:
-            client.close()
+        return _adjustments_from_sheet(pdf, index_symbol, pd)
 
+    # Caller-supplied clients are independent transport boundaries. Configured
+    # production reads hold one per-index lock through parsing and cache write,
+    # so simultaneous consumers reuse one validated file.
+    if config is None or client is not None:
+        return parse(download())
+    url_key = hashlib.sha256(CNI_ADJUST_URL.encode()).hexdigest()[:16]
+    path = (
+        config.meta_root
+        / "source_cache"
+        / "cni"
+        / f"adjustments-{_index_code(index_symbol)}-{url_key}.json"
+    )
+    with exclusive_lock(path.with_suffix(".lock")):
+        if path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(saved["captured_at"])
+                raw = base64.b64decode(saved["content_b64"], validate=True)
+                if (
+                    saved["url"] == CNI_ADJUST_URL
+                    and saved["index_symbol"] == index_symbol
+                    and saved["parser_version"] == _CACHE_PARSER_VERSION
+                    and 0 <= age.total_seconds() < _ADJUSTMENT_CACHE_SECONDS
+                    and hashlib.sha256(raw).hexdigest() == saved["sha256"]
+                ):
+                    adjustments = parse(raw)
+                    record_cache_reuse(config, "cni", "index_adjustments")
+                    return adjustments
+            except (
+                OSError,
+                KeyError,
+                TypeError,
+                ValueError,
+                binascii.Error,
+                CniAdjustmentPayloadError,
+            ) as exc:
+                logger.warning(
+                    "CNI cached adjustments invalid for %s; refreshing: %s", index_symbol, exc
+                )
+        content = download()
+        adjustments = parse(content)
+        try:
+            write_json_atomic(
+                path,
+                {
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "url": CNI_ADJUST_URL,
+                    "index_symbol": index_symbol,
+                    "parser_version": _CACHE_PARSER_VERSION,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_b64": base64.b64encode(content).decode("ascii"),
+                },
+            )
+        except OSError as exc:
+            logger.warning(
+                "CNI valid adjustments for %s could not be cached: %s", index_symbol, exc
+            )
+        return adjustments
+
+
+def _adjustments_from_sheet(pdf, index_symbol: str, pd) -> pl.DataFrame:
     if pdf.empty:
         raise CniAdjustmentPayloadError(f"CNI adjustment workbook for {index_symbol} has no rows")
 
@@ -127,6 +204,11 @@ def fetch_cni_index_adjustments(
         "调整类型": "adjust_type",
     }
     pdf = pdf.rename(columns={k: v for k, v in rename.items() if k in pdf.columns})
+    missing = {"start_date", "end_date", "code", "adjust_type"} - set(pdf.columns)
+    if missing:
+        raise CniAdjustmentPayloadError(
+            f"CNI adjustment workbook for {index_symbol} is missing {sorted(missing)}"
+        )
     for col in ("start_date", "end_date"):
         pdf[col] = pd.to_datetime(pdf[col], errors="coerce").dt.date
     rows: list[dict] = []
