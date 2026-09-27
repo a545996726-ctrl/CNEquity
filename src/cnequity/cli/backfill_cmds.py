@@ -1157,7 +1157,7 @@ def _recover_compactable_backfill_staging(engine: JobEngine, dataset: str) -> li
 
 
 def _run_delisted_profile(cfg, since: date) -> dict:
-    """One manifest/compact path shared by the new profile and legacy command."""
+    """Run the delisted profile through one manifest and compact path."""
     from cnequity.steps.delisted import backfill_delisted_bars
 
     engine = JobEngine(cfg)

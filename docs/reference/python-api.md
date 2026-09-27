@@ -39,7 +39,7 @@ def load(
 | `dataset` | 注册数据集名 |
 | `start`, `end` | 含边界日期窗口（数据集主日期列） |
 | `adjust` | `hfq` / `qfq`；适用于 `daily_bars`、`minute_bars`、`minute_bars_5m` 等价量数据集 |
-| `universe` | `"all_a"` 沪深北全 A；`"all_a_sh_sz"` 明确限定沪深子集并排除北交所 |
+| `universe` | 兼容参数：`"all_a"` 沪深北全 A（已弃用，发出警告）；`"all_a_sh_sz"` 沪深子集。新研究应选版本化 `profile` |
 | `as_of` | PIT 截止日；可见性规则由 `pit_mode` 决定。严格模式核验公告、可用/发布时间及观察时间，随后按事实键选有效版本 |
 | `items` | 财报科目 code 列表 |
 | `symbols` | symbol 白名单 |
@@ -48,7 +48,7 @@ def load(
 | `all_vintages` | True 时返回 `as_of` 前的**全部**版本（研究财报修订用）；截面选股勿开，会重复计同一事实 |
 | `pit_mode` | PIT 证据模式：`strict` 排除 reconstructed 回填；`best_effort` 保留但返回 `pit_is_exact=False`。省略值为 0.x 兼容模式，仍按 `fetched_at` 截止，不代表严格 PIT |
 | `config` / `data_root` | 湖位置；默认读 `configs/cnequity.toml` |
-| `profile` / `universe_profile` | 版本化股票池策略，二者为别名；研究优先明确 profile，按该范围校验证据 |
+| `profile` / `universe_profile` | 版本化股票池策略，二者为别名；官方研究画像自动启用严格证据校验 |
 | `revision` | revision 数字或 ID 固定主数据集；也支持按数据集映射。单个数字不固定因子或股票池依赖 |
 | `revision_map` | 固定各依赖数据集的 retained revision；显式缺失版本抛 `RevisionConsistencyError`，不退回 latest |
 
@@ -168,7 +168,7 @@ cfg = resolve_config(data_root="/path/to/lake")
 
 ## 示例
 
-### 后复权全市场
+### 后复权沪深研究范围
 
 ```python
 bars = load(
@@ -176,8 +176,7 @@ bars = load(
     start="2024-01-01",
     end="2024-12-31",
     adjust="hfq",
-    universe="all_a",
-    strict_universe=True,
+    profile="cn_a_sh_sz_research_v1",
     strict_adj=True,
 )
 ```

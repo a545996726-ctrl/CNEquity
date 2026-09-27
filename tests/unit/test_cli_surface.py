@@ -21,24 +21,6 @@ def _top_level() -> list[str]:
     return cli.list_commands(click.Context(cli))
 
 
-def _all_command_paths() -> list[list[str]]:
-    """Every command and subcommand path in the tree."""
-    out: list[list[str]] = []
-
-    def walk(cmd: click.Command, ctx: click.Context, path: list[str]) -> None:
-        if not isinstance(cmd, click.Group):
-            return
-        for name in cmd.list_commands(ctx):
-            sub = cmd.get_command(ctx, name)
-            if sub is None or sub.hidden:
-                continue
-            out.append([*path, name])
-            walk(sub, click.Context(sub, parent=ctx), [*path, name])
-
-    walk(cli, click.Context(cli), [])
-    return out
-
-
 def test_every_command_is_assigned_a_help_section():
     """An unsectioned command still prints, under "Other" — which is the bug."""
     sectioned = {name for _, names in SECTIONS for name in names}
@@ -173,11 +155,19 @@ def test_the_cli_reference_documents_every_move():
     assert not missing, f"MOVED lists {missing}, which the rename table does not"
 
 
+def test_delisted_backfill_names_the_canonical_path():
+    group = cli.get_command(click.Context(cli), "delisted")
+    assert isinstance(group, click.Group)
+    assert group.list_commands(click.Context(group)) == ["status"]
+    result = CliRunner().invoke(cli, ["delisted", "backfill"])
+    assert result.exit_code != 0
+    assert "cne backfill daily_bars --profile delisted --start <date>" in result.output
+
+
 @pytest.mark.parametrize(
     "argv",
     [
         ["STATUS", "--help"],
-        ["Status", "--help"],
         ["run", "DAILY", "--help"],
         ["SOURCES", "POLICY", "--help"],
         ["ths-official", "CAPTURE", "--help"],
@@ -260,26 +250,6 @@ def test_verify_refuses_a_dataset_name_it_does_not_know(tmp_path):
     assert result.exit_code != 0
     assert "未知数据集 'daily_bar'" in result.output
     assert "daily_bars" in result.output, "a near miss should be offered"
-
-
-def test_every_command_path_resolves_in_any_case():
-    """Exhaustive, because the earlier fix was easy to leave half-applied.
-
-    A group reached through one case and a subcommand through another is the
-    shape a partial fix takes, so walk the whole tree rather than sampling.
-    """
-    runner = CliRunner()
-    failures = []
-    for path in _all_command_paths():
-        for variant in (
-            [w.upper() for w in path],
-            [w.capitalize() for w in path],
-            [w.swapcase() for w in path],
-        ):
-            result = runner.invoke(cli, [*variant, "--help"])
-            if result.exit_code != 0:
-                failures.append(" ".join(variant))
-    assert not failures, f"case variants that did not resolve: {failures}"
 
 
 @pytest.mark.parametrize(

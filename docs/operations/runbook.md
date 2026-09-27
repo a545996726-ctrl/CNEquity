@@ -18,7 +18,7 @@
 | 调度 | `scripts/install_scheduler.sh` | 安装 macOS launchd（每个交易日北京时间 `[job.daily] run_at` 之后跑一次，与本机时区无关） |
 | 调度 | `scripts/uninstall_scheduler.sh` | 卸载 launchd |
 | 告警 | `scripts/health_notify.sh` | 日常审计、每周全湖质量检查 + 分组 freshness + macOS 通知 |
-| 备份 | `scripts/backup_meta.sh` | manifest + state + quality 的 tar 轮换 |
+| 备份 | `scripts/backup_meta.sh` | 元数据与修订收据的 tar 轮换；完整数据另用快照 |
 
 脚本使用仓库 `.venv/bin/cne`，路径相对仓库根目录自解析。
 
@@ -182,26 +182,29 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 
 ## 备份与恢复
 
-**元数据备份**：`manifest.db` + `meta/state/` + `meta/quality/` + `meta/revisions/` +
-`meta/source_snapshots/` + `meta/source_health/` + `meta/stability/`
-
-**不备份**：`adj_factors_cache`（可 derive 重算）、`locks`、curated parquet（可重采）
-
-```bash
-scripts/backup_meta.sh
-scripts/backup_meta.sh "" /Volumes/ext/cne-bak 30
-```
-
-**恢复**：
+`backup_meta.sh` 只备份 manifest、state、quality、revision 收据、来源快照和运行证据；
+**不包含** `curated/`、`derived/` 或 `meta/revisions/data/` 中的数据版本文件。
+有些历史可重采，有些快照型数据错过窗口后无法从原源补回，因此不能把元数据归档当作
+完整湖备份。需要恢复研究数据时，另建并校验可移植快照，或对整个湖做一致性备份。
 
 ```bash
-cd data/cnequity/meta
-tar -xzf ../backups/meta-YYYYMMDD-HHMMSS.tar.gz
-cne status                 # 确认水位恢复
-cne run daily --group core # 增量续采
+scripts/backup_meta.sh /abs/path/to/lake /Volumes/ext/cne-bak 30 30
 ```
 
-默认备份在湖内，磁盘级容灾请将 `CNE_BACKUP_DIR` 指到湖外。
+`DATA_ROOT` 是湖目录，不是 TOML 配置路径；省略时脚本使用 `CNE_DATA_ROOT`，
+否则使用仓库的 `data/cnequity`。默认归档保存在湖内；磁盘级容灾要指定湖外目录。
+归档按天数和份数中更严格的限制轮换，见[脚本参数](scripts.md#backup_metash)。
+
+恢复前先停采集，解包到隔离目录检查内容，并确认有与收据匹配的数据文件；
+不要将旧元数据直接覆盖到仍在运行或数据版本不匹配的湖：
+
+```bash
+mkdir -p /tmp/cnequity-meta-review
+tar -xzf /Volumes/ext/cne-bak/meta-YYYYMMDD-HHMMSS.tar.gz \
+  -C /tmp/cnequity-meta-review
+```
+
+核对后按实际恢复方案处理；仅恢复元数据不能重建缺失的 Parquet 或 revision generation。
 
 需要冻结可复现实验所依赖的 Parquet 时，使用带校验和、revision receipt、契约指纹和
 运行 lineage 的可移植快照：
@@ -211,10 +214,13 @@ cne snapshot create research-20260828 \
   --dataset daily_bars --dataset instruments --dataset trading_status
 cne snapshot verify research-20260828
 cne snapshot restore research-20260828 /new/empty/cnequity-restore
+cne config create --config configs/cnequity.restore.toml \
+  --data-root /new/empty/cnequity-restore
+cne status --datasets --config configs/cnequity.restore.toml
 ```
 
-恢复命令只接受新目录或空目录，拒绝活动湖根目录，也不会覆盖已有文件。恢复后对新目录运行
-`cne status --datasets` 与研究消费者契约测试，再执行切换。
+恢复命令只接受新目录或空目录，拒绝活动湖根目录，也不会覆盖已有文件。验收时
+使用**指向恢复目标**的独立配置；再执行研究消费者契约测试，确认后才切换。
 
 ## 20 个交易日验收
 
@@ -229,12 +235,14 @@ cne snapshot restore research-20260828 /new/empty/cnequity-restore
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `CNE_CONFIG` | `configs/cnequity.toml` | 所有命令 `--config` 的默认值（显式 `--config` 优先）。默认值是相对路径，挂 cron 时设这个变量就不必再 `cd` |
+| `CNE_CONFIG` | `configs/cnequity.toml` | 所有命令 `--config` 的默认值（显式 `--config` 优先）；调度器中请设绝对路径，不能仅靠相对路径免除 `cd` |
+| `CNE_DATA_ROOT` | 仓库的 `data/cnequity` | `backup_meta.sh` 的默认湖目录；自定义 `data.root` 时需显式设置或传第一个参数 |
 | `CNE_LOG_DIR` | `{data.root}/logs` | 日志；长跑的 `cne` 命令也会在这里留一份 |
 | `CNE_GROUPS` | 全部 6 组 | 覆盖 pipeline 组列表 |
 | `CNE_NOTIFY` | `1` | `0` 关闭通知 |
 | `CNE_BACKUP_DIR` | 湖内 backups | 备份目录 |
 | `CNE_BACKUP_RETENTION_DAYS` | 14 | 保留天数 |
+| `CNE_BACKUP_RETENTION_COUNT` | 30 | 最多保留份数；`0` 关闭份数上限 |
 
 ## 数据湖目录（init 后）
 
@@ -278,9 +286,10 @@ cne snapshot restore research-20260828 /new/empty/cnequity-restore
 | `CNE_SOURCE_HEALTH` | `1` | 每日日更后复用真实采集证据，仅主动探测过期或未触达端点；设 `0` 关闭 |
 | `CNE_SOURCE_VANTAGE` | `local` | 当前出口的稳定标签；不要把海外样本标成 `cn` |
 
-**为什么需要它。** `snapshot` 数据集（`valuation_metrics`、`fund_flow`、`sector_members`、`analyst_consensus` 等）只抓 run 当天——源端在那一个调度窗口里中断，那天就**永久没了**，后面任何一次 run 都补不回来（重放会伪造行，这是 `fetch_semantics` 的设计）。
-
-这不是重试不够：`clist.py` 的 per-host 重试加退避一直都在，`valuation_metrics` 在 2026-07-30 / 07-31 是把所有 host 的重试都耗尽了。缺的是**当天的第二个窗口**。
+**为什么需要它。** 快照型日更只抓运行当天；同日第二个窗口可以补当天失败的采集。
+错过后不能重放旧 `--trade-date` 来伪造当时观察。部分数据集有独立历史回补源，
+但其来源、覆盖和 PIT 语义可能与当日快照不同；先查 `history_mode` 和
+`backfill_source`，不要把所有快照型数据一概判为可补或永久不可补。
 
 **错开窗口是重点。** 立刻重试大概率撞上同一场中断，因此补抓由独立任务在较晚时间发起。
 
@@ -407,15 +416,14 @@ cne run daily --config configs/cnequity.toml   # 骨架一趟即可，验收看�
 ```python
 from cnequity.query import load
 
-raw = load("daily_bars", start="2024-06-01", end="2024-06-30")
 tradable = load(
     "daily_bars",
     start="2024-06-01",
     end="2024-06-30",
     adjust="hfq",
-    universe="all_a",
+    profile="cn_a_sh_sz_research_v1",
+    strict_adj=True,
 )
-assert tradable.height < raw.height
 assert "adj_close" in tradable.columns
 ```
 
@@ -426,7 +434,7 @@ assert "adj_close" in tradable.columns
 | 1 | 幂等 | 同窗口重跑后核心数据集 row count 不变 |
 | 2 | 口径 | 标杆股 close/adj_close 与行情软件一致（人工） |
 | 3 | 覆盖 | 按年行数无异常断崖；2016 起分区连续 |
-| 4 | 消费 | `load(..., universe="all_a")` 剔除 ST/停牌；`adj_close` 可算 |
+| 4 | 消费 | 显式研究 profile 的证据门禁通过；`adj_close` 可算且因子精确 |
 | 5 | 审计 | 最新 run audit 无 error；`source=mock` 行数 = 0 |
 
 ## 备源策略

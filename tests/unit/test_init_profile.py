@@ -301,7 +301,7 @@ def test_init_records_the_window_on_the_run(tmp_path, monkeypatch):
 @pytest.mark.parametrize("profile", ["full", "quick"])
 def test_every_profile_keeps_the_full_cross_section(profile, tmp_path, monkeypatch):
     """Shallower, never narrower. A symbol filter here would bake in the exact
-    survivorship bias `cne delisted backfill` exists to repair."""
+    survivorship bias the delisted backfill profile exists to repair."""
     start, _ = _capture_backfill_start(tmp_path, monkeypatch, ["--profile", profile])
     cfg = Config(data_root=tmp_path / "data")
     if start:

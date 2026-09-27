@@ -116,13 +116,6 @@
 | `--output-dir` | `—` | — |
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
 
-## `cne delisted backfill`
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
-| `--since` | `2016-01-01` | 湖窗口起点。 |
-
 ## `cne delisted status`
 
 | 参数 | 默认值 | 说明 |
@@ -430,7 +423,7 @@
 | `--end` | `2024-12-31` | 结束报告期。 |
 | `--chunk-size` | `200` | 每个 staging 批次放多少只证券。 |
 | `--workers` | `4` | 并发请求数。 |
-| `--symbols` | `—` | 用逗号分隔的标的列表代替整个市场。跑一遍全市场要 78 分钟，为几只因偶发传输错误丢掉的票再跑一遍不值 —— 收尾 JSON 会在 `failed_symbols` 里点名它们。 |
+| `--symbols` | `—` | 用逗号分隔的标的列表代替整个市场，定向重试失败证券；收尾 JSON 会在 `failed_symbols` 里列出仍未补齐的证券。 |
 
 ## `cne ths-official capture`
 

@@ -46,9 +46,7 @@ def test_documented_counts_match_the_registries():
     from cnequity.diagnostics.source_health import PROBES_BY_KEY
     from cnequity.domain.datasets import DATASETS
 
-    docs = ROOT / "docs"
     claims = [
-        (docs / "datasets" / "catalog.md", str(len(DATASETS))),
         (ROOT / "README.md", f"**{len(DATASETS)} 个数据集"),
         (ROOT / "README.en.md", f"**{len(DATASETS)} datasets"),
         (ROOT / "README.pypi.md", f"所有 {len(DATASETS)} 个数据集"),

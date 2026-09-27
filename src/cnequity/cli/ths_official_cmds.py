@@ -189,8 +189,8 @@ def ths_snapshot(config_path: str, what: str, days: int, sample: int):
     "symbols_str",
     default=None,
     help=(
-        "用逗号分隔的标的列表代替整个市场。跑一遍全市场要 78 分钟，为几只因偶发传输错误丢掉的票再跑一遍不值 —— 收尾 JSON "
-        "会在 `failed_symbols` 里点名它们。"
+        "用逗号分隔的标的列表代替整个市场，定向重试失败证券；收尾 JSON "
+        "会在 `failed_symbols` 里列出仍未补齐的证券。"
     ),
 )
 def ths_backfill(

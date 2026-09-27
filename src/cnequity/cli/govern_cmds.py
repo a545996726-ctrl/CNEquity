@@ -329,7 +329,8 @@ def snapshot_restore(name: str, target: Path, config_path: str, snapshot_root: P
     \b
     活跃的湖根目录会被拒绝，已存在的文件永远不会被覆盖：
     恢复是为了把旧版本摆在当前版本旁边看，不是把线上的湖回滚。
-    在把任何东西指向它之前，先对 TARGET 跑一次 `cne status --datasets` 看看结果。
+    在把任何东西指向它之前，先创建指向 TARGET 的独立配置，再用
+    `cne status --datasets --config PATH` 检查恢复结果。
     """
     cfg = _cfg(config_path)
     attach_log_file(cfg, "snapshot-restore")

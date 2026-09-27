@@ -73,13 +73,14 @@ cne init --profile full
 cne backfill daily_bars --start 2016-01-01 --end COVERAGE_START
 ```
 
-**它跑到哪了？** 运行中会打这几类行，正常情况下不会连续静默超过 60 秒：
+**它跑到哪了？** 运行中会打这几类行；下表数值只是输出格式示例，
+实际证券数、批次和耗时取决于自己的湖与来源：
 
 | 行 | 含义 |
 |------|------|
 | `Step <名字> starting` / `Step <名字> success in Ns` | 步骤进出 |
-| `daily_bars: 5,283 symbol(s) over … → 53 batch(es) … on 4 lane(s)` | 这一趟扫描的规模，开跑前就打出来 |
-| `daily_bars 8/53 batches · 12,400 rows · 1m24s elapsed · ~7m55s left` | 滚动进度；凑满一轮 lane 后才给剩余时间 |
+| `daily_bars: 120 symbol(s) over … → 2 batch(es) … on 1 lane(s)` | 这一趟扫描的规模，开跑前就打出来 |
+| `daily_bars 1/2 batches · 240 rows · 1m24s elapsed · ~1m24s left` | 滚动进度；凑满一轮 lane 后才给剩余时间 |
 | `still working: daily_bars 4m12s (no output for 1m02s)` | 心跳，静默满 60 秒时点名当前步骤 |
 
 启动时打印的 `Logging to …/logs/cne-init-<时间戳>.log` 是本次运行的日志文件（目录可用 `CNE_LOG_DIR` 覆盖）。另开一个终端也可以查：

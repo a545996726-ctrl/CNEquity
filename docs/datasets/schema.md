@@ -17,7 +17,7 @@
 
 ### PIT 双时态扩展列
 
-仅适用于 PIT 数据集：`announcement_index`、`financial_statement_items`、`share_structure`、`shareholder_counts`、`top_holders`。**不适用于其他数据集**（此前本节误置于 `instruments` 下）。
+仅适用于 PIT 数据集：`announcement_index`、`financial_statement_items`、`share_structure`、`shareholder_counts`、`top_holders`。**不适用于其他数据集**。
 
 四列是可选存储列，不进 `DATASET_SCHEMAS` 的必需形状：旧 Parquet 没有它们照样可读，
 读侧会补齐。compact 时会写入磁盘，没有这些列的旧分区在下次 compact 时补写一次。

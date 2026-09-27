@@ -75,7 +75,7 @@
 | [`cne profile`](#cne-profile) | 检视版本化的研究 universe 画像 | `list` `show` |
 | [`cne stats`](#cne-stats) | `meta/stats` 下的度量表（行数、字节、源分布） | `rebuild` `show` |
 | [`cne sources`](#cne-sources) | 探测依赖的数据源并检查证据 | `probe`（联网）`limits` `slo` `resilience` `policy` `substitutes` |
-| [`cne delisted`](#cne-delisted) | 读退市目录并抓它点名的历史 | `status` `backfill` |
+| [`cne delisted`](#cne-delisted) | 读取退市目录 | `status` |
 | [`cne ths-official`](#cne-ths-official) | 对照/回填同花顺官方 API（需 key） | `capture` `backfill` `repair-bars` `resource-sectors` |
 
 ## 改名对照
@@ -84,7 +84,7 @@
 
 ```
 $ cne retry
-Error: `cne retry` has moved. Use `cne run retry` instead.
+Error: `cne retry` 已改名，请改用 `cne run retry`。
 ```
 
 | 旧 | 新 | 为什么 |
@@ -95,9 +95,10 @@ Error: `cne retry` has moved. Use `cne run retry` instead.
 | `cne verify-bars` | `cne verify --bars` | 和 `cne verify` 问的是同一件事，只是粒度不同；两个顶层命令差一个连字符 |
 | `cne stability` | `cne verify --runs` | 同上，第三种粒度：交易日 × run |
 | `cne ths-official snapshot` | `cne ths-official capture` | 原来和顶层 `cne snapshot`（湖快照）同名不同义 |
+| `cne delisted backfill --since DATE` | `cne backfill daily_bars --profile delisted --start DATE` | 退市行情使用同一个数据集补数入口，保留旧写法的迁移提示 |
 | `cne servers test` | `cne sources probe --only tdx_protocol` | 早已标记废弃，声明 0.9.0 删除却一直留到 0.10 |
 
-对照表定义在 `cnequity/cli/_root.py` 的 `MOVED`。它比隐藏别名更诚实——别名会烂在代码里，一个 dict 不会。
+顶层对照定义在 `cnequity/cli/_root.py` 的 `MOVED`，分组内旧名由 `moved_hints` 提示。提示不执行旧命令。
 
 ## cne init --profile demo | sample
 
@@ -151,10 +152,11 @@ cne init --profile sample
 | `--since YYYY-MM-DD` | 显式指定历史起点，覆盖 `--profile` |
 | `--quiet` | 只留 warning 及以上，不打逐批进度 |
 
-**默认会打进度。** 全市场回填是几十个批次、可能跑几小时；之前它一声不吭直到最后吐 JSON，和卡死没法区分——而看起来卡死的进程会被 kill 掉，白扔已经跑完的几小时。现在每个批次一行：
+**默认会打进度。** 全市场回填可能运行较久；每批会报告已完成数、行数、耗时
+和估计剩余时间。下列数值仅演示输出格式：
 
 ```
-14:22:07 INFO ...worker_pool: daily_bars 12/54 batches · 1,043,882 rows · 18m04s elapsed · ~1h03m left
+14:22:07 INFO ...worker_pool: daily_bars 1/2 batches · 240 rows · 1m24s elapsed · ~1m24s left
 ```
 
 **`quick` 是更浅，不是更窄。** 全市场标的一个不少，只是每只少几年。按标的裁剪会把这个湖本来要修掉的幸存者偏差直接建进去，而且一个缺席的标的看起来和「这只票从没交易过」一模一样；少几年的历史则由 `coverage_start` 如实记录。
@@ -216,19 +218,9 @@ macOS 上会把 `orchestrator.workers` 写成 `1`（与 `validate` 规则一致�
 | `--enforce` | 关键数据集缺独立备源时退出 1 |
 | `--out PATH` | 写文件而非打印 |
 
-集中度本身不能决定主备源的选择：一个域背着 30 个数据集，其危险程度与它**从本机有多经常够不着**成正比，而后者是测出来的、不是声明出来的。`--with-availability` 把两者放进同一张表：
-
-```
-failure domain     datasets critical   measured  worst probe
-eastmoney                30        4       0.0%  eastmoney_push2his
-tdx                       8        5     100.0%  tdx_protocol
-exchange                  4        3      88.2%  exchange_szse
-```
-
-一个域按它**最差**的探针计：需要两个端点的 feed，任一挂掉它就挂掉。没有观测的探针不贡献读数
-（"从未测过"和"测出来是 0"是两个不同的答案），对应的域保持未标注。
-
-`build_dependency_report` 本身仍是注册表的纯函数 —— 确定性、可测；join 只发生在 CLI 层。
+集中度本身不能决定主备源的选择。`--with-availability` 将本湖已保存的探针样本
+与故障域放在同一报告中；每个域展示所依赖探针中的最低可用率。没有观测的探针
+不会被当作成功或失败，对应的域保持未标注。具体数值取决于自己的出口和观察窗口。
 
 ## cne contract
 
@@ -282,9 +274,11 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 
 ### --stale-only：当天的第二次机会
 
-`snapshot` 数据集只抓 run 当天。**一次源端中断吃掉那个窗口，那天就永久没了**——`valuation_metrics` 就这样丢了 2026-07-30 和 07-31：per-host 重试和退避本来就有，只是全部耗尽了，而 snapshot 语义决定了后面任何一次 run 都补不回来。
+快照型日更只抓运行当天。错过当天窗口后，不能通过重放旧 `--trade-date` 把新观察
+伪装成历史快照；能否从独立历史源补回，要看该数据集的 `history_mode` 与
+`backfill_source`。`--stale-only` 给当天尚未补齐的数据第二个采集窗口。
 
-缺的不是重试，是**当天的第二个窗口**。挂在主 pipeline 几小时之后：
+把它挂在主 pipeline 几小时之后：
 
 ```cron
 # 主 pipeline
@@ -402,13 +396,12 @@ cne backfill sector_bars --config configs/cnequity.toml --retry-failed
 
 ## cne delisted
 
-读退市目录，并拉它点名的那些行情。**重建**目录（扫码空间、核对终点、修 instruments、
+读退市目录。退市行情使用 `cne backfill daily_bars --profile delisted` 补数。**重建**目录（扫码空间、核对终点、修 instruments、
 覆盖门禁）是一次性工程，在 [`scripts/delisted_ops.py`](../operations/scripts.md#delisted_opspy)。
 
 | 子命令 | 说明 |
 |--------|------|
 | `status [--since]` | 目录摘要：数量、年份、尚未 ingest |
-| `backfill [--since]` | 兼容入口，给出迁移提示；执行与 `backfill daily_bars --profile delisted --start` 共用同一运行/发布逻辑 |
 
 推荐顺序（跨 CLI 和脚本）：
 
@@ -536,7 +529,7 @@ cne verify --derivatives --dataset futures_bars --start 2026-09-01 --end 2026-09
 |------|------|
 | `--datasets` | 逐数据集新鲜度表（dataset / layer / freshness / 覆盖区间 / watermark）；有 STALE 退出 1。freshness 取值：`fresh` / `STALE` / `empty`（还没抓过）/ `no source`（源已下线且无替代，如 `economic_calendar`）/ `retired`（源已下线但湖已抓到最后一天，如 `northbound_flows`）/ `n/a`（配置里关闭，或不按日判新鲜度） |
 | `--all-columns` | 配合 `--datasets`：打印 `list_datasets` 的全部列（契约指纹、revision、PIT 存储列等），而非仅新鲜度 |
-| `--groups` | 配合 `--datasets`：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，但不触发退出 1。只跑 `core` 的主机有二十多个数据集无人抓取，不加此项门禁天天失败（2026-09-12/13/14 为 21–25 个），告警就此失效。无人调度的数据集（`(unscheduled)`）仍然判失败——“不知道谁抓”不等于“别的主机在抓” |
+| `--groups` | 配合 `--datasets`：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，但不触发退出 1。只调度 `core` 的主机应指定这个范围，避免未安排采集的可选组持续触发门禁。无人调度的数据集（`(unscheduled)`）仍然判失败，须明确处理 |
 | `--scope` / `--no-scope` | 配合 `--datasets`：是否做最新交易日的标的截面校验（默认开）。对每个按「当日 active 证券」建键的数据集（`daily_bars`、`trading_status`）比较 tip 分区与证券表：有数据、有明确停牌证据、已记入待补账本、或有覆盖当天的无数据证据（例如日线探测证实「未上市」的新股代码，两张表都认）的都算覆盖，其余判 INCOMPLETE。要读这些数据集的 tip 分区加 `instruments`，`--no-scope` 让这条命令回到纯元数据 |
 | `--run <id\|latest>` | 指定 run（默认 `latest`）；摘要含每个数据集 stage 的 `dataset_results` 与聚合 `dataset_status`。别名 `--run-id` 已删除 |
 
@@ -569,7 +562,7 @@ init 不属于任何调度组，因此不受 `--groups` 豁免；截面校验则
 | `--orphan-retention-days` | 无 manifest 的 orphan staging 保留天数（默认 7） |
 | `--snapshot-retention-days` | `meta/source_snapshots` 下 run_id 目录的保留天数（默认 14）。每个 dataset/source 的最新一份始终保留 |
 | `--keep-revision-generations` | 每个数据集在 `meta/revisions/data` 下保留的已提交代数（默认 5）。receipt 永远保留，`current.json` 指向的那一代永不丢弃；`0` 关闭 |
-| `--log-retention-days` | 删除 `logs/cne-*.log` 里超过这么多天的（默认 30）。每次调用写一个带时间戳的日志，此前没有任何东西清理它们；`0` 关闭。只处理本 CLI 命名的文件——`logs/` 下别人放的（如 launchd 的 stdout 重定向）不动 |
+| `--log-retention-days` | 删除 `logs/cne-*.log` 里超过这么多天的（默认 30）；`0` 关闭。只处理本 CLI 命名的文件——`logs/` 下其他文件（如 launchd 的 stdout 重定向）不动 |
 | `--reconcile-runs` | 清理前先把卡在 `running` 的 run（worker 崩溃）标记为 failed。`--reconcile-after-seconds` 可覆盖判定窗口，默认取 `[orchestrator].batch_stale_seconds` |
 | `--force` | 也删尚未 cleanup-ready 的 staging（incomplete / 未 compact）；成功 fetch batch 会被 demote，`cne run retry` 全量重抓。**不要**对 success-without-compact 用 force——先 `cne run compact --run-id` |
 
@@ -621,7 +614,8 @@ cne serve
 | `--if-stale` | 只在「湖动过了」时才重建，否则空转返回。放定时器上用这个 |
 | `--json` | 结果输出 JSON |
 
-全量重建：参考湖（1.5GB / 6600 万行 / 21k 分区）约 6 秒——只读 `source`、`data_version`、`fetched_at` 三列。增量刷新是可行的（跑批动过的分区可以从 `ingestion_batches.window_start/window_end` 反推），但没到需要的规模。
+全量重建会扫描已发布数据；耗时随分区数、文件数和存储性能变化。统计表不是
+数据本身，重建只更新 `meta/stats/` 下的摘要。
 
 **`--if-stale` 的判据是 run id，不是时钟。** 改变湖的是采集，所以建于最后一个 run 之后的表无论多旧都是当前的，建于之前的无论多新都是过期的——`stats-latest.json` 的 `latest_run_id` 和 manifest 的最新 run 比对即可，只读一个小 JSON 加一行 SQLite。
 
@@ -636,7 +630,7 @@ cne serve
 cne stats rebuild --if-stale
 ```
 
-面板（M2）走 `stats_freshness()` 判过期 + 后台线程调 `refresh_stats_if_stale()`；线程策略留在调用方，模块本身是同步的。
+控制台会按需刷新过期统计；定时任务可用 `--if-stale` 避免无变化时重复扫描。
 
 > `cne stats refresh` 已并入 `cne stats rebuild --if-stale`；原 `--force` 就是不加 `--if-stale` 的默认行为。
 
@@ -709,6 +703,7 @@ cne mcp --config /abs/path/cnequity.toml --live
 | `resilience` | 从注册表算源集中度、failure-domain 爆炸半径和核心数据集独立备源门禁。`--out PATH` 落 JSON，`--enforce`（有核心表缺独立备源则退出 1） |
 | `policy [SOURCE]` | 查 `sources/SOURCES.yml` 的来源使用策略。省略 SOURCE 输出全部；给 SOURCE 加 `--profile personal\|commercial\|cache\|redistribution` 做保守判断，未知权限一律 fail-closed（退出 1）。`--redistribution` 是 `--profile redistribution` 的简写 |
 | `limits` | 离线显示同一出口的共享冷却、EM 当日预算与熔断、本湖最近 run 的请求/重试遥测，以及欠账续跑命令；不创建湖、不探测源 |
+| `substitutes` | 根据已保存的探测证据建议独立备源；仅加 `--probe` 才主动探测 |
 
 > 原为 `cne sources`（探测）+ `cne source <sub>`（派生结论）——两个顶层条目差一个字母，
 > 且 `cne source --help` 不得不用一句话把自己和邻居区分开。现在收敛成一个名词。

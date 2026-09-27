@@ -458,12 +458,7 @@ def test_the_daily_job_is_not_nagged_about_its_one_session(caplog, config, monke
 #: The groups whose commands reach a source or rewrite the lake — the ones
 #: where a user can be left staring at a silent terminal. Named per group, not
 #: per command, so a new subcommand is covered the day it lands.
-FETCHING_GROUPS: tuple[str, ...] = ("backfill", "run", "ths-official", "delisted")
-
-#: Within those groups, the commands that only read and print. `delisted
-#: status` summarises a catalogue already on disk; there is no interval during
-#: which anyone could wonder whether it died.
-READ_ONLY: frozenset[str] = frozenset({"delisted status"})
+FETCHING_GROUPS: tuple[str, ...] = ("backfill", "run", "ths-official")
 
 
 def _subcommands(group_name: str):
@@ -481,12 +476,6 @@ def _subcommands(group_name: str):
     }
 
 
-def test_the_read_only_exemptions_still_name_real_commands():
-    """A stale exemption silently excuses whatever later takes that name."""
-    registered = {name for group in FETCHING_GROUPS for name in _subcommands(group)}
-    assert READ_ONLY <= registered, f"READ_ONLY names nothing registered: {READ_ONLY - registered}"
-
-
 @pytest.mark.parametrize("group", FETCHING_GROUPS)
 def test_every_fetching_command_wires_progress(group):
     """A command that runs for an hour must say so, in every group.
@@ -495,9 +484,8 @@ def test_every_fetching_command_wires_progress(group):
     and stopped there. `cne ths-official backfill` then ran 75 minutes writing
     nothing to the terminal and nothing to `logs/` — the same
     "完全不知道程序的死活" the issue was about, in a group the sweep had not
-    looked at. `cne delisted backfill` had drifted further: an open-coded
-    `logging.basicConfig` that silenced only httpx and wrote no log file at all,
-    so neither the heartbeat nor the log tee reached it.
+    looked at. The old `cne delisted backfill` alias also had its own logging
+    path; delisted recovery now uses the canonical `backfill` command.
 
     Terminal progress is no longer each command's job — the root of the command
     tree wires it for all of them, which is what
@@ -510,7 +498,7 @@ def test_every_fetching_command_wires_progress(group):
     missing = [
         name
         for name, command in _subcommands(group).items()
-        if name not in READ_ONLY and "attach_log_file(" not in inspect.getsource(command.callback)
+        if "attach_log_file(" not in inspect.getsource(command.callback)
     ]
     assert not missing, (
         f"`cne {group}` subcommands {missing} leave no log file behind; call "

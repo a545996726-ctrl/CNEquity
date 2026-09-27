@@ -4,6 +4,7 @@
 
 ## [0.12.0] — 未发布
 
+- 合并退市行情补数入口到 `cne backfill daily_bars --profile delisted --start DATE`；旧 `cne delisted backfill` 停止执行并提示新写法，`cne delisted status` 保留。
 - 新增逐合约期货、期权、连续合约、希腊字母和期货分钟线；通过 `[futures] enabled = true` 显式启用，不进入默认初始化。
 - 衍生品与 A 股使用独立的证券身份、日期语义和覆盖检查。首次/末次行情观察不等于权威上市/到期日期；具体口径见[衍生品指南](docs/recipes/derivatives.md)。
 - 研究快照增加 `--research`，封装完整数据依赖、覆盖证据与非敏感读取配置；支持恢复与双湖差异比较。

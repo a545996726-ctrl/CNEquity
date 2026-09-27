@@ -116,11 +116,17 @@ cne audit --full          # 整湖结构扫描 + 刷新 health-latest.json
 
 ### backup_meta.sh
 
-打包 `meta/manifest.db`、`state/`、`quality/`、`revisions/`、`source_snapshots/`、
-`source_health/` 和 `stability/` 为 `meta-YYYYMMDD-HHMMSS.tar.gz`，按保留天数清理旧包。
-因此磁盘故障不会让 revision receipt、PIT 源快照或已积累的验收窗口归零。
+打包 `meta/manifest.db`、`state/`、`quality/`、revision **收据**、
+`source_snapshots/`、`source_health/` 和 `stability/` 为
+`meta-YYYYMMDD-HHMMSS.tar.gz`。不含 `meta/revisions/data/` 中的数据版本文件或
+`curated/`；它是元数据备份，不能单独恢复完整数据湖。
 
-参数：`backup_meta.sh [config_path] [backup_dir] [retention_days]`
+参数：`backup_meta.sh [DATA_ROOT] [BACKUP_DIR] [RETENTION_DAYS] [RETENTION_COUNT]`。
+不传 `DATA_ROOT` 时使用 `CNE_DATA_ROOT`，否则使用仓库的 `data/cnequity`，
+**不会**从 `CNE_CONFIG` 读取湖路径。默认保留 14 天且最多 30 份；
+备份目录默认在湖内，需要磁盘级容灾时设置湖外的 `CNE_BACKUP_DIR`。
+运行环境宜安装 `sqlite3` 命令，以便脚本用 SQLite 备份 API 复制运行中的 manifest；
+缺少它时脚本退回文件复制，应在采集停止后备份。
 
 ### run_catchup.py
 
@@ -149,7 +155,8 @@ cne init --profile full --since 2016-01-01
 cne init --resume --run-id <你的运行ID>
 ```
 
-已移除写死个人日期/run ID 的 `run_init_2016.py`、`retry_init_finalize.py`，以及一次性 `probe_ths_official_limits.py`、`china_egress_backfill.sh`。源能力诊断用 `cne sources probe --list` 后选择最小探测；回填先查看 `cne backfill <dataset> --plan`。个人任务过程材料不随包发布，见[升级与反馈](../getting-started/upgrading.md)。
+源能力诊断先用 `cne sources probe --list` 选最小探测；回填前先看
+`cne backfill <dataset> --plan` 的范围与请求估算。
 
 ### accept_backfill.py
 
@@ -165,7 +172,7 @@ python scripts/accept_backfill.py check --compare /tmp/counts.json
 ### delisted_ops.py
 
 重建退市宇宙（幸存者偏差修复）的四个子命令。**读**目录和拉行情留在 CLI
-（`cne delisted status` / `cne delisted backfill`）——那两个有日常形态；这四个没有。
+（`cne delisted status` / `cne backfill daily_bars --profile delisted`）——那两个有日常形态；这四个没有。
 
 | 子命令 | 说明 |
 |--------|------|
@@ -177,7 +184,7 @@ python scripts/accept_backfill.py check --compare /tmp/counts.json
 ```bash
 cne delisted status                                   # 已知多少
 python scripts/delisted_ops.py discover --limit 500
-cne delisted backfill --since 2016-01-01
+cne backfill daily_bars --profile delisted --start 2016-01-01
 python scripts/delisted_ops.py repair
 python scripts/delisted_ops.py reconcile
 python scripts/delisted_ops.py reconcile --apply

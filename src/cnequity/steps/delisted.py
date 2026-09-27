@@ -965,7 +965,7 @@ def repair_delisted_instruments(
     Re-fetching those bars would be pure cost — derive ``list_date`` /
     ``delist_date`` from the spans that are already on disk, stage the union with
     the live snapshot, and mark the catalogued symbols ingested so
-    ``cne delisted backfill`` only fetches the true gaps.
+    ``cne backfill daily_bars --profile delisted`` only fetches the true gaps.
     """
     from cnequity.quality.cross_checks import RETIRED_GAP_DAYS
     from cnequity.steps.http_common import write_fetched

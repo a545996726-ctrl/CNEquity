@@ -1376,36 +1376,6 @@ def test_delisted_status_summarises_the_catalogue(cfg_path, monkeypatch):
     assert payload["pending_probe"] == 1
 
 
-def test_delisted_backfill(cfg_path, monkeypatch):
-    class FakeManifest:
-        finish_kwargs = None
-
-        def start_run(self, *a, **k):
-            return "bf-1"
-
-        def finish_run(self, *a, **k):
-            self.finish_kwargs = k
-
-    class FakeEngine:
-        def __init__(self, cfg):
-            self.manifest = FakeManifest()
-
-        def run_step(self, name, trade_date, run_id):
-            return {"rows_written": 4}
-
-    monkeypatch.setattr("cnequity.cli.backfill_cmds.JobEngine", FakeEngine)
-    monkeypatch.setattr(
-        "cnequity.steps.delisted.backfill_delisted_bars",
-        lambda cfg, run_id, since: {"rows_read": 8, "rows_written": 8, "symbols": 2},
-    )
-    result = CliRunner().invoke(
-        cli, ["delisted", "backfill", "--config", cfg_path, "--since", "2020-01-01"]
-    )
-    assert result.exit_code == 0, result.output
-    assert "bf-1" in result.output
-    assert "请改用" in result.output
-
-
 def test_delisted_profile_plan_is_offline(cfg_path, monkeypatch):
     monkeypatch.setattr(
         "cnequity.cli.backfill_cmds._run_delisted_profile",
@@ -1663,7 +1633,6 @@ def test_bad_sql_is_an_error_not_a_traceback(cfg_path):
         ["backfill", "daily_bars", "--end", "2026-13-45"],
         ["run", "daily", "--trade-date", "notadate"],
         ["derive", "adj_factors", "--start", "notadate"],
-        ["delisted", "backfill", "--since", "notadate"],
     ],
 )
 def test_a_mistyped_date_is_a_usage_error_not_a_traceback(cfg_path, argv):

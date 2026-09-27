@@ -1,8 +1,7 @@
-"""`delisted status` and `delisted backfill`.
+"""Read the delisted catalogue with `delisted status`.
 
-Rebuilding the catalogue is a one-off project and lives in
-`scripts/delisted_ops.py`; reading it and fetching what it names are routine, so
-they stayed here.
+Rebuilding the catalogue is a one-off project in `scripts/delisted_ops.py`.
+Reading it stays here; history fetching uses `backfill daily_bars`.
 """
 
 from __future__ import annotations
@@ -11,10 +10,9 @@ import json
 
 import click
 
-from cnequity.cli._root import cli
+from cnequity.cli._root import cli, moved_hints
 from cnequity.cli._shared import (
     _cfg,
-    attach_log_file,
     config_option,
     parse_date_option,
 )
@@ -23,9 +21,12 @@ from cnequity.cli._shared import (
 # not its failure.
 
 
-@cli.group("delisted")
+@cli.group(
+    "delisted",
+    cls=moved_hints({"backfill": "cne backfill daily_bars --profile delisted --start <date>"}),
+)
 def delisted_grp():
-    """读退市名录，并抓取它列出的历史。
+    """读取退市名录；历史行情通过 backfill daily_bars 补数。
 
     \b
     重建名录本身 —— 代码空间扫描、终态对账、instruments 修复和覆盖门禁 ——
@@ -78,23 +79,3 @@ def delisted_status(config_path: str, since: str, sample: int):
             indent=2,
         )
     )
-
-
-@delisted_grp.command("backfill")
-@config_option
-@click.option("--since", default="2016-01-01", show_default=True, help="湖窗口起点。")
-def delisted_backfill(config_path: str, since: str):
-    """兼容入口；新任务使用 backfill daily_bars --profile delisted。"""
-
-    from cnequity.cli.backfill_cmds import _run_delisted_profile
-
-    click.echo(
-        "提示：请改用 `cne backfill daily_bars --profile delisted --start YYYY-MM-DD`。",
-        err=True,
-    )
-    cfg = _cfg(config_path)
-    attach_log_file(cfg, "delisted-backfill")
-    result = _run_delisted_profile(cfg, parse_date_option(since, "--since"))
-    click.echo(json.dumps(result, indent=2, default=str))
-    if result["status"] != "success":
-        raise click.ClickException("delisted recovery has unresolved targets")

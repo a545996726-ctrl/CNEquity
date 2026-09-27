@@ -1,6 +1,7 @@
-# CNEquity · A local data foundation for China-market research
-
-**Collect once, keep it current, and research from the same traceable data.**
+<div align="center">
+  <h1>CNEquity · A local data foundation for China-market research</h1>
+  <p><strong>Collect once, keep it current, and research from the same traceable data.</strong></p>
+</div>
 
 CNEquity turns market prices, financial statements, corporate events and capital-flow data into a local Parquet lake. It handles incremental ingestion, resumable batches, quality checks and consistent queries for individual researchers and small teams.
 
@@ -58,9 +59,19 @@ The sample makes no data-source requests. Every synthetic row carries `source=mo
 - **Keep provenance and versions.** Rows carry `source`, `data_version` and `fetched_at`; immutable generations and research snapshots support later inspection.
 - **Own the storage.** Query open Parquet files through Python, DuckDB, Polars, a read-only MCP server or the dashboard.
 
+### Survivorship bias: today's roster is not a historical universe
+
+The same equal-weight buy-and-hold strategy over the same dates produces a different result when stocks that later delisted are omitted. This historical sample compares the two universe definitions:
+
+![Historical equal-weight results with delisted stocks versus survivors only](docs/assets/survivorship-gap.svg)
+
+*This historical sample illustrates universe selection. Its returns and stock counts do not describe current lake coverage or future investment performance. Delisted names are valued at their last available bar; see the [universe profiles](docs/reference/universe-profiles.md) for evidence limits.*
+
+CNEquity retains delisted identities and makes adjustment, historical membership and PIT semantics part of the query contract.
+
 ![CNEquity dashboard showing health, coverage and action items](docs/assets/cne-serve-hero-demo.png)
 
-*Illustrative dashboard screenshot, labelled ILLUSTRATIVE DEMO. Coverage and audit results depend on your lake.*
+*Illustrative dashboard screenshot, labelled ILLUSTRATIVE DEMO. Its 42/42 count, row total and size are fictional display values, not the current registry or your lake's coverage.*
 
 If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https://github.com/rootSunc/CNEquity) to find it again and help other researchers discover it.
 
@@ -74,7 +85,30 @@ If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https:
 | Valuation, flows and sector rotation | Valuation, capital and structure datasets · [query guide](docs/datasets/query-guide.md) | Distinguish backfillable history from snapshots collected over time |
 | Futures curves, option chains and Greeks | Contract-level prices and derived datasets · [derivatives](docs/recipes/derivatives.md) | Opt in; verify exchange coverage and lifecycle evidence |
 
+## Data coverage
+
 The current development tree registers **51 datasets: 46 curated + 5 derived**, organized into L0–L9. This includes compatibility entries, optional datasets and an inactive-source placeholder; it does **not** promise 51 complete historical tables after installation. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
+
+| Tier | Research use | Representative datasets |
+|---|---|---|
+| L0 | Reference | Instruments, trading calendar, trading status |
+| L1 | Market data | Daily and index bars, adjustment factors, optional minutes and trade snapshots, delisting events |
+| L2 | Corporate events | Actions, announcement index, disclosure schedule |
+| L3 | Fundamentals | Financials, valuations, share structure, holders, consensus |
+| L4 | Capital and flows | Northbound, margin trading, dragon-tiger lists, block trades, fund flows |
+| L5 | Industry structure | Index constituents, industry and sector membership, industry index |
+| L6 | Macro | Indicators and market breadth |
+| L7 | News and rotation | News, wires, sentiment, rankings, sector prices and flows |
+| L8 | Risk and regulation | Share unlocks and regulatory events |
+| L9 | Derivatives | Futures and options contracts, contract bars, continuous futures, Greeks and minutes |
+
+Minutes, trade snapshots and futures/options are disabled by default. Check each source's historical horizon and actual coverage after opting in.
+
+## Architecture
+
+![CNEquity architecture from multiple sources through ingestion and a local Parquet lake to research consumers](docs/assets/architecture-diagram-v3.png)
+
+Adapters and batch orchestration collect data into staging; validated batches become curated or derived data. Quality checks, Python and SQL queries, the dashboard and MCP consume published data. The diagram explains responsibilities; see the [data flow](docs/architecture/data-flow.md) and [catalog](docs/datasets/catalog.md) for current source protocols and enabled datasets.
 
 ## Build a lake you can keep updating
 

@@ -142,20 +142,16 @@ bars_15m = (
 ## 需要 API Key 的覆盖区间
 
 同花顺官方 API（`ths_official`）是**可选源**：没有 Key 的湖保持原有来源，日更不受影响
-（见 [产品边界](../architecture/overview.md)）。它已经改变的覆盖如下，
-`source` 列可直接分辨：
-
-| 数据集 | 区间 | 行数 | 说明 |
-|---|---|---|---|
-| `financial_statement_items` | 2016–2024 的 `balance` / `cashflow` | 1,495,007 | 此前这两张表在该区间覆盖 0–37 只标的，而 `income` 是 4,623–5,558。披露日借自同期 `income` 行 |
-| `daily_bars` | 2005-01-01 – 2015-12-31 | 4,398,523 | 由非官方 `ths` 抓取换为持牌来源，占该区间 98.68%。2005 年前够不到服务端历史下界 |
+（见 [THS 接入](../getting-started/ths-official.md)）。启用后可按许可与实际覆盖补
+财报空缺和历史日线，`source` 列标明来源。服务端历史下界、字段完整性与 PIT
+证据仍须按自己的查询窗口验收，不能把另一湖的行数或区间当作本湖承诺。
 
 以下能力只写 `meta/source_snapshots`，**不进 curated**，仅供 `cne audit` 的仲裁检查使用：
 `adj_factor_arbitration`、`daily_bars_arbitration`、`financial_statement_peer`。
 无快照时它们静默，不影响其余检查。
 
-估值快照是唯一**只能向前累积**的一项：上游不提供估值历史，当天没采就永远补不回来，
-因此 `ths_official_snapshot` 步骤配置在日更 `finalize` wave 的 `audit` 之前。
+THS 官方估值快照只能从启用后按日积累，不能用旧日期重放伪造观察。
+这不等于 `valuation_metrics` 完全没有其他历史来源；不同来源的覆盖与口径须分开核验。
 
 完整背景见 [THS 接入](../getting-started/ths-official.md)。
 
@@ -187,11 +183,11 @@ bars_15m = (
 |--------|--------|------|------|------|------|------|
 | daily_bars | trade_date | symbol, trade_date | by_date | ✓ | tdx_protocol | tip 缺口东财 clist 路由进 curated；多日 kline；BJ→sina；snapshot 仍留 audit |
 | index_bars | trade_date | symbol, trade_date, frequency | by_date | ✓ | tdx_protocol | |
-| minute_bars | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 1m。**可选**，默认关；`[minute_bars]` 配置范围；**源端只有 95 个交易日**（见下「历史视野」）；全市场约 35MB/日；required=false |
-| minute_bars_5m | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 5m。同上可选；**491 个交易日（约 2 年），是唯一有真历史的日内频率**；全市场约 6MB/日；required=false |
+| minute_bars | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 1m。**可选**，默认关；`[minute_bars]` 配置范围；**源端只有 95 个交易日**（见下「历史视野」）；落盘量随标的数与窗口增长；required=false |
+| minute_bars_5m | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 5m。同上可选；**491 个交易日（约 2 年），是唯一有真历史的日内频率**；落盘量随标的数与窗口增长；required=false |
 
 两个日内数据集共用一组质量检查：主键重复（通用 `pk_unique`）、时段外 bar、`trade_date` 与 `bar_time` 不一致、会话缺口，以及**与日频的成交量+成交额双向对账**。
-| trade_ticks | trade_date | symbol, trade_date, tick_seq | by_date | ✓ | tdx_protocol | 分笔。**可选**，默认关；`[trade_ticks]` 独立配置；**不是逐笔成交**（见下）；源端回溯至 **2024-01-02**；watchlist 200 只约 7MB/日；required=false |
+| trade_ticks | trade_date | symbol, trade_date, tick_seq | by_date | ✓ | tdx_protocol | 分笔。**可选**，默认关；`[trade_ticks]` 独立配置；**不是逐笔成交**（见下）；源端回溯至 **2024-01-02**；落盘量随 watchlist 与窗口增长；required=false |
 | adj_factors | trade_date | symbol, trade_date, adjust_type | derived | ✓ | sina | 仅 hfq；股票读 `f`、ETF/LOF 读 `s`；`cne derive adj_factors` |
 | delisting_events | —（单文件 merge） | symbol | derived | — | derived | 每只退市股的结尾形态；补到的 bars 来自 sina；`cne backfill daily_bars --profile delisted` 产出 |
 
@@ -210,7 +206,7 @@ bars_15m = (
 | financial_statement_items | report_period | symbol, report_period, statement_type, item_code | by_date PIT | — | eastmoney | 按报告期分区；`cne backfill` 默认自 2001 起（`--start`/`--end` 分块）；PIT 同时受 `announce_date` 与 `fetched_at` 截止；baostock 不用于 FSI |
 | valuation_metrics | trade_date | symbol, trade_date | snapshot | ✓ | eastmoney | 回填：baostock |
 | analyst_consensus | forecast_date | symbol, forecast_date | snapshot | ✓ | eastmoney | |
-| share_structure | change_date | symbol, change_date, announce_date | by_date PIT | — | eastmoney | 总股本/流通/限售/自由流通。**按变动日期扫，不是按报告期**：END_DATE 是股本变动日，2025Q3 有 88 个不同日期 |
+| share_structure | change_date | symbol, change_date, announce_date | by_date PIT | — | eastmoney | 总股本/流通/限售/自由流通。**按变动日期扫，不是按报告期**：END_DATE 是股本变动日，不能只请求季末日期 |
 | shareholder_counts | count_date | symbol, count_date, announce_date | by_date PIT | — | eastmoney | 股东户数与户均持股，筹码集中度输入。**旬末/月末也披露**：不能只按季末日期筛选 |
 | top_holders | record_date | symbol, record_date, holder_scope, holder_rank, holder_name, announce_date | by_date PIT | — | eastmoney | 一张表两个口径：`holder_scope=total`（前十大股东）/ `float`（前十大流通股东）。披露日期不一定落在季末 |
 
@@ -225,11 +221,10 @@ bars_15m = (
 | northbound_flows | trade_date | trade_date, channel | by_date | ✓ | eastmoney | 2d |
 | dragon_tiger | trade_date | symbol, trade_date, reason | by_date | ✓ | eastmoney | 1d；备源见下 |
 | block_trades | trade_date | symbol, trade_date, price, volume | by_date | ✓ | eastmoney | 1d；备源见下 |
+| institutional_holdings | report_period | symbol, holder_type, report_period | by_date | — | eastmoney | — |
 
-**这两个现在有交易所备源。** `margin_trading` 早已按
-[产品边界](../architecture/overview.md) 换成交易所自行发布的数据，龙虎榜与大宗交易本应同样处理
-——两者也都由交易所公开披露。此前一版找不到稳定的官方接口，所以没有换；现已找到并接上：深交所
-`ShowReport` 的 `CATALOGID=1265`（龙虎榜）与 `1842_xxpl_after`（大宗交易），上交所对应 `1902`。
+`dragon_tiger` 与 `block_trades` 有交易所备源：深交所 `ShowReport` 的
+`CATALOGID=1265`（龙虎榜）与 `1842_xxpl_after`（大宗交易），上交所对应 `1902`。
 
 **是备源，不是换源。** 按 [产品边界](../architecture/overview.md)，东财仍是 `primary_source`，
 交易所是 `backup_source`；**东财能答的时候备源根本不会被问**。failover 落在 fetch 层，所以 provenance、
@@ -237,7 +232,6 @@ bars_15m = (
 
 **两个交易所都不发布北交所**，这一点记在 `backup_gaps` 里，而不是让它看起来像是被覆盖了。
 `share_unlock_schedule` 没有给备源：深交所登记的是**已发生**的解禁，而这个数据集是前瞻日历，两者不是同一件事。
-| institutional_holdings | report_period | symbol, holder_type, report_period | by_date | — | eastmoney | |
 
 ## L5 结构行业
 

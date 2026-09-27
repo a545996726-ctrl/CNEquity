@@ -119,10 +119,10 @@
 | 主源 | eastmoney datacenter：`cnbond_yield_10y`（`RPTA_WEB_TREASURYYIELD`.`EMM00166466`）、`shibor_3m`（`RPT_IMP_INTRESTRATEN`，`INDICATOR_ID=203`）、`lpr_1y`（`RPTA_WEB_RATE`.`LPR1Y`）、`pmi_manufacturing`、`m2_yoy` |
 | 补充源 | pboc：`social_financing`（社融增量） |
 | 主键 | (indicator_id, obs_date) |
-| 日更 | 三个利率逐日请求（`='{日期}'` 过滤），只走水位之后的交易日；两个日频利率另外回看最近 5 个交易日（一次范围查询）。运行当天的值还没发布（10Y 国债多在北京时间傍晚更新，常晚于日更）只记 `daily_series_pending` 提示、照常写入，次日回看补上；离开运行日仍缺的才是 `daily_series_gap` warning、挡住合并并重试。原先当天缺值就整批 warning，2026-09-22 至 24 连续三天其余行也没写进湖。PMI、M2、社融每次都把整段历史读一遍 |
+| 日更 | 三个利率逐日请求（`='{日期}'` 过滤），只走水位之后的交易日；两个日频利率另外回看最近 5 个交易日（一次范围查询）。运行当天的值还没发布时只记 `daily_series_pending` 提示、照常写入，次日回看补上；离开运行日仍缺的才是 `daily_series_gap` warning、挡住合并并重试。PMI、M2、社融每次都把整段历史读一遍 |
 | 回填 | `cne backfill macro_indicators --start 2016-01-01`：两个日频利率按窗口各发一次分页范围查询（`(COL>='…')(COL<='…')`），不再逐日请求；同时照旧做一次当天的日更抓取。默认起点 2016-01-01，`--end` 不超过当天 |
 | 历史深度 | 10Y 国债与 Shibor 的历史起点不同；缺失交易日记录为 `daily_series_gap`，以实际覆盖报告为准。 |
-| 只留交易日 | 银行间市场在调休周末也开市，范围查询会带回这些日子（全史 Shibor 133 天、10Y 187 天），回填丢弃，与日更的行密度一致 |
+| 只留交易日 | 银行间市场在调休周末也开市，范围查询可能带回这些日子；回填按项目交易日历过滤，与日更的行密度一致 |
 | 已知限制 | `lpr_1y` 不走范围回填：`LPR1Y` 列 2013-10-25 至 2019-08 是旧的逐日贷款基础利率，此后才是改革后的月度 LPR，范围查询会把两种基准记在同一个指标下。它仍只在日更当天落盘 |
 
 #### futures_bars / option_bars / futures_contracts / option_contracts
@@ -171,7 +171,7 @@
 - 到账日早于除权日是来源笔误（中登在除权日划付 A 股现金，已见上一年模板未改、误写登记日两类）：解析时拒收，已存的由上述修复当作未知处理，找不到真实日期就清空。
 - 同一事件多次抓取时，**证据等级高者胜过更新的抓取**（发行人公告 > 供应商日期 > 无），同级才比新旧，见 [产品边界](../architecture/overview.md)。普通历史回填不会抹掉已核实的金额、到账日或已审送转条款。
 - 北交所官网[新旧代码对照表](https://www.bse.cn/service/code_mapping.html)（248 组）只用作检索发行人公告的别名，**不是**换码生效日或持仓承接证明。
-- 需要完整现金日程的消费者，可对 `ex_date_rule_applies(symbol)`（`cnequity.domain.action_evidence`）为真的代码——沪深北 A 股股票——以除权日代替缺失的到账日：2016–2024 年 2.7 万余条已报告日期中，除两条晚一天外全部等于除权日。基金、CDR、B 股不适用，仍需报告日期。
+- 需要完整现金日程的消费者，可对 `ex_date_rule_applies(symbol)`（`cnequity.domain.action_evidence`）为真的代码——沪深北 A 股股票——按自己的研究策略暂用除权日估算缺失的到账日，并明确标记为估算值；不要回写为来源报告的 `payment_date`。实际到账日可能不同。基金、CDR、B 股不适用，仍需报告日期。
 
 | 项 | 值 |
 |------|-------|
@@ -195,7 +195,7 @@
 | 频率 | compact 之后每日 |
 | 主键 | (symbol, trade_date, adjust_type) |
 | 说明 | 外部累计因子对齐 daily_bars；`adj_close = close * factor` |
-| **已知缺口** | 股票从 Sina 的 `f` 字段取因子，ETF/LOF 从 `s` 字段取因子（hfq 直接使用 `s`，qfq 使用 `1/s`）。新浪**确实覆盖北交所**（`bj430017` 等都能取到）。过去曾出现过因 derive 只从水位向前追加而导致的因子缺口；现已修复该路径。新上市未交易、已退市或源端无因子的标的仍可能缺失，具体数量以最新 `adj_factor_coverage` / `adj_factor_source_unavailable` finding 和 `meta/quality/health-latest.json` 为准。对正式退市且新浪明确返回空序列的标的，派生会写入 `meta/state/adj_factors.json.source_unavailable_symbols`，停止无效重试但不会伪造因子。 |
+| **已知缺口** | 股票从 Sina 的 `f` 字段取因子，ETF/LOF 从 `s` 字段取因子（hfq 直接使用 `s`，qfq 使用 `1/s`）。新浪支持部分北交所标的，但新上市未交易、已退市或源端无因子的标的仍可能缺失；以最新 `adj_factor_coverage` / `adj_factor_source_unavailable` finding 和 `meta/quality/health-latest.json` 为准。对正式退市且新浪明确返回空序列的标的，派生会写入 `meta/state/adj_factors.json.source_unavailable_symbols`，停止无效重试但不会伪造因子。 |
 | **查询侧后果** | `load(adjust="hfq")` 默认 `strict_adj=False`，缺因子的行按 `factor=1.0` 返回，即**未复权价出现在复权结果里**，只由 `adj_is_exact=False` 标记。实际不精确行数随查询窗口、标的范围和最新因子覆盖变化；请以结果中的 `adj_is_exact=False` 以及最新 `meta/quality/health-latest.json` 的 `adj_factor_coverage` finding 为准。|
 | **怎么办** | 要严格失败而不是静默降级：`load(..., strict_adj=True)`。**它不是默认值**：新上市的票在拿到第一个因子前必然缺，所以严格模式会让 `universe="all_a"` 的 hfq 查询长期抛错。默认容忍 + `adj_is_exact` 标记 + 审计告警，是在「不静默污染」和「查询可用」之间的取舍 |
 | **自愈** | `derive_adj_factors` 每次增量运行都会找出「有 bar 但因子够不到」的标的并重排其完整历史，单次上限 500 只。所以 `cne backfill daily_bars` 补的历史会在随后的日更里自动补上因子，无需 `--full` |
@@ -229,7 +229,7 @@
 | 覆盖 | **2014-11-17 → 2024-08-16**（深股通自 2016-12-05）。回填：`cne backfill northbound_flows` |
 | 已知限制 | 交易所自 **2024-08-19** 起停止披露每日北向净买入，此后所有行 `NET_DEAL_AMT` 为 null。这些行**不落盘**（不补零），因此水位永久停在 2024-08-16；注册表将该日期标为 `source_retired_date`，`cne status` / `cne verify` 不会把源停止误报为 STALE。 |
 | 单位 | 报表金额列按 **百万元**，落盘换算为元。同一行的 `HOLD_MARKET_CAP` 却是元——该报表混用单位，改字段时要重新标定 |
-| 一次一请求 | 该报表拒绝 `TRADE_DATE` 范围谓词（`InputMismatchException`），所以取全量后在本地切窗；两条通道全史约 5k 行 |
+| 一次一请求 | 该报表拒绝 `TRADE_DATE` 范围谓词（`InputMismatchException`），所以取全量后在本地切窗；实际返回行数随来源修订增长 |
 
 #### margin_trading
 
@@ -267,10 +267,10 @@
 | 主源 | eastmoney（`RPT_F10_EH_EQUITY` / `RPT_F10_EH_HOLDERNUM`） |
 | 分组 | fundamentals@17:35 |
 | 主键 | (symbol, change_date, announce_date) / (symbol, count_date, announce_date) |
-| 采集方式 | **按日期区间整市场扫**，不是按标的循环，也不是按报告期。`RPT_F10_EH_EQUITY.END_DATE` 是股本变动日；股东户数在旬末/月末也披露（2025-07-10 有 894 行）。只扫季末会捞回一堆看着合理的行，然后静默漏掉其余大部分 |
+| 采集方式 | **按日期区间整市场扫**，不是按标的循环，也不是按报告期。`RPT_F10_EH_EQUITY.END_DATE` 是股本变动日；股东户数在旬末/月末也披露。只扫季末会静默漏掉其他披露日 |
 | 日更范围 | 按 `NOTICE_DATE` 回看 30 天。窗口开在公告日而不是变动日：几周前生效的变动今天才公告，按变动日开窗永远看不到它 |
 | PIT | `announce_date` 取自 `NOTICE_DATE`，进主键 |
-| 源端历史底 | `share_structure` **1990**（1990 年 19 行，之前没有）；`shareholder_counts` **1992**（1992 年 25 行，1990/1991 为空）。均为固定底，不随今天滚动 |
+| 客户端回填起点 | `share_structure` 为 **1990-01-01**，`shareholder_counts` 为 **1992-01-01**；这是注册表设置的历史起点，不保证来源每个日期都有记录 |
 
 #### top_holders
 

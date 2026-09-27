@@ -8,18 +8,10 @@
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| `EastMoney datacenter RPT_… rejected schema: XXX列不存在 (code=9501)` | 东财改了报表列名；旧列整报拒绝 | 在对应 adapter 的 `_COLUMNS` 换成新名；契约清单自动跟随 |
-| 日更整组失败、错误带 report 名 | 同上（fail-loud，不静默空表） | 修列后重跑；用直播探针确认 |
+| `EastMoney datacenter RPT_… rejected schema: XXX列不存在 (code=9501)` | 来源返回的列与当前客户端契约不一致 | 先停受影响的组，保留报表名与错误码；检查是否已有修复版本，或提交脱敏 Issue，不要把失败当空数据 |
+| 日更整组失败、错误带 report 名 | 同一列契约错误会阻止该组发布 | 更新修复版本后按失败 run 重试，并复核水位与实际列；不要靠反复请求或跳过校验推进水位 |
 
-```bash
-# 离线：契约清单完整 + 9501 文案
-uv run pytest tests/unit/test_datacenter_contracts.py -q
-# 外网：每个 required 报表 pageSize=1，键 ⊇ 契约列
-uv run pytest -m network tests/unit/test_datacenter_live_contracts.py -q
-```
-
-清单入口：`src/cnequity/adapters/eastmoney/datacenter_contracts.py`。
-已退役报表（如 `RPT_ECONOMICCALENDAR`）标 `required=False`，不进直播探针。
+维护者需在隔离环境核对新旧列语义后更新适配器与契约测试；用户无需手工修改安装包。
 
 ## 症状：baostock / 免费源「黑名单」或频繁失败
 
@@ -39,7 +31,7 @@ rate-limit alone 不能阻止 N 个会话同时 `login()`。
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| 最近几天只有几百只、`valuation_bars_low_coverage` | 日更 EastMoney `capital` 未跑通，baostock 历史曾以 `end=today` 只写完部分标的 → 稀疏 tip；旧逻辑把 watermark 推到 max partition | **已修**：baostock `end` 封顶在最近「完整」东财 tip（覆盖 ≥70% 当日 bars）；watermark 拒绝推进到稀疏 tip |
+| 最近几天只有少量标的、`valuation_bars_low_coverage` | 当日估值快照可能不完整 | 查看 `capital` 组和源状态；水位门禁会拒绝把稀疏分区当作完整当日覆盖 |
 | `cne status --datasets` valuation STALE + 覆盖不足 | 可能是历史窗口或 tip 抓取不完整 | 检查缺口日期与来源。历史部分使用可回填源；当前快照只能修当日，不能通过 `--trade-date` 将今天的数据标成历史 |
 
 ```bash
@@ -50,13 +42,14 @@ cne run daily --group capital
 cne status --datasets
 ```
 
-审计 finding `valuation_watermark_coverage_gate`：水位曾越过完整日，已被 compact/reconcile 拉回。
+审计 finding `valuation_watermark_coverage_gate` 用于指出水位与当日截面不一致；
+按实际缺口修复后再检查，不能只看最大日期。
 
 ## 症状：manifest 里大量 status=running 的僵尸 run
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| `cne status` 显示 `orphaned_running_runs > 0` | 进程被杀 / OOM，旧代码未在 `finally` 里 `finish_run`；status 从不自动 reconcile | **已修**：每次 `cne run daily` / `cne run retry` 入口心跳感知 reconcile；retry 全绿也会 `finish_run` |
+| `cne status` 显示 `orphaned_running_runs > 0` | 进程被杀或 OOM，run 留在 `running` | 确认原进程已退出；下一次 `cne run daily` / `cne run retry` 会核对并恢复孤儿 run |
 | 需要立刻清理 | — | `cne run clean --reconcile-runs`（跳过仍持锁的 live run） |
 
 长任务（baostock 回填）靠 **batch heartbeat** 保活，不会仅因 `started_at` 超过 1h 被误杀。
@@ -65,7 +58,7 @@ cne status --datasets
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| 日志 `worker pool broke (likely OOM under load); retrying … serially` | `ProcessPoolExecutor` 一子进程死后整池毒化 | **已修**：未完成 batch 串行重试；若子进程已 `finish_batch(success)` 则**跳过重拉**（避免 INSERT OR REPLACE 降级成功行） |
+| 日志 `worker pool broke (likely OOM under load); retrying … serially` | 一个子进程退出导致 worker 池不可用 | 未完成批次会串行重试；保留日志检查 OOM 和仍失败的范围，不要手工删除成功批次 |
 | macOS 上频繁 OOM / 池崩溃 | TDX 客户端非 fork-safe + `workers>1` | `cne config validate` **拒绝** Darwin 上 `workers>1`；生产用 `workers = 1`（见 runbook / `daily_pipeline.sh`） |
 | Windows 上 `import fcntl` / 文件锁失败 | 旧版用 Unix-only `fcntl.flock` | 升级到含 `cnequity.file_lock` 的版本；锁在 Win/POSIX 上语义一致 |
 | Windows 上 DuckDB 视图空 / 路径错 | 反斜杠进了 `read_parquet` SQL | 新版本用 `as_posix()`；确认 `data.root` 可读写后重跑 `cne init` / 刷新视图 |
@@ -87,9 +80,9 @@ core 组每个交易日都失败，`daily_bars` 水位不前进，当天抓回�
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | `RuntimeError: daily_bars <start>..<end>: N interior symbol×session key(s) remain absent` | 窗口内有标的缺了中间某个交易日，且主源与所有备源都补不上 | 先看缺的是哪些标的（见下），再决定是收口范围还是修源 |
-| 缺的几乎都是 158/159/160/51x/52x/56x 开头的代码 | 这些是 ETF/LOF 行情代码，不在任何研究口径里，也没有哪个源稳定提供 | **已修**：`[universe].ingest` 默认 `all_a` 不再抓它们 |
+| 缺的几乎都是 158/159/160/51x/52x/56x 开头的代码 | 这些可能是 ETF/LOF，而不是默认 A 股范围 | 核对 `[universe].ingest` 与实际研究范围；默认 `all_a` 不抓 ETF/LOF，显式扩范围后要单独验收来源覆盖 |
 | 缺的是真 A 股，且只缺当天 | 备源额度被别的标的耗尽（日志里 `circuit opened … leaving N symbol(s) unresolved` / `sina bars HTTP 456`） | 等下一轮，或 `cne run retry --run-id <id>` 复用已抓到的批次 |
-| `expected key(s) remain unknown after failover`，且日志里有 `EastMoney kline circuit opened` | 东财历史主机（`push2his`）对当前出口不可达。**它挂掉时链上只剩一个逐标的源，而认定"这天本来就没数据"需要两个独立源都返回空**，所以停牌股也会卡成 unknown | **已修**：链尾补了 baostock（同样逐标的、独立风控面，停牌返回空行而非报错）。跑 `cne sources substitutes` 确认还有哪些可达源能顶上；报错本身也会列出处置命令 |
+| `expected key(s) remain unknown after failover`，且日志里有 `EastMoney kline circuit opened` | 东财历史主机（`push2his`）对当前出口不可达；仅有一个源返回空不足以证明该日无需行情 | 跑 `cne sources limits` 看冷却，再用 `cne sources substitutes` 核对独立备源；保留未解决键并在来源恢复后定向补数，不把空结果当作停牌证据 |
 
 缺失明细写在 `meta/quality/findings/<run_id>.json`，带 `missing_symbols` 与 `sample_keys`：
 

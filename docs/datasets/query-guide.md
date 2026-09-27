@@ -76,20 +76,21 @@ bars = load("daily_bars", start="2024-01-01", adjust="hfq", strict_adj=True)
 ## Universe 过滤
 
 ```python
-bars = load("daily_bars", start="2024-01-01", universe="all_a")
+bars = load(
+    "daily_bars",
+    start="2024-01-01",
+    profile="cn_a_sh_sz_research_v1",
+)
 ```
 
-如果研究范围明确只包含沪深两市，可使用：
+`cn_a_sh_sz_research_v1` 明确限定沪深两市，并在读取时严格核验证券身份、
+逐日交易状态、历史 ST 和退市证据；缺少收据会拒绝返回。它不会把北交所缺口
+藏在“全 A”标签下。需要包含北交所时可显式选
+`cn_a_all_experimental_v1`，但该画像仍标为实验性，不应当作已验收的研究口径。
+画像版本与哈希的用法见[股票池画像](../reference/universe-profiles.md)。
 
-```python
-bars = load("daily_bars", start="2024-01-01", universe="all_a_sh_sz")
-```
-
-`all_a_sh_sz` 是显式的 SH/SZ 子集，不是“暂时忽略北交所”；研究记录中必须保留
-这个 universe 名称。它适用于北交所历史 ST 数据源尚未配置的阶段，不能据此宣称结果
-覆盖沪深北全 A。
-
-`all_a` 规则（`query/universe.py`）：
+旧的 `universe="all_a"` / `"all_a_sh_sz"` 参数仍供兼容使用；前者会发出
+`DeprecationWarning`，两者都不会自动成为严格画像。兼容过滤的基础规则：
 
 1. **instruments**：`list_date <= trade_date`，且未退市或 `delist_date > trade_date`
 2. 排除 CDR（689xxx.SH）
@@ -101,11 +102,10 @@ bars = load("daily_bars", start="2024-01-01", universe="all_a_sh_sz")
 
 收据可通过重叠的深历史范围与较新尾段范围合并，但新增标的必须有首个交易日证据。北交所（BJ）可通过显式配置的 Tushare Pro 回补：2016 年使用 `bak_basic` 历史简称，2017-01-01 起使用 `stock_st`；接口需要 token，2016 年以前仍会作为源端能力限制阻塞，不能把接口空结果当成 normal。未配置 Tushare 时，BJ 仍会显式阻塞。审计项 `trading_status_coverage_start` 区分总覆盖与 `st_coverage_start`，历史研究应使用 `cne audit --full --research-start ...` 复核。
 
-需要让读取路径本身 fail-closed 时，加 `strict_universe=True`：除了逐日
-`trading_status` 覆盖，还会校验请求 symbol 范围的版本化 ST 证据收据；`all_a` 缺收据或
-包含无历史 ST 来源的 BJ 标的会抛出 `UniverseCoverageError`，而明确使用
-`all_a_sh_sz` 时只校验沪深子集。默认的
-`strict_universe=False` 仍适合探索性查询，但不应直接作为长历史回测输入。
+显式研究画像会自动启用严格校验。若仍使用兼容参数，可加
+`strict_universe=True` 校验逐日状态和请求范围的历史 ST 证据；缺收据或
+包含无历史 ST 来源的 BJ 标的会抛出 `UniverseCoverageError`。
+默认兼容读取适合探索，不应直接作为长历史回测输入。
 
 ### 交易所覆盖
 

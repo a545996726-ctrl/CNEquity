@@ -10,13 +10,13 @@ lake's history — so it lives here rather than in the published CLI.
 What stayed in the CLI is the part with a routine shape:
 
 * ``cne delisted status``   — read the catalogue (safe, fast, no side effects)
-* ``cne delisted backfill`` — fetch the price history it names
+* ``cne backfill daily_bars --profile delisted`` — fetch the price history it names
 
 The normal order::
 
     cne delisted status                             # what is known so far
     python scripts/delisted_ops.py discover         # sweep; resumable, re-run it
-    cne delisted backfill --since 2016-01-01        # fetch what the sweep found
+    cne backfill daily_bars --profile delisted --start 2016-01-01
     python scripts/delisted_ops.py repair           # wire delist_date into instruments
     python scripts/delisted_ops.py reconcile        # audit terminals (dry-run)
     python scripts/delisted_ops.py reconcile --apply

@@ -13,7 +13,6 @@
 | `cne decision-data cash-rights` | 无 | 读取湖并输出决策资料 |
 | `cne decision-data payment-gaps` | 无 | 读取湖并输出决策资料 |
 | `cne decision-data stock-terms` | 无 | 读取湖并输出决策资料 |
-| `cne delisted backfill` | 执行时 | 补退市历史并写湖 |
 | `cne delisted status` | 无 | 读取退市状态 |
 | `cne derive` | 条件 | 写派生数据；adj_factors 等模式可访问源 |
 | `cne doctor` | 无 | 离线检查配置与环境 |
