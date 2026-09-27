@@ -1004,6 +1004,9 @@ _SPECS = [
         # baostock supplies actions for delisted names the live boards cannot
         # answer for; the THS dividend page is the explicit BJ repair route.
         supplementary_sources=("baostock", "ths"),
+        # Issuer payment-date repair can publish CNINFO and exchange notice
+        # evidence, but neither is an automatic failover for daily actions.
+        repair_sources=("cninfo", "exchange"),
         tier="L2",
         partition_col="ex_date",
         partition_granularity="year",

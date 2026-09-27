@@ -38,10 +38,14 @@ SZSE_NON_STOCK_CATEGORIES = frozenset({"债券基金", "货币市场基金", "�
 # document must pass the exact code and A-share universe checks before use.
 CNI_DOMESTIC_INDEX_METHODOLOGIES = {
     "399006": "https://www.cnindex.com.cn/docs/gz_399006_e.pdf",
+    "399330": "https://www.cnindex.com.cn/docs/gz_399330_e.pdf",
+    "399673": "https://www.cnindex.com.cn/docs/gz_399673_e.pdf",
 }
 
 
-def parse_cni_domestic_index_methodology(payload: bytes, index_code: str, url: str) -> dict:
+def parse_cni_domestic_index_methodology(
+    payload: bytes, index_code: str, url: str, *, index_evidence: dict | None = None
+) -> dict:
     """Accept only a code-matched official methodology with an A-share universe."""
     if not payload.startswith(b"%PDF-") or index_code not in CNI_DOMESTIC_INDEX_METHODOLOGIES:
         raise ValueError("unrecognized official index methodology")
@@ -52,21 +56,40 @@ def parse_cni_domestic_index_methodology(payload: bytes, index_code: str, url: s
     normalized = " ".join(content.split())
     if not re.search(rf"Index Code:\s*{re.escape(index_code)}(?!\d)", normalized):
         raise ValueError(f"index methodology does not identify {index_code}")
-    if index_code == "399006":
-        if not re.search(
-            r"All A shares listed on the ChiNext Market of Shenzhen Stock Exchange",
-            normalized,
-            flags=re.IGNORECASE,
-        ):
+    direct_scope = {
+        "399006": r"All A shares listed on the ChiNext Market of Shenzhen Stock Exchange",
+        "399330": r"All A shares listed on Shenzhen Stock Exchange",
+    }
+    parent = None
+    if index_code in direct_scope:
+        if not re.search(direct_scope[index_code], normalized, flags=re.IGNORECASE):
             raise ValueError("index methodology does not establish domestic A-share scope")
+    elif index_code == "399673":
+        if not re.search(
+            r"Index Universe\s+Constituents of the ChiNext Index", normalized, flags=re.IGNORECASE
+        ):
+            raise ValueError("index methodology does not identify ChiNext Index constituents")
+        parent = (index_evidence or {}).get("399006")
+        if (
+            not parent
+            or parent.get("index_code") != "399006"
+            or parent.get("asset_scope") != "domestic_a_shares"
+            or parent.get("source_url") != CNI_DOMESTIC_INDEX_METHODOLOGIES["399006"]
+            or not re.fullmatch(r"[0-9a-f]{64}", parent.get("payload_sha256", ""))
+        ):
+            raise ValueError("ChiNext 50 requires the archived 399006 A-share methodology")
     else:
         raise ValueError(f"index methodology has no reviewed scope rule: {index_code}")
-    return {
+    evidence = {
         "index_code": index_code,
         "asset_scope": "domestic_a_shares",
         "source_url": url,
         "payload_sha256": sha256(payload).hexdigest(),
     }
+    if parent:
+        evidence["parent_index_code"] = "399006"
+        evidence["parent_payload_sha256"] = parent["payload_sha256"]
+    return evidence
 
 
 def _code(value: object) -> str:
@@ -218,6 +241,14 @@ def parse_szse_profiles(
             and evidence.get("asset_scope") == "domestic_a_shares"
             and evidence.get("source_url") == CNI_DOMESTIC_INDEX_METHODOLOGIES.get(index_code)
             and re.fullmatch(r"[0-9a-f]{64}", evidence.get("payload_sha256", ""))
+            and (
+                index_code != "399673"
+                or (
+                    evidence.get("parent_index_code") == "399006"
+                    and evidence.get("parent_payload_sha256")
+                    == (index_evidence or {}).get("399006", {}).get("payload_sha256")
+                )
+            )
         ):
             status = "eligible"
         out.append(
@@ -238,6 +269,11 @@ def parse_szse_profiles(
                     else (
                         f"szse_official_index_methodology:{index_code}:"
                         f"sha256={evidence['payload_sha256']}:url={evidence['source_url']}"
+                        + (
+                            f":parent=399006:parent_sha256={evidence['parent_payload_sha256']}"
+                            if index_code == "399673"
+                            else ""
+                        )
                     )
                     if status == "eligible"
                     else "szse_official_etf_listing:index_asset_class_unverified"
@@ -287,6 +323,8 @@ def fetch_exchange_etf_profiles(
         tracked_codes = {
             _tracked_index(item.get("拟合指数"))[0] for item in _workbook_records(wire[1][1])
         }
+        if "399673" in tracked_codes:
+            tracked_codes.add("399006")  # required parent scope, even without a 399006 ETF
         index_evidence = {}
         for index_code, url in CNI_DOMESTIC_INDEX_METHODOLOGIES.items():
             if index_code not in tracked_codes:
@@ -295,7 +333,9 @@ def fetch_exchange_etf_profiles(
                 response = client.get(url)
                 record_http_response(config, "exchange", response)
             response.raise_for_status()
-            evidence = parse_cni_domestic_index_methodology(response.content, index_code, url)
+            evidence = parse_cni_domestic_index_methodology(
+                response.content, index_code, url, index_evidence=index_evidence
+            )
             index_evidence[index_code] = evidence
             wire.append(
                 (str(response.request.url), response.content, {"index_code": index_code}, "pdf")

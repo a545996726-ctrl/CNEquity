@@ -97,8 +97,12 @@
 仅其单市场股票、沪深京跨市场股票及科创板股票类别标为 `eligible`。跨境、债券、
 商品等明确不在范围内的类别为 `excluded`。深交所 ETF 列表提供基金和拟合指数，
 另一份官方基金列表给出投资类别：债券、货币等非股票基金可排除；股票基金还需按
-跟踪指数代码关联官方编制方案。目前仅 [399006 创业板指编制方案](https://www.cnindex.com.cn/docs/gz_399006_e.pdf)
-明确 A 股样本空间并通过核验；其他指数仍为 `unverified`。两份深交所清单必须逐代码一致。
+跟踪指数代码关联官方编制方案。已逐代码核验
+[399006 创业板指](https://www.cnindex.com.cn/docs/gz_399006_e.pdf)、
+[399330 深证100](https://www.cnindex.com.cn/docs/gz_399330_e.pdf)；
+[399673 创业板50](https://www.cnindex.com.cn/docs/gz_399673_e.pdf)的样本空间是创业板指成分股，
+须同时归档并核验 399006 的 A 股样本空间，才能标为 `eligible`。其他指数仍为 `unverified`。
+两份深交所清单必须逐代码一致。
 缺少目录记录也不能按代码前缀推断资格。数据来自[上交所 ETF 列表](https://www.sse.com.cn/assortment/fund/etf/list/)、
 [深交所 ETF 列表](https://fund.szse.cn/marketdata/etf/)和[深交所基金列表](https://fund.szse.cn/marketdata/fundslist/)。
 

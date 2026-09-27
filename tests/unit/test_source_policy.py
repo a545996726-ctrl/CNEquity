@@ -128,6 +128,21 @@ def test_an_operator_invoked_repair_is_declared_without_becoming_a_fallback():
     assert "ths_official" not in {source for source, _role in _declared_sources("sector_bars")}
 
 
+def test_corporate_action_notice_sources_are_repair_only():
+    from cnequity.compliance.source_policy import policies_for_dataset
+    from cnequity.diagnostics.substitutes import _declared_sources
+    from cnequity.domain.datasets import DATASETS
+
+    assert DATASETS["corporate_actions"].repair_sources == ("cninfo", "exchange")
+    assert {item.name for item in policies_for_dataset("corporate_actions").repair} == {
+        "cninfo",
+        "exchange",
+    }
+    assert not {"cninfo", "exchange"} & {
+        source for source, _role in _declared_sources("corporate_actions")
+    }
+
+
 def test_the_audit_no_longer_calls_a_declared_repair_source_unrouted(tmp_path):
     from datetime import date
 

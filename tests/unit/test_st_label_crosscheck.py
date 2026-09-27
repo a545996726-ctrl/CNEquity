@@ -29,6 +29,7 @@ def _lake(
     st_labeled: list[str],
     st_status: str = "st",
     delisted: set[str] | None = None,
+    asset_types: dict[str, str] | None = None,
 ) -> Config:
     root = tmp_path / "data"
 
@@ -39,7 +40,7 @@ def _lake(
         "symbol": symbols,
         "name": list(names.values()),
         "exchange": [s[-2:] for s in symbols],
-        "asset_type": ["stock"] * len(symbols),
+        "asset_type": [(asset_types or {}).get(s, "stock") for s in symbols],
         "source": ["tdx_protocol"] * len(symbols),
         "data_version": ["v1"] * len(symbols),
         "fetched_at": [datetime.now(timezone.utc)] * len(symbols),
@@ -179,6 +180,19 @@ def test_labels_without_matching_names_are_flagged(tmp_path):
     assert len(findings) == 1
     assert findings[0]["labeled_not_named"] == 9
     assert findings[0]["named_not_labeled"] == 0
+
+
+def test_etf_labels_do_not_create_stock_st_disagreement(tmp_path):
+    names = {"600000.SH": "普通股票"}
+    names.update({f"159{i:03d}.SZ": f"ETF{i}" for i in range(12)})
+    etfs = set(names) - {"600000.SH"}
+    cfg = _lake(
+        tmp_path,
+        names=names,
+        st_labeled=sorted(etfs),
+        asset_types={symbol: "etf" for symbol in etfs},
+    )
+    assert st_label_crosscheck_findings(cfg, TD) == []
 
 
 def test_symbols_missing_from_instruments_are_not_st_disagreements(tmp_path):

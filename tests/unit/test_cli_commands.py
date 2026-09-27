@@ -1499,6 +1499,17 @@ def test_backfill_trading_status_uses_dedicated_history_path(cfg_path, monkeypat
     assert "status-bf" in result.output
 
 
+@pytest.mark.parametrize("extra", [[], ["--plan"]])
+def test_backfill_trading_status_rejects_bj_before_touching_lake(cfg_path, extra):
+    result = CliRunner().invoke(
+        cli,
+        ["backfill", "trading_status", "--config", cfg_path, "--symbols", "920201.BJ", *extra],
+    )
+    assert result.exit_code != 0
+    assert "不支持 BJ 标的" in result.output
+    assert not Path(cfg_path).parent.joinpath("data").exists()
+
+
 def test_backfill_sector_bars_force_and_retry_mutex(cfg_path):
     result = CliRunner().invoke(
         cli,

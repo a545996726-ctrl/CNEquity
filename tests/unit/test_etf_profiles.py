@@ -194,6 +194,80 @@ def test_index_methodology_is_code_matched_and_only_promotes_domestic_stock(tmp_
     )
 
 
+def test_new_index_evidence_requires_direct_a_shares_or_archived_parent(monkeypatch):
+    class Page:
+        def __init__(self, content):
+            self.content = content
+
+        def extract_text(self):
+            return self.content
+
+    class Reader:
+        def __init__(self, stream):
+            code = stream.getvalue().decode().split("-")[-1]
+            scope = {
+                "399006": "All A shares listed on the ChiNext Market of Shenzhen Stock Exchange",
+                "399330": "All A shares listed on Shenzhen Stock Exchange",
+                "399673": "Index Universe Constituents of the ChiNext Index",
+            }[code]
+            self.pages = [Page(f"Index Code: {code} 3. Index Universe {scope}")]
+
+    monkeypatch.setattr("cnequity.adapters.exchange.etf_profiles.PdfReader", Reader)
+
+    def parse(code, **kwargs):
+        return parse_cni_domestic_index_methodology(
+            f"%PDF-{code}".encode(), code, CNI_DOMESTIC_INDEX_METHODOLOGIES[code], **kwargs
+        )
+
+    parent = parse("399006")
+    direct = parse("399330")
+    with pytest.raises(ValueError, match="requires the archived 399006"):
+        parse("399673")
+    with pytest.raises(ValueError, match="requires the archived 399006"):
+        parse(
+            "399673",
+            index_evidence={"399006": {**parent, "source_url": "https://example.com/other.pdf"}},
+        )
+    child = parse("399673", index_evidence={"399006": parent})
+    assert child["parent_payload_sha256"] == parent["payload_sha256"]
+
+    directory = _szse_workbook(
+        [
+            {"证券代码": "159901", "证券简称": "深100", "拟合指数": "399330 深证100"},
+            {"证券代码": "159902", "证券简称": "创50", "拟合指数": "399673 创业板50"},
+            {"证券代码": "159903", "证券简称": "跨境", "拟合指数": "HSI"},
+            {"证券代码": "159904", "证券简称": "债基", "拟合指数": "399330 深证100"},
+        ]
+    )
+    classes = {
+        code: {"fund_category": "ETF", "investment_category": category}
+        for code, category in (
+            ("159901", "股票基金"),
+            ("159902", "股票基金"),
+            ("159903", "股票基金"),
+            ("159904", "债券基金"),
+        )
+    }
+    evidence = {"399006": parent, "399330": direct, "399673": child}
+    rows = parse_szse_profiles(
+        directory, date(2026, 9, 27), fund_classes=classes, index_evidence=evidence
+    )
+    assert [row["eligibility_status"] for row in rows] == [
+        "eligible",
+        "eligible",
+        "unverified",
+        "excluded",
+    ]
+    assert "parent_sha256=" in rows[1]["classification_basis"]
+    rows_without_parent = parse_szse_profiles(
+        directory,
+        date(2026, 9, 27),
+        fund_classes=classes,
+        index_evidence={"399330": direct, "399673": child},
+    )
+    assert rows_without_parent[1]["eligibility_status"] == "unverified"
+
+
 def test_step_archives_all_three_wire_sources_before_staging(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path / "lake")
     observed = date(2026, 9, 27)

@@ -379,6 +379,12 @@ def backfill(
     if symbols is not None:
         symbols = list(dict.fromkeys(s.upper() for s in symbols))
         symbols_str = ",".join(symbols)
+    if dataset == "trading_status" and symbols:
+        bj_symbols = [symbol for symbol in symbols if symbol.endswith(".BJ")]
+        if bj_symbols:
+            raise click.ClickException(
+                "trading_status 的 Baostock 历史 ST 回填不支持 BJ 标的：" + ", ".join(bj_symbols)
+            )
     if fetch_semantics(dataset) == "snapshot" and not get_dataset(dataset).backfill_source:
         raise click.ClickException(
             f"{dataset}：不支持回填 —— 它的采集语义是 snapshot"

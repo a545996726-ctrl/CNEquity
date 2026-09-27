@@ -1511,6 +1511,11 @@ def st_label_crosscheck_findings(config: Config, trade_date: date) -> list[dict]
     if instruments is None:
         return []
     active_instruments = _active_instruments_on(instruments, trade_date)
+    if "asset_type" in active_instruments.columns:
+        # Risk-warning/ST is a stock designation. The status feed can include
+        # funds; counting its ETF labels against stock short names is a false
+        # disagreement even when the ETF name itself has no ST prefix.
+        active_instruments = active_instruments.filter(pl.col("asset_type") == "stock")
     by_name = _st_from_names(active_instruments)
     if by_name is None:
         return []
