@@ -60,7 +60,7 @@ jobs:
       - name: Public package boundary
         run: |
           python -m pip install build
-          python -m build --no-isolation --sdist --wheel
+          python -m build --sdist --wheel
           python scripts/check_public_package.py dist/*.whl dist/*.tar.gz
 
       - uses: actions/setup-node@v4
