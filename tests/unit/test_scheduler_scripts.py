@@ -587,8 +587,8 @@ def test_non_trading_skip_does_not_erase_a_soft_outage(tmp_path):
     assert _run(DAILY, "2026-09-14", env=env).returncode == 1
 
 
-@pytest.mark.parametrize("override, expected", [(None, "1"), ("0", "0")])
-def test_stale_pass_exports_push2_pause_to_the_job(tmp_path, override, expected):
+@pytest.mark.parametrize("override, expected", [(None, "unset"), ("0", "0"), ("1", "1")])
+def test_stale_pass_preserves_the_deployments_push2_policy(tmp_path, override, expected):
     cne = _stub_cne(tmp_path)
     cne.write_text(
         '#!/bin/sh\nprintf "%s" "${CNE_PUSH2_PAUSED-unset}" > "$CNE_CALL_LOG"\n',
@@ -596,6 +596,7 @@ def test_stale_pass_exports_push2_pause_to_the_job(tmp_path, override, expected)
     )
     calls = tmp_path / "calls"
     env = _stale_env(tmp_path, cne, calls)
+    env.pop("CNE_PUSH2_PAUSED", None)
     if override is not None:
         env["CNE_PUSH2_PAUSED"] = override
     result = _run(STALE, env=env)

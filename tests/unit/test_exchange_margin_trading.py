@@ -77,6 +77,39 @@ def test_a_truncated_sse_page_is_not_written_as_a_day(monkeypatch):
     assert em.fetch_sse_margin_trading(TD).is_empty()
 
 
+@pytest.mark.parametrize("second_page", ["complete", "repeated", "empty", "changed_total", "error"])
+def test_sse_margin_paginates_without_accepting_partial_days(monkeypatch, second_page):
+    from urllib.parse import parse_qs, urlparse
+
+    calls = []
+    first = {**_SSE_ROW, "stockCode": "600000"}
+    second = {**_SSE_ROW, "stockCode": "600001"}
+    last = {**_SSE_ROW, "stockCode": "600002"}
+
+    def get(url, **kwargs):
+        query = parse_qs(urlparse(url).query)
+        calls.append(query)
+        if len(calls) == 1:
+            # A server may cap a page below the requested size.
+            return _Resp({"pageHelp": {"data": [first, second], "total": 3, "pageSize": 2}})
+        if second_page == "error":
+            raise OSError("connection reset on second page")
+        rows = {
+            "complete": [last],
+            "repeated": [first, second],
+            "empty": [],
+            "changed_total": [last],
+        }[second_page]
+        return _Resp(_sse_payload(rows, total=4 if second_page == "changed_total" else 3))
+
+    monkeypatch.setattr(em, "_client", lambda: type("C", (), {"get": staticmethod(get)}))
+    out = em.fetch_sse_margin_trading(TD)
+    assert len(calls) == 2
+    assert calls[1]["pageHelp.pageNo"] == ["2"]
+    assert calls[1]["pageHelp.pageSize"] == ["2"]
+    assert out.height == (3 if second_page == "complete" else 0)
+
+
 def test_sse_skips_codes_outside_the_lake_universe(monkeypatch):
     _serve(monkeypatch, _Resp(_sse_payload([{**_SSE_ROW, "stockCode": "900902"}])))
     assert em.fetch_sse_margin_trading(TD).is_empty()

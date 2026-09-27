@@ -2962,7 +2962,35 @@ def _gapfill_tip_via_clist(
 
     # One full clist pull, then keep only missing keys so compact cannot
     # overwrite successful TDX rows for the same PK (keep=last by fetched_at).
-    full = fetch_daily_bars_clist(trade_date, config=config)
+    try:
+        full = fetch_daily_bars_clist(trade_date, config=config)
+    except Exception as exc:  # noqa: BLE001 — continue the independent recovery chain
+        from cnequity.adapters.eastmoney.host_guard import EastMoneyHostBlockedError
+
+        blocked = isinstance(exc, EastMoneyHostBlockedError)
+        logger.warning("daily_bars clist gap-fill unavailable: %s", exc)
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "filled": False,
+            "source_outcomes": {
+                "eastmoney": {
+                    "status": "blocked" if blocked else "error",
+                    "requests": 0 if blocked else 1,
+                }
+            },
+            "audit_findings": [
+                {
+                    "dataset": "daily_bars",
+                    "severity": "warning",
+                    "check": "daily_bars_clist_gapfill",
+                    "message": (
+                        f"EastMoney clist unavailable ({type(exc).__name__}); "
+                        f"{len(missing)} missing tip key(s) continue through historical fallbacks"
+                    ),
+                }
+            ],
+        }
     if full.is_empty():
         return {
             "rows_read": 0,

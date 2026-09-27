@@ -1185,7 +1185,9 @@ def validate_config(cfg: Config) -> list[str]:
         errors.append("[tdx_protocol].min_interval_ms must be >= 0")
     if cfg.tdx_lock_timeout_sec <= 0:
         errors.append("[tdx_protocol].lock_timeout_sec must be > 0")
-    if not cfg.daily_waves:
+    # Demo/sample configs support reading a small lake and deliberately omit
+    # production scheduling. `run daily` checks for waves before executing.
+    if not cfg.daily_waves and cfg.lake_profile not in {"demo", "sample"}:
         errors.append("job.daily.waves must define at least one wave")
 
     from cnequity.domain.datasets import DATASETS, intraday_datasets

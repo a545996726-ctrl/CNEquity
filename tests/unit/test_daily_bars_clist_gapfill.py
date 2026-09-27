@@ -733,6 +733,44 @@ def test_tip_clist_leftover_uses_kline(tmp_path, monkeypatch):
     assert _staged_daily_bar_symbols(cfg, run_id, tip) == set(expected)
 
 
+@pytest.mark.parametrize("paused", [True, False])
+def test_unavailable_clist_keeps_primary_rows_and_continues_recovery(tmp_path, monkeypatch, paused):
+    from cnequity.adapters.eastmoney.host_guard import Push2PausedError
+
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("daily:core")
+    tip = date(2026, 8, 18)
+    primary, missing = "600519.SH", "000001.SZ"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "primary", _bar_frame([primary], tip)
+    )
+
+    def unavailable(*args, **kwargs):
+        raise Push2PausedError("paused locally") if paused else OSError("connection reset")
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.bars.fetch_daily_bars_clist", unavailable)
+    calls = []
+
+    def recover(symbols, start, end, **kwargs):
+        calls.append(list(symbols))
+        return _bar_frame(list(symbols), tip)
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.bars.fetch_daily_bars", recover)
+    result = _finish_daily_bars(
+        cfg,
+        tip,
+        run_id,
+        start=tip,
+        end=tip,
+        expected_tdx_symbols=[primary, missing],
+        tdx_result={"rows_read": 1, "rows_written": 1, "failed_symbols": [missing]},
+        sina_result=None,
+    )
+    assert calls == [[missing]]
+    assert result["rows_written"] == 2
+    assert _staged_daily_bar_symbols(cfg, run_id, tip) == {primary, missing}
+
+
 def test_historical_tip_retry_uses_kline_not_live_clist(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     manifest = Manifest(cfg.manifest_path)

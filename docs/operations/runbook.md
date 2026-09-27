@@ -65,8 +65,8 @@ run_at = "21:00"   # 北京时间；当天日更跑过之后，只重试失败�
 `cne run daily --stale-only --groups ...` 限定补抓范围。现有事件任务的间隔和组别保留；
 额外手工安装的事件任务不由此安装器删除。
 
-补抓只重试快照类数据集（资金流、估值、人气榜等只有「当天」的数据），历史类留给下一次日更按日期补；
-补抓期间不请求 push2。
+补抓只重试按快照调度的数据集（资金流、估值、人气榜等），历史类留给下一次日更按日期补；
+补抓与主任务遵循同一 push2 配置、预算与熔断策略。是否另有历史来源，以数据集契约为准。
 
 日任务的质量错误和实际调度的 `CNE_GATE_GROUPS`（默认 core）滞后会让任务退出 1。
 soft 组仍按失败次数升级，但同一日期重试不会重复计为多天。
@@ -170,6 +170,11 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 3. 批级失败：`cne status` → `cne run retry --run-id <id>`
 4. 复核：`cne audit --full` + `cne status --datasets`
 
+`degraded` / 退出码 2 也需要查看失败步骤：成功发布的表仍可读取，但不代表组内全部数据到齐。
+例如暂停 push2 后，资金流会尝试把同花顺口径写入 `fund_flow_ths` / `sector_fund_flow_ths`；
+原东财表仍报告缺失，不能把备援表当作同口径替换。指定 `--run-id` 可重试该降级 run 的失败批次。
+跨日补跑应使用原 run 的重试入口；实时快照仍受可观测时间窗限制，不能补造过去的快照。
+
 详见 [故障排查](troubleshooting.md)。
 
 ## 服务目标（SLO）
@@ -238,7 +243,7 @@ cne status --datasets --config configs/cnequity.restore.toml
 | `CNE_CONFIG` | `configs/cnequity.toml` | 所有命令 `--config` 的默认值（显式 `--config` 优先）；调度器中请设绝对路径，不能仅靠相对路径免除 `cd` |
 | `CNE_DATA_ROOT` | 仓库的 `data/cnequity` | `backup_meta.sh` 的默认湖目录；自定义 `data.root` 时需显式设置或传第一个参数 |
 | `CNE_LOG_DIR` | `{data.root}/logs` | 日志；长跑的 `cne` 命令也会在这里留一份 |
-| `CNE_GROUPS` | 全部 6 组 | 覆盖 pipeline 组列表 |
+| `CNE_GROUPS` | 按配置选择已启用组 | 覆盖 pipeline 组列表；公共配置默认运行 6 个常规组，可选组随开关加入 |
 | `CNE_NOTIFY` | `1` | `0` 关闭通知 |
 | `CNE_BACKUP_DIR` | 湖内 backups | 备份目录 |
 | `CNE_BACKUP_RETENTION_DAYS` | 14 | 保留天数 |
@@ -262,15 +267,33 @@ cne status --datasets --config configs/cnequity.restore.toml
 
 分组模式（`--group`）各组末尾会自动 compact→audit，数据写入 curated：
 
+公共配置的常规日更组如下；自定义配置以 `[job.daily.groups]` 为准。
+
+| `--group` | 更新内容 |
+|---|---|
+| `core` | 股票池、交易日历与状态、公司行动、股票及指数日线、复权与行业指数派生 |
+| `capital` | 资金流、北向持仓与流量、融资融券、估值、板块成员 |
+| `signals` | 龙虎榜、大宗交易 |
+| `fundamentals` | 财务报表、预约披露日程、指数与行业成员、股本、股东户数 |
+| `macro_risk` | 宏观指标、市场宽度、解禁日程、商品行情 |
+| `research` | ETF 档案、机构持仓、分析师预期、热度、板块行情与资金流、情绪评分 |
+
+`cne run daily --all-groups` 顺序运行这些组，单组失败后仍继续后续组。
+失败优先返回 1；没有失败但有降级时返回 2；全部成功或正常跳过时返回 0。
+配置为周更的组按交易日历运行历史数据步骤，快照步骤仍每日运行。
+北向等数据遵循上游实际披露频率，组每天运行不表示每张表都有新日期。
+情绪评分依赖已落盘的资讯；公告、监管事件与新闻另用 `cne run events` 更新。
+前十大股东不在默认日更组中，按需使用 `cne backfill top_holders`。
+
 ```cron
 # 核心参考 + 行情 + 派生（周一至周五 16:05）
 5 16 * * 1-5 cd /path/to/cnequity && cne run daily --group core --config configs/cnequity.toml
 
 # 资金面（16:35）
-35 16 * * 1-5 cne run daily --group capital --config configs/cnequity.toml
+35 16 * * 1-5 cd /path/to/cnequity && cne run daily --group capital --config configs/cnequity.toml
 
 # 信号类（17:05）
-5 17 * * 1-5 cne run daily --group signals --config configs/cnequity.toml
+5 17 * * 1-5 cd /path/to/cnequity && cne run daily --group signals --config configs/cnequity.toml
 ```
 
 生产更推荐用 `scripts/daily_pipeline.sh`（见上文），它会串行跑完全部组并做健康检查与备份。
@@ -278,6 +301,8 @@ cne status --datasets --config configs/cnequity.restore.toml
 ## 收尾补抓
 
 正常补抓使用独立调度的 `scripts/stale_pipeline.sh`。它在较晚的窗口只处理仍落后的 snapshot 数据集，避免主日更任务内等待造成调度超时；与主任务共享锁，重叠时跳过。`daily_pipeline.sh` 保留 `CNE_STALE_RETRY=1` 兼容开关，但默认关闭。
+
+补抓遵循与主任务相同的 push2 配置，不额外关闭该来源。被封出口可在个人配置中设置 `[sources.eastmoney] push2_paused=true`，或显式传 `CNE_PUSH2_PAUSED=1`；已触发的共享熔断和预算仍会阻止请求。
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|

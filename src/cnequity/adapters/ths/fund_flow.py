@@ -227,7 +227,46 @@ def parse_board_page(
 # ---- fetching ---------------------------------------------------------------------
 
 
-def _get_page(client: httpx.Client, kind: str, page: int, config) -> str:
+def _wire_recorder(config, dataset: str, trade_date: date, run_id: str | None):
+    if config is None or not config.should_archive_raw(dataset):
+        return None
+    from cnequity.storage.raw_archive import RawArchiveError, RawPayloadArchive, begin_capture
+
+    if not run_id:
+        raise RawArchiveError(f"{dataset}: exact wire capture requires run_id")
+    scope = f"daily:{trade_date.isoformat()}"
+    nonce = begin_capture(config, dataset, run_id, source=SOURCE, request_scope=scope)
+    archive = RawPayloadArchive(
+        config.meta_root,
+        enabled=True,
+        datasets=[dataset],
+        compression=config.raw_archive_compression,
+        max_payload_bytes=config.raw_archive_max_payload_bytes,
+        capture_owner=config,
+        capture_run_id=run_id,
+        capture_source=SOURCE,
+        capture_scope=scope,
+        capture_nonce=nonce,
+    )
+
+    def record(url: str, payload: bytes, kind: str, page: int) -> None:
+        archive.archive(
+            dataset,
+            payload,
+            source=SOURCE,
+            run_id=run_id,
+            request_params={"trade_date": trade_date.isoformat(), "kind": kind, "page": page},
+            url=url,
+            payload_format="bytes",
+            http_metadata={"wire_exact": True, "encoding": "gbk"},
+            observation_id=f"{run_id}:{scope}:{kind}:{page}",
+            request_scope=scope,
+        )
+
+    return record
+
+
+def _get_page(client: httpx.Client, kind: str, page: int, config, *, recorder=None) -> str:
     url = f"{_BASE}/{_PATHS[kind]}/order/desc/page/{page}/ajax/1/free/1/"
     last: Exception | None = None
     for attempt in range(2):
@@ -246,6 +285,8 @@ def _get_page(client: httpx.Client, kind: str, page: int, config) -> str:
             last = exc
         else:
             if resp.status_code == 200:
+                if recorder is not None:
+                    recorder(url, resp.content, kind, page)
                 return resp.content.decode("gbk", errors="replace")
             last = ThsFundFlowError(f"{url} -> HTTP {resp.status_code}")
             if resp.status_code in (401, 403):
@@ -260,14 +301,14 @@ def _get_page(client: httpx.Client, kind: str, page: int, config) -> str:
     raise ThsFundFlowError(f"同花顺 {kind} page {page} failed: {last}") from last
 
 
-def _sweep(kind: str, parse, config) -> list[dict]:
+def _sweep(kind: str, parse, config, *, recorder=None) -> list[dict]:
     rows: list[dict] = []
     with httpx.Client(timeout=20.0, headers={"User-Agent": _UA}, trust_env=False) as client:
         page, pages = 1, None
         while pages is None or page <= pages:
             if page > _MAX_PAGES:
                 raise ThsFundFlowError(f"同花顺 {kind} pagination exceeded {_MAX_PAGES} pages")
-            got, total = parse(_get_page(client, kind, page, config))
+            got, total = parse(_get_page(client, kind, page, config, recorder=recorder))
             if pages is None:
                 if total is None:
                     raise ThsFundFlowError(f"同花顺 {kind} page 1 has no page count")
@@ -280,9 +321,14 @@ def _sweep(kind: str, parse, config) -> list[dict]:
     return rows
 
 
-def fetch_fund_flow_ths(trade_date: date, *, config=None) -> pl.DataFrame:
+def fetch_fund_flow_ths(
+    trade_date: date, *, config=None, run_id: str | None = None
+) -> pl.DataFrame:
     require_closed_session(trade_date)
-    rows = _sweep("stock", lambda text: parse_stock_page(text, trade_date), config)
+    recorder = _wire_recorder(config, "fund_flow_ths", trade_date, run_id)
+    rows = _sweep(
+        "stock", lambda text: parse_stock_page(text, trade_date), config, recorder=recorder
+    )
     if not rows:
         raise ThsFundFlowError("同花顺 stock money flow returned no rows")
     return pl.DataFrame(rows, schema=FUND_FLOW_THS_COLUMNS).unique(
@@ -290,12 +336,20 @@ def fetch_fund_flow_ths(trade_date: date, *, config=None) -> pl.DataFrame:
     )
 
 
-def fetch_sector_fund_flow_ths(trade_date: date, *, config=None) -> pl.DataFrame:
+def fetch_sector_fund_flow_ths(
+    trade_date: date, *, config=None, run_id: str | None = None
+) -> pl.DataFrame:
     require_closed_session(trade_date)
+    recorder = _wire_recorder(config, "sector_fund_flow_ths", trade_date, run_id)
     rows: list[dict] = []
     for kind in ("industry", "concept"):
         rows.extend(
-            _sweep(kind, lambda text, k=kind: parse_board_page(text, trade_date, k), config)
+            _sweep(
+                kind,
+                lambda text, k=kind: parse_board_page(text, trade_date, k),
+                config,
+                recorder=recorder,
+            )
         )
     if not rows:
         raise ThsFundFlowError("同花顺 board money flow returned no rows")

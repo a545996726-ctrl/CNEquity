@@ -103,7 +103,9 @@ jobs:
       - name: Build distributions
         run: python -m build
       - name: Validate distributions
-        run: twine check dist/*
+        run: |
+          twine check dist/*
+          python scripts/check_public_package.py dist/*
       - name: Verify the release contract is in sdist and wheel
         run: |
           set -euo pipefail
@@ -158,10 +160,38 @@ jobs:
           test -n "$wheel"
           "$SMOKE_ROOT/bin/python" -m pip install --upgrade pip
           "$SMOKE_ROOT/bin/pip" install "$wheel"
+          # Exercise the installed distribution outside the checkout: help
+          # alone cannot detect missing assets or a broken first query.
+          mkdir -p "$SMOKE_ROOT/work"
+          cd "$SMOKE_ROOT/work"
+          unset CNE_CONFIG PYTHONPATH
           "$SMOKE_ROOT/bin/cne" --version
-          # The demo is a profile of `init` since 0.10.0; `cne demo` now only
-          # answers with the rename hint, and exits non-zero doing it.
-          "$SMOKE_ROOT/bin/cne" init --profile demo --help
+          "$SMOKE_ROOT/bin/cne" doctor
+          "$SMOKE_ROOT/bin/cne" config create --data-root "$SMOKE_ROOT/production-layout"
+          "$SMOKE_ROOT/bin/cne" config validate
+          "$SMOKE_ROOT/bin/cne" init --layout-only
+          "$SMOKE_ROOT/bin/cne" init --profile sample \
+            --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
+          "$SMOKE_ROOT/bin/cne" config validate --config configs/cnequity.sample.toml
+          "$SMOKE_ROOT/bin/cne" query --config configs/cnequity.sample.toml \
+            --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
+          "$SMOKE_ROOT/bin/cne" status --config configs/cnequity.sample.toml --datasets
+          "$SMOKE_ROOT/bin/cne" verify --config configs/cnequity.sample.toml
+          "$SMOKE_ROOT/bin/cne" audit --config configs/cnequity.sample.toml --full --quality-only
+          "$SMOKE_ROOT/bin/python" -I - <<'PY'
+          import sys
+          from pathlib import Path
+          import cnequity
+          from cnequity.query import load
+
+          assert Path(cnequity.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+          bars = load("daily_bars", data_root="data/cnequity-sample")
+          assert bars.height == 150, bars.shape
+          assert bars["symbol"].n_unique() == 5
+          assert bars["trade_date"].n_unique() == 30
+          assert bars["source"].unique().to_list() == ["mock"]
+          print("Installed wheel: sample Parquet and Python query passed")
+          PY
       - name: Upload distributions
         uses: actions/upload-artifact@v4
         with:

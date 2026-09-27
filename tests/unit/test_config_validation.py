@@ -15,6 +15,12 @@ from cnequity.config import (
 from cnequity.config.bootstrap import path_for_toml
 
 
+@pytest.mark.parametrize("profile", [None, "quick", "full", "typo"])
+def test_production_config_still_requires_daily_waves(tmp_path, profile):
+    cfg = Config(data_root=tmp_path / "lake", workers=1, lake_profile=profile)
+    assert "job.daily.waves must define at least one wave" in validate_config(cfg)
+
+
 def test_validate_config_rejects_unknown_group_step(tmp_path):
     cfg = Config(
         data_root=tmp_path / "data",

@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from cnequity.cli.main import cli
+from cnequity.config import load_config, validate_config
 from cnequity.config.bootstrap import path_for_toml
 from cnequity.domain.schemas import validate_dataframe, with_provenance
 from cnequity.orchestrator.registry import STEP_REGISTRY, StepEntry
@@ -57,6 +58,23 @@ def _bars_frame(symbols: list[str], start: date, end: date) -> pl.DataFrame:
                 )
         d = date.fromordinal(d.toordinal() + 1)
     return pl.DataFrame(rows)
+
+
+@pytest.mark.parametrize("profile", ["demo", "sample"])
+def test_generated_demo_config_validates_without_enabling_daily_jobs(tmp_path, profile):
+    from cnequity.cli.demo import _write_demo_toml, _write_sample_toml
+
+    config_path = tmp_path / "config.toml"
+    writer = _write_demo_toml if profile == "demo" else _write_sample_toml
+    writer(config_path, tmp_path / "lake")
+    cfg = load_config(config_path)
+    assert cfg.daily_waves == []
+    assert validate_config(cfg) == []
+    result = CliRunner().invoke(cli, ["config", "validate", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", str(config_path)])
+    assert result.exit_code != 0
+    assert "job.daily.waves" in result.output
 
 
 def test_cne_demo_offline(tmp_path, monkeypatch):

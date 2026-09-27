@@ -718,7 +718,7 @@ cne mcp --config /abs/path/cnequity.toml --live
 |------|------|
 | `--config` | 配置文件路径（探测不读湖，但要用里面的限速与超时） |
 | `--vantage` | 这次探测从哪个出口发出：`cn` / `overseas` / 任意标签（默认 `local`） |
-| `--only` | 逗号分隔的 probe key，默认全部；传空串则一个都不测 |
+| `--only` | 逗号分隔的 probe key，默认全部；空串或未知名称会报用法错误 |
 | `--stale-only` | 若同一出口和探针有 12 小时内经校验的真实采集证据，则跳过主动探测；每日任务使用此模式 |
 | `--out` | JSON 报告路径。默认写进湖里的 `meta/source_health/<vantage>.json`，也就是 `cne serve` 读的位置 |
 

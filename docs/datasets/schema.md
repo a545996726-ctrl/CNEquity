@@ -108,15 +108,21 @@
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|
-| symbol, as_of_date | string, date | 快照主键；日期为本湖观察日 |
-| exchange, name | string | 交易所和基金简称 |
+| symbol | string | 证券代码，与 as_of_date 组成快照主键 |
+| as_of_date | date | 本湖观察日，与 symbol 组成快照主键 |
+| exchange | string | 交易所 |
+| name | string | 基金简称 |
 | list_date | date | 来源给出的上市日期，可空 |
-| tracking_index_code, tracking_index_name | string | 来源指数标识，可空 |
-| fund_category, investment_category | string | 官方基金类别和投资类别；后者无法单独证明股票指数的市场范围 |
+| tracking_index_code | string | 来源指数代码，可空 |
+| tracking_index_name | string | 来源指数名称，可空 |
+| fund_category | string | 官方基金类别 |
+| investment_category | string | 官方投资类别，无法单独证明股票指数的市场范围 |
 | eligibility_status | string | `eligible` / `excluded` / `unverified` |
 | classification_basis | string | 分类依据；深市已核验行包含指数代码、官方方案 PDF 的 SHA-256 与 URL；不能仅用名称或代码前缀 |
 | source_url | string | 官方目录页面 |
-| source, data_version, fetched_at | string, string, timestamp | 来源与本湖采集时间 |
+| source | string | 数据来源 |
+| data_version | string | 数据版本 |
+| fetched_at | timestamp | 本湖采集时间 |
 
 #### trading_calendar
 

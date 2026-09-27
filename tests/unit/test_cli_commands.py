@@ -1891,6 +1891,77 @@ def test_run_daily_all_groups_runs_each_group_and_survives_one_failure(tmp_path,
     assert [g["status"] for g in payload["groups"]] == ["success", "failed", "success"]
 
 
+@pytest.mark.parametrize(
+    ("statuses", "exit_code"),
+    [
+        (["failed", "degraded", "success"], 1),
+        (["degraded", "failed", "success"], 1),
+        (["exception", "degraded", "success"], 1),
+        (["degraded", "exception", "success"], 1),
+        (["degraded", "success", "success"], 2),
+        (["success", "warning", "success"], 2),
+    ],
+)
+def test_all_groups_core_failure_takes_precedence_over_degradation(
+    tmp_path, monkeypatch, statuses, exit_code
+):
+    cfg = _write_config(
+        tmp_path,
+        extra="".join(
+            f'\n[job.daily.groups.{name}]\nat = "17:00"\nsteps = ["compact"]\n'
+            for name in ("core", "capital", "research")
+        ),
+    )
+    seen = []
+
+    def fake_run_job(self, job_name, **kwargs):
+        status = statuses[len(seen)]
+        seen.append(job_name)
+        if status == "exception":
+            raise RuntimeError("group could not start")
+        return {"run_id": job_name, "status": status}
+
+    monkeypatch.setattr(JobEngine, "run_job", fake_run_job)
+    result = CliRunner().invoke(cli, ["run", "daily", "--all-groups", "--config", cfg])
+    assert result.exit_code == exit_code, result.output
+    assert len(seen) == 3
+
+
+@pytest.mark.parametrize(
+    ("day", "backfill", "history_due"),
+    [("2026-09-23", False, False), ("2026-09-24", False, True), ("2026-09-23", True, True)],
+)
+def test_all_groups_honors_weekly_history_but_keeps_snapshots(
+    tmp_path, monkeypatch, day, backfill, history_due
+):
+    cfg = _write_config(
+        tmp_path,
+        extra=(
+            '\n[job.daily.groups.signals]\nat = "17:00"\ncadence = "weekly"\n'
+            'steps = ["dragon_tiger", "block_trades", "compact"]\n'
+            '\n[job.daily.groups.capital]\nat = "17:00"\ncadence = "weekly"\n'
+            'steps = ["fund_flow", "margin_trading", "compact"]\n'
+        ),
+    )
+    seen = {}
+
+    def fake_run_job(self, job_name, **kwargs):
+        seen[job_name] = kwargs["waves"][0].steps
+        return {"run_id": job_name, "status": "success", "results": []}
+
+    monkeypatch.setattr(JobEngine, "run_job", fake_run_job)
+    args = ["run", "daily", "--all-groups", "--config", cfg, "--trade-date", day]
+    result = CliRunner().invoke(cli, [*args, *(["--backfill"] if backfill else [])])
+    assert result.exit_code == 0, result.output
+    if history_due:
+        assert seen["daily:signals"] == ["dragon_tiger", "block_trades", "compact"]
+        assert seen["daily:capital"] == ["fund_flow", "margin_trading", "compact"]
+    else:
+        assert "daily:signals" not in seen
+        assert seen["daily:capital"] == ["fund_flow", "compact"]
+        assert "skipped_not_scheduled" in result.output
+
+
 def test_run_daily_all_groups_skips_groups_whose_datasets_are_off(tmp_path, monkeypatch):
     """`intraday` and `ticks` are configured but opt-in, and off by default."""
     cfg = _write_config(

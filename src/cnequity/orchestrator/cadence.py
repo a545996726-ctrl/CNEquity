@@ -16,7 +16,7 @@ run to Thursday rather than skipping the week.
 
 Freshness follows the cadence: a history dataset owned only by weekly groups is
 judged against the group's last due session, not today, so ``cne status``, the
-23:00 stale pass and the health gate do not call it stale — and re-fetch it —
+late stale pass and the health gate do not call it stale — and re-fetch it —
 on the days it is meant to rest.
 """
 

@@ -158,10 +158,79 @@ def test_fund_flow_falls_back_to_ths_and_still_reports_the_push2_failure(tmp_pat
             written.append((dataset, k["source"])) or {"rows_written": df.height}
         ),
     )
-    cfg = Config(data_root=tmp_path / "data", sources={"eastmoney": True, "ths": True})
+    cfg = Config(
+        data_root=tmp_path / "data",
+        sources={"eastmoney": True, "ths": True},
+        raw_archive_enabled=False,  # this hook test supplies normalized rows only
+    )
     with pytest.raises(Push2PausedError):
         capital.step_fund_flow(cfg, _D, "run-1", {})
     assert written == [("fund_flow_ths", "ths")]
+
+
+@pytest.mark.parametrize("dataset", ["fund_flow_ths", "sector_fund_flow_ths"])
+@pytest.mark.parametrize("fail_last_page", [False, True])
+def test_ths_fallback_archives_exact_pages_before_publishing(
+    tmp_path, monkeypatch, dataset, fail_last_page
+):
+    from contextlib import nullcontext
+
+    import httpx
+
+    import cnequity.steps  # noqa: F401
+    from cnequity.config import WaveConfig
+    from cnequity.orchestrator.engine import JobEngine
+    from cnequity.query import load
+    from cnequity.steps import capital, rotation
+    from cnequity.storage.raw_archive import RawPayloadArchive
+
+    cfg = Config(data_root=tmp_path / "data", workers=1, max_retries=0)
+    parent = dataset.removesuffix("_ths")
+
+    def push2(*args, **kwargs):
+        raise RuntimeError("push2 unavailable")
+
+    monkeypatch.setattr(capital, "_run_capital_step", push2)
+    monkeypatch.setattr(rotation, "_step_sector_fund_flow", push2)
+    monkeypatch.setattr(ths, "require_closed_session", lambda day: None)
+    monkeypatch.setattr(ths, "hexin_v", lambda config: "test-token")
+    monkeypatch.setattr(ths, "source_request", lambda *args: nullcontext())
+    served = []
+
+    def get(self, url, **kwargs):
+        if dataset == "fund_flow_ths":
+            last = "/page/2/" in url
+            text = _STOCK_PAGE.replace("1/105", "2/2" if last else "1/2")
+            if last:
+                text = text.replace("301311", "301312").replace("920571", "920572")
+        else:
+            last = "/gnzjl/" in url
+            text = _BOARD_PAGE.replace("1/2", "1/1")
+        if last and fail_last_page:
+            return httpx.Response(403, request=httpx.Request("GET", url))
+        payload = text.encode("gbk")
+        served.append(payload)
+        return httpx.Response(200, content=payload, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    result = JobEngine(cfg).run_job(
+        "daily:capital" if parent == "fund_flow" else "daily:research",
+        _D,
+        waves=[WaveConfig(name="fallback", parallel=False, steps=[parent, "compact"])],
+    )
+    assert result["status"] == "degraded"  # the EastMoney dataset remains unavailable
+    archive = RawPayloadArchive(cfg.meta_root)
+    records = archive.records(dataset)
+    assert len(records) == len(served)
+    assert {archive.read(record) for record in records} == set(served)
+    assert all(record.http_metadata["wire_exact"] for record in records)
+    assert not list((cfg.curated_root / parent).rglob("*.parquet"))
+    if fail_last_page:
+        assert not list((cfg.curated_root / dataset).rglob("*.parquet"))
+    else:
+        frame = load(dataset, config=cfg)
+        assert frame.height == (4 if dataset == "fund_flow_ths" else 2)
+        assert frame["source"].unique().to_list() == ["ths"]
 
 
 def test_a_failed_ths_fallback_never_masks_the_push2_error(tmp_path, monkeypatch):

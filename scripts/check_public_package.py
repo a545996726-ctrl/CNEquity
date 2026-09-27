@@ -15,6 +15,7 @@ RETIRED = {
 }
 LOCAL_CONFIGS = {"cnequity.toml", "cnequity.demo.toml"}
 TEMPLATE = "cnequity/config/templates/cnequity.example.toml"
+REQUIRED_FILES = (TEMPLATE, "cnequity/adapters/eastmoney/seeds/bse_code_mapping.json")
 
 
 def check_members(names: list[str]) -> list[str]:
@@ -30,8 +31,9 @@ def check_members(names: list[str]) -> list[str]:
             or path.name in RETIRED | LOCAL_CONFIGS
         ):
             bad.append(name)
-    if not any(name.endswith(TEMPLATE) for name in names):
-        bad.append(f"missing {TEMPLATE}")
+    for required in REQUIRED_FILES:
+        if not any(name.endswith(required) for name in names):
+            bad.append(f"missing {required}")
     return bad
 
 

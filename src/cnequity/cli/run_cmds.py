@@ -275,10 +275,20 @@ def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, 
         )
     results: list[dict] = []
     worst = 0
+    from cnequity.orchestrator.cadence import due_steps
+
+    schedule_date = td or _last_trading_day(cfg, shanghai_today())
     for name, group in cfg.schedule_groups.items():
         if not _group_is_runnable(cfg, group):
             click.echo(f"调度组 {name}：跳过（它要抓的数据集全部处于关闭状态）", err=True)
             results.append({"group": name, "status": "skipped_disabled"})
+            continue
+        steps = group.steps if backfill else due_steps(group, schedule_date)
+        if not steps:
+            results.append(
+                {"group": name, "status": "skipped_not_scheduled", "cadence": group.cadence}
+            )
+            click.echo(f"调度组 {name}：跳过（尚未到 {group.cadence} 采集日）", err=True)
             continue
         try:
             result = engine.run_job(
@@ -288,7 +298,7 @@ def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, 
                     WaveConfig(
                         name=f"group:{name}",
                         parallel=getattr(group, "parallel", True),
-                        steps=group.steps,
+                        steps=steps,
                     )
                 ],
                 backfill=backfill,
@@ -300,12 +310,16 @@ def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, 
         except Exception as exc:  # noqa: BLE001 — one group must not sink the day
             click.echo(f"调度组 {name}：{type(exc).__name__}: {exc}", err=True)
             results.append({"group": name, "status": "failed", "error": str(exc)})
-            worst = max(worst, 1)
+            worst = 1
             continue
         status = result["status"]
         results.append({"group": name, "run_id": result["run_id"], "status": status})
         click.echo(f"调度组 {name}：{status}", err=True)
-        worst = max(worst, _run_status_exit_code(status))
+        exit_code = _run_status_exit_code(status)
+        # Exit 1 is a terminal/core failure; 2 is usable but degraded.
+        # Numeric max would hide a core failure behind a later advisory one.
+        if exit_code == 1 or worst == 0:
+            worst = exit_code
     click.echo(json.dumps({"groups": results, "repairs": repairs}, indent=2))
     if worst:
         raise SystemExit(worst)

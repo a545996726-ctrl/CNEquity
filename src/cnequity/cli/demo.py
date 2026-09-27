@@ -557,6 +557,7 @@ def run_sample_demo(
     click.echo("离线样例：生成的是合成价格，不是市场数据。")
     _write_sample_toml(config_out, data_root, force=force)
     cfg = _demo_config(data_root, config_path=config_out.resolve())
+    cfg.lake_profile = "sample"
     cfg.tdx_enabled = False
     init_data_layout(cfg)
 

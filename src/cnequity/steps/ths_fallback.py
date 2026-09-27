@@ -15,7 +15,7 @@ from datetime import date
 
 from cnequity.config import Config
 from cnequity.orchestrator.registry import register_step
-from cnequity.steps.http_common import write_fetched
+from cnequity.steps.http_common import call_with_run_id, verify_raw_archive, write_fetched
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,23 @@ def _fetch_and_write(config: Config, trade_date: date, run_id: str, dataset: str
         "fund_flow_ths": ths.fetch_fund_flow_ths,
         "sector_fund_flow_ths": ths.fetch_sector_fund_flow_ths,
     }[dataset]
-    df = fetch(trade_date, config=config)
-    return write_fetched(config, run_id, dataset, df, source=ths.SOURCE)
+    df = call_with_run_id(
+        fetch, trade_date, pipeline_config=config, dataset=dataset, run_id=run_id, config=config
+    )
+    evidence = (
+        verify_raw_archive(
+            config,
+            dataset,
+            run_id,
+            source=ths.SOURCE,
+            request_scope=f"daily:{trade_date.isoformat()}",
+        )
+        if config.should_archive_raw(dataset)
+        else None
+    )
+    return write_fetched(
+        config, run_id, dataset, df, source=ths.SOURCE, raw_archive_evidence=evidence
+    )
 
 
 # In no schedule group: the EastMoney steps stage these themselves when push2

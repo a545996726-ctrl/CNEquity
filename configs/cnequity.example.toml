@@ -147,8 +147,8 @@ direct_fallback = false
 
 [sources.ths]
 # 同花顺 — primary source for sector_bars (board index OHLC), history and daily.
-# push2his (EastMoney's kline host) refused this project's egress IP, and mixing
-# sources put two index bases in one series; see docs.
+# Keep history and daily bars on one provider's index base; do not splice
+# another provider's board index prices into this series.
 enabled = true
 # d.10jqka.com.cn (kline). This is a conservative client setting, not an
 # upstream quota or a guarantee against refusals. Keep the board cache enabled.
@@ -373,8 +373,8 @@ fetch_workers = 4
 # option_contracts, futures_bars, option_bars. Off by default and not part of
 # `cne init`; nothing here costs anything until you turn it on.
 #
-# SOURCES. Each exchange's own session file, which lists every live contract
-# every day — traded or not — with its settlement price:
+# SOURCES. Exchange session files include contract settlements and zero-trade
+# rows. Historical listed-contract completeness still needs separate evidence:
 #   SHF  SHFE; INE has a separate 2018 futures daily file
 #                                     futures 2002-01-07, options 2018-09-21
 #   CZC  CZCE                            futures 2010-01-04, options 2017-04-19
@@ -392,7 +392,8 @@ fetch_workers = 4
 # per-contract, not per-day. --exchange narrows scope; --refresh rechecks data.
 # Lifecycle dates require references; observation bounds do not prove expiry.
 enabled = false
-# Empty means every exchange this release can read ("SHF", "CZC", "GFE", "CFE";
+# Empty means every supported route ("SHF", "CZC", "GFE", "CFE", plus DCE
+# when dce_route is not "off");
 # "INE" is accepted as the SHF route, which joins the two where needed).
 exchanges = []
 options = true

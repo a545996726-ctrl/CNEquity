@@ -5,11 +5,10 @@ member firms report and publish the result themselves, daily, per security. A
 redistributor can only copy that file, so reading it directly removes a hop
 without losing anything except one field (below).
 
-Measured 2026-08-30 against the live publishers:
+The official endpoints have different formats:
 
-* **SSE** serves ``queryMargin.do`` and returned all 1,999 marginable SH
-  securities in a single request (``pageSize`` is honoured, so the 20-row page
-  default never applies).
+* **SSE** serves ``queryMargin.do`` with a 2,000-row page cap. Read every
+  page and verify the published total before accepting the day.
 * **SZSE** serves the same detail as an xlsx export of report ``1837_xxpl``
   tab 2, in raw 元 and 股 — the JSON form of the identical report paginates at
   20 rows and states 亿/万 units, so the export is both cheaper and less lossy.
@@ -59,15 +58,13 @@ _EMPTY_MARGIN = pl.DataFrame(
     }
 )
 
-# `pageHelp.pageSize` is honoured, so one request covers the market. The cap is
-# set well above the ~2,000 marginable SH securities and the response is checked
-# against `total` so a silently truncated page cannot pass as a complete day.
-SSE_PAGE_SIZE = 5000
+# The server caps pages at 2,000 even when a larger size is requested.
+SSE_PAGE_SIZE = 2000
 SSE_URL = (
     "http://query.sse.com.cn/marketdata/tradedata/queryMargin.do"
     "?isPagination=true&tabType=mxtype&detailsDate={day}"
-    f"&pageHelp.pageSize={SSE_PAGE_SIZE}"
-    "&pageHelp.pageNo=1&pageHelp.beginPage=1&pageHelp.cacheSize=1&pageHelp.endPage=1"
+    "&pageHelp.pageSize={page_size}&pageHelp.pageNo={page_no}"
+    "&pageHelp.beginPage={page_no}&pageHelp.cacheSize=1&pageHelp.endPage={page_no}"
 )
 _SSE_HEADERS = {"Referer": "https://www.sse.com.cn/"}
 
@@ -140,30 +137,44 @@ def _finish(rows: list[dict]) -> pl.DataFrame:
 
 def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
     """Official SH 融资融券 detail. ``short_balance`` is null — SSE omits it."""
-    url = SSE_URL.format(day=trade_date.strftime("%Y%m%d"))
+    data: list[dict] = []
+    seen: set[str] = set()
+    total: int | None = None
+    page_size = SSE_PAGE_SIZE
     try:
-        with source_request(config, _SOURCE):
-            resp = _client().get(
-                url, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
+        for page_no in range(1, 101):
+            url = SSE_URL.format(
+                day=trade_date.strftime("%Y%m%d"), page_size=page_size, page_no=page_no
             )
-            record_http_response(config, _SOURCE, resp)
-        resp.raise_for_status()
-        page = (resp.json() or {}).get("pageHelp") or {}
+            with source_request(config, _SOURCE):
+                resp = _client().get(
+                    url, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
+                )
+                record_http_response(config, _SOURCE, resp)
+            resp.raise_for_status()
+            page = (resp.json() or {}).get("pageHelp") or {}
+            batch = page.get("data") or []
+            reported = int(page["total"]) if page.get("total") is not None else None
+            if page_no == 1:
+                total = reported
+                page_size = int(page.get("pageSize") or page_size)
+                if page_size < 1:
+                    raise ValueError("invalid page size")
+            elif reported != total:
+                raise ValueError("published total changed during pagination")
+            codes = [str(item.get("stockCode") or "").strip() for item in batch]
+            if len(set(codes)) != len(codes) or seen.intersection(codes):
+                raise ValueError("duplicate securities / repeated margin page")
+            seen.update(codes)
+            data.extend(batch)
+            if total is None or len(data) == total:
+                break
+            if not batch or len(data) > total:
+                raise ValueError(f"incomplete margin response: {len(data)} of {total}")
+        else:
+            raise ValueError("margin pagination exceeded 100 pages")
     except Exception as exc:
         logger.warning("SSE margin detail unavailable for %s: %s", trade_date, exc)
-        return _EMPTY_MARGIN.clone()
-
-    data = page.get("data") or []
-    total = page.get("total")
-    if isinstance(total, int) and total > len(data):
-        # One request is meant to cover the day. A short page means the server
-        # capped it, and writing it would look like securities left the list.
-        logger.warning(
-            "SSE margin detail returned %d of %d rows for %s; not writing a partial day",
-            len(data),
-            total,
-            trade_date,
-        )
         return _EMPTY_MARGIN.clone()
 
     rows: list[dict] = []

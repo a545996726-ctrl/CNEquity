@@ -4,7 +4,13 @@
 
 ## 配置与第一轮验证
 
-先从示例配置建立独立研究湖。已有配置只合并下列相关项，不替换其他设置：
+先建立独立研究湖配置，无需复制源码模板：
+
+```bash
+cne config create --config configs/cnequity.futures.toml --data-root data/cnequity-futures
+```
+
+编辑生成文件中已有的 `[futures]` 和 `[sources.futures_exchange]` 段落，不要重复追加同名段。下文均使用这份配置；已有正式湖也可仅合并相关项，不替换其他设置：
 
 ```toml
 [futures]
@@ -21,35 +27,53 @@ min_interval_seconds = 1.0
 
 限速键以项目示例中的 `[sources.futures_exchange]` 为准。间隔不是交易所承诺的安全配额；先缩小范围并利用缓存，不要以增加并发解决失败。
 
+保存后执行 `cne config validate --config configs/cnequity.futures.toml`。上面的明确交易所列表不含 DCE；需要新浪大商所期货时将 `"DCE"` 加入 `exchanges`。仅设置 `dce_route="sina"` 不会越过交易所范围筛选，也不会启用 DCE 期权。
+
 先审阅小窗口计划，再执行。以下日期只作示例，应换成自己的研究窗口：
 
 ```bash
-cne backfill futures_bars --config configs/cnequity.toml --exchange SHF --start 2026-09-21 --end 2026-09-24 --plan
-cne backfill futures_bars --config configs/cnequity.toml --exchange SHF --start 2026-09-21 --end 2026-09-24
-cne backfill option_bars --config configs/cnequity.toml --exchange SHF --start 2026-09-21 --end 2026-09-24
-cne status --config configs/cnequity.toml --datasets --all-columns
+cne backfill futures_bars --config configs/cnequity.futures.toml --exchange SHF --start 2026-09-21 --end 2026-09-24 --plan
+cne backfill futures_bars --config configs/cnequity.futures.toml --exchange SHF --start 2026-09-21 --end 2026-09-24
+cne backfill option_bars --config configs/cnequity.futures.toml --exchange SHF --start 2026-09-21 --end 2026-09-24
+cne status --config configs/cnequity.futures.toml --datasets --groups derivatives --all-columns
 ```
+
+独立期货湖用 `--groups derivatives` 限定状态门禁，不要求先采集 A 股。若状态为 `UNVERIFIED` 并退出 2，表示缺少完整在市合约清单等证据；它与已发现缺口的退出 1 不同，具体范围用下文的窗口验收查看。
 
 `--plan` 不联网、不创建湖，报告交易所、源端历史下限、日期、冷缓存请求估算、限速及后续步骤。行情估算不含重试；参考请求另列上界，不是耗时承诺。DCE 新浪以“合约整段历史”为请求单位，一个日期也可能枚举约 299 个候选代码；跨月或长窗口涉及更多代码。`--exchange` 可重复；INE 归入 SHF 路由，2018 年 3 月 26 日起的期货需同时请求上期所与能源中心日文件，冷缓存估算计入这两个请求。显式回填一个衍生品数据集会开启本次调用所需开关，不改配置文件。
 
 日线回填完成后自动重建对应合约表、compact，再更新连续期货/Greeks。输出的 `followup` 是后续运行状态；采集和派生成功仍不等于研究窗口完整。修复已有历史时可显式执行：
 
 ```bash
-cne backfill futures_bars --config configs/cnequity.toml --exchange SHF --start 2026-09-21 --end 2026-09-24 --refresh
-cne backfill futures_contracts --config configs/cnequity.toml
-cne backfill option_contracts --config configs/cnequity.toml
-cne derive futures_continuous --config configs/cnequity.toml
-cne derive option_greeks --config configs/cnequity.toml
+cne backfill futures_bars --config configs/cnequity.futures.toml --exchange SHF --start 2026-09-21 --end 2026-09-24 --refresh
+cne backfill futures_contracts --config configs/cnequity.futures.toml
+cne backfill option_contracts --config configs/cnequity.futures.toml
+cne derive futures_continuous --config configs/cnequity.futures.toml
+cne derive option_greeks --config configs/cnequity.futures.toml
 ```
 
 合约回填带 `--start/--end` 时，读取该窗口内已有行情日期的历史参考文件，并归档后重建；不带日期时只读各交易所最新参考。这样可恢复已从当前清单退出的历史合约日期。参考历史修订按 `as_of` 排序，旧文件不会覆盖更新的归档证据。拒绝/挑战会停止该来源本批次的参考扫描。先用 `--plan` 看 `reference_requests_upper_bound`；没有参考适配器的路由仍无法补生命周期。广期所参考接口仅提供当前快照，不支持历史回放；显式历史窗口会跳过它并报告 warning，普通运行以实际读取日归档，不能当作过去时点的证据。
 
+因此，GFE 历史行情可能已成功落盘，但自动合约步骤返回 `degraded`，整条 `backfill` 仍退出 1。先检查输出的 `slices`、`followup` 和 `cne status --run RUN_ID --config configs/cnequity.futures.toml`，区分行情缺失与历史参考不足；不要因退出码非零就反复重下同一日文件。不带日期重建合约可补当前参考，不能补造历史证据。
+
 ```bash
-cne backfill option_contracts --config configs/cnequity.toml --exchange CFE --start 2026-09-18 --end 2026-09-18 --plan
-cne backfill option_contracts --config configs/cnequity.toml --exchange CFE --start 2026-09-18 --end 2026-09-18
+cne backfill option_contracts --config configs/cnequity.futures.toml --exchange CFE --start 2026-09-18 --end 2026-09-18 --plan
+cne backfill option_contracts --config configs/cnequity.futures.toml --exchange CFE --start 2026-09-18 --end 2026-09-18
 ```
 
 `--refresh` 忽略完成收据和旧响应缓存，但不绕过冷却/熔断。没有收据的旧数据不会仅因“每所有一行”就跳过。`--force`、`--retry-failed` 仍是 sector_bars 专属；不适用时会报错。连续期货必须全量重算，不能给 `--start/--end`；Greeks 支持窗口和 `--full`，通常自动检测依赖即可。
+
+## 日更接入
+
+完成小窗口回填后，单独更新衍生品使用：
+
+```bash
+cne run daily --group derivatives --config configs/cnequity.futures.toml
+```
+
+普通日更补最近的回看窗口和有限旧欠账，不会替代首次历史回填。默认组内顺序通过依赖保证先采集日线、补合约元数据，再 compact、派生连续期货及 Greeks；任一来源失败会保留失败或降级状态，不能凭已有派生行判定本轮完整。
+
+正式湖启用 `[futures]` 后，`cne run daily --all-groups` 和未用 `CNE_GROUPS` 限定组别的 `daily_pipeline.sh` 会自动包含 `derivatives`。旧 launchd 安装保留了显式 `CNE_GROUPS` 时，须把 `derivatives` 加入该列表；裸 `cne run daily` 只执行核心 waves，不会自动采集期货。独立期货湖使用上面的单组命令，避免同时采集 A 股其他组。
 
 ## 证据和故障恢复
 
@@ -84,8 +108,8 @@ HTTP 403/412/429/456 和暂时性服务端拒绝会触发至少 300 秒冷却，
 可直接用 CLI 检查指定窗口（只读、不联网）：
 
 ```bash
-cne verify --derivatives --dataset futures_bars --start 2026-09-01 --end 2026-09-24 --config configs/cnequity.toml
-cne verify --derivatives --dataset option_bars --start 2026-09-01 --end 2026-09-24 --config configs/cnequity.toml
+cne verify --derivatives --dataset futures_bars --start 2026-09-01 --end 2026-09-24 --config configs/cnequity.futures.toml
+cne verify --derivatives --dataset option_bars --start 2026-09-01 --end 2026-09-24 --config configs/cnequity.futures.toml
 ```
 
 JSON 包含缺日、已知合约缺行、缺元数据、欠账及品种覆盖。退出 1 为已发现缺口，2 为证据不足；最新截面正常不会掩盖窗口中间的缺行。无完整历史在市清单时不会报告全市场完整。此命令不支持自动修复；审阅具体缺口后使用前述有范围的回填命令。它尚不能证明历史交易参数与派生序列在整个研究窗口内有效。
@@ -99,7 +123,7 @@ from cnequity.query import load
 from cnequity.quality.derivative_checks import exchange_session_gaps
 from datetime import date
 
-cfg = load_config("configs/cnequity.toml")
+cfg = load_config("configs/cnequity.futures.toml")
 print(exchange_session_gaps(cfg, "futures_bars",
                            start=date(2026, 9, 21), end=date(2026, 9, 24)))
 
@@ -134,8 +158,8 @@ Greeks 根据结算价和模型计算，合约、利率、模型及行情变化�
 ## 分钟数据
 
 ```bash
-cne backfill futures_minute_bars --config configs/cnequity.toml --symbols CU2611.SHF,M2701.DCE --plan
-cne backfill futures_minute_bars --config configs/cnequity.toml --symbols CU2611.SHF,M2701.DCE
+cne backfill futures_minute_bars --config configs/cnequity.futures.toml --symbols CU2611.SHF,M2701.DCE --plan
+cne backfill futures_minute_bars --config configs/cnequity.futures.toml --symbols CU2611.SHF,M2701.DCE
 ```
 
 这里只取最新窗口，拒绝历史日期参数。超过 watchlist 上限会报错，不再默默截掉合约。启用后必须每天调度；即使 derivatives 组设为 weekly，滚动分钟窗口也会在交易日执行，历史日线仍按组节奏运行。需要每日 CTA 信号时，日线组也必须设为 daily。夜盘目前按交易日历映射，尚非完整的分品种夜盘/临时停市日历；不能把窗口数据当作完整 tick/盘口历史。
@@ -147,9 +171,9 @@ cne backfill futures_minute_bars --config configs/cnequity.toml --symbols CU2611
 `cnequity.adapters.futures_exchange.shfe_archive.iter_archive(path, year=2026)` 提供本地只读解析，逐工作簿返回 `(文件名, {数据集名: DataFrame})`。解析器拒绝未验证的表头、跨年日期、非整数手数、重复主键及超限归档。已核验 2002—2008 年的 `.xlsx` 单边口径、2009—2019 年带“双边计算”说明的分组 `.xls`（成交量、成交额、持仓量按单边折算），以及 2020—2024 年的分组 `.xls` 单边口径。对其他年份或不同表头不能套用这些规则。默认日文件回填仍走原路，年度 ZIP 只能显式离线导入：
 
 ```bash
-cne backfill futures_bars --shfe-annual-archive /data/shfe-2025.zip --archive-year 2025 --accept-partial-fields --plan
-cne backfill futures_bars --shfe-annual-archive /data/shfe-2025.zip --archive-year 2025 --accept-partial-fields
-cne backfill option_bars  --shfe-annual-archive /data/shfe-2025.zip --archive-year 2025 --accept-partial-fields
+cne backfill futures_bars --config configs/cnequity.futures.toml --shfe-annual-archive /data/shfe-2025.zip --archive-year 2025 --accept-partial-fields --plan
+cne backfill futures_bars --config configs/cnequity.futures.toml --shfe-annual-archive /data/shfe-2025.zip --archive-year 2025 --accept-partial-fields
+cne backfill option_bars --config configs/cnequity.futures.toml --shfe-annual-archive /data/shfe-2025.zip --archive-year 2025 --accept-partial-fields
 ```
 
 导入没有源网络请求，会复制原 ZIP 到湖的 `meta/derivatives/annual_archives/`，记录哈希、导入时间、成员、拒绝行及缺失字段；如果知道官方原链接和下载时间，可加 `--archive-url https://www.shfe.com.cn/...` 与 `--archive-downloaded-at 2026-09-27T09:00:00+08:00` 作为来源证据。`--plan` 只说明导入范围和字段限制，不解析 ZIP。每个验证成功的工作簿独立暂存并自动发布；较晚成员损坏时，已验证成员仍可发布，同时返回非零状态和缺口。任何已有逐日行的主键都跳过，年度行不会覆盖完整日线。导入记录的 `coverage_status=partial_fields`，也不会生成“逐日完整”收据；需要日文件独有字段的研究或严格覆盖查询仍要补日文件。原始下载时间若没有独立证据，导入不会把本地文件修改时间冒充下载时间。
