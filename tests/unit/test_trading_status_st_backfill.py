@@ -41,7 +41,17 @@ def _patch(monkeypatch, *, returns):
         df, failed = returns
         return df, failed
 
-    def fake_write(config, run_id, dataset, df, *, source, batch_id="batch-0"):
+    def fake_write(
+        config,
+        run_id,
+        dataset,
+        df,
+        *,
+        source,
+        batch_id="batch-0",
+        preserve_fetched_at=False,
+    ):
+        assert preserve_fetched_at is False  # Baostock keeps the ordinary write-time stamp.
         written.append(df)
         return {"rows_read": df.height, "rows_written": df.height}
 

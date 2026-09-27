@@ -1125,6 +1125,7 @@ def _backfill_trading_status_st_source(
                 df,
                 source=source,
                 batch_id=f"{source}-batch-{offset:05d}",
+                preserve_fetched_at=source == "tushare",
             )
             rows_read += int(chunk.get("rows_read", 0))
             rows_written += int(chunk.get("rows_written", 0))

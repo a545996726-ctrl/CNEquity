@@ -1400,8 +1400,18 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def with_provenance(df: pl.DataFrame, source: str, data_version: str) -> pl.DataFrame:
+def with_provenance(
+    df: pl.DataFrame,
+    source: str,
+    data_version: str,
+    *,
+    preserve_fetched_at: bool = False,
+) -> pl.DataFrame:
     """Stamp source / data_version / fetched_at onto every row of *df*.
+
+    ``preserve_fetched_at`` is for adapters that carry a verified source
+    capture time through a response-cache hit; ordinary callers keep the
+    existing current-time stamp.
 
     A frame with **no columns at all** is returned untouched. Polars broadcasts
     a literal against a zero-column frame to length one, so stamping a bare
@@ -1419,10 +1429,12 @@ def with_provenance(df: pl.DataFrame, source: str, data_version: str) -> pl.Data
 
     # An adapter may pre-set `source` (e.g. MOCK_SOURCE) to flag row origin;
     # that marker must survive normalization.
-    cols = [
-        pl.lit(data_version).alias("data_version"),
-        pl.lit(datetime.now(timezone.utc)).cast(FETCHED_AT_DTYPE).alias("fetched_at"),
-    ]
+    fetched_at = (
+        pl.col("fetched_at").cast(FETCHED_AT_DTYPE)
+        if preserve_fetched_at and "fetched_at" in df.columns
+        else pl.lit(datetime.now(timezone.utc)).cast(FETCHED_AT_DTYPE)
+    )
+    cols = [pl.lit(data_version).alias("data_version"), fetched_at.alias("fetched_at")]
     if "source" not in df.columns:
         cols.append(pl.lit(source).alias("source"))
     return df.with_columns(cols)

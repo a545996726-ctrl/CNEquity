@@ -17,10 +17,12 @@ exchange migrated code identities.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 
 import httpx
@@ -31,13 +33,17 @@ from cnequity.config import Config
 from cnequity.domain.http_policy import (
     SourceCoolingDown,
     record_business_refusal,
+    record_cache_reuse,
     record_http_response,
     record_request_event,
 )
 from cnequity.domain.rate_limit import source_request
+from cnequity.domain.schemas import FETCHED_AT_DTYPE
 from cnequity.domain.symbols import parse_symbol
 from cnequity.domain.trading_status import STATUS_NORMAL
+from cnequity.file_lock import exclusive_lock
 from cnequity.query.parquet_scan import scan_parquet_root
+from cnequity.storage.atomic import write_json_atomic
 
 __all__ = ["TUSHARE_ST_DIRECT_FLOOR", "TUSHARE_ST_HISTORY_FLOOR", "fetch_st_history"]
 
@@ -49,6 +55,8 @@ TUSHARE_ST_DIRECT_FLOOR = date(2017, 1, 1)
 _PAGE_SIZE = 1000
 _BAK_BASIC_PAGE_SIZE = 7000
 _MAX_PAGES = 1000
+_BAK_BASIC_CACHE_SECONDS = 7 * 86400
+_BAK_BASIC_CACHE_VERSION = 1
 
 _OUTPUT_SCHEMA = {
     "symbol": pl.Utf8,
@@ -56,6 +64,7 @@ _OUTPUT_SCHEMA = {
     "is_trading": pl.Boolean,
     "status": pl.Utf8,
     "risk_warning": pl.Boolean,
+    "fetched_at": FETCHED_AT_DTYPE,
 }
 
 
@@ -272,7 +281,89 @@ def _request_bak_basic_rows(
             break
     else:
         raise RuntimeError("Tushare bak_basic pagination exceeded the safety limit")
+    if not _bak_basic_rows_valid(rows, trade_date):
+        raise RuntimeError(
+            f"Tushare bak_basic {trade_date} is empty or has invalid identity/date rows"
+        )
     return rows
+
+
+def _bak_basic_rows_valid(rows: object, trade_date: date) -> bool:
+    return (
+        isinstance(rows, list)
+        and bool(rows)
+        and all(
+            isinstance(row, dict)
+            and str(row.get("ts_code") or "").strip()
+            and _parse_date(row.get("trade_date")) == trade_date
+            for row in rows
+        )
+    )
+
+
+def _bak_basic_rows_hash(rows: list[dict]) -> str:
+    content = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _cached_bak_basic_rows(
+    client: httpx.Client,
+    token: str,
+    trade_date: date,
+    *,
+    config: Config | None,
+    sleep: Callable[[float], None],
+    use_cache: bool,
+) -> tuple[list[dict], datetime]:
+    """Reuse only a complete positive day, partitioned by credential identity."""
+    if config is None or not use_cache:
+        rows = _request_bak_basic_rows(client, token, trade_date, config=config, sleep=sleep)
+        return rows, datetime.now(timezone.utc)
+    token_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    path = (
+        config.meta_root
+        / "source_cache"
+        / "tushare"
+        / "bak_basic"
+        / token_key
+        / f"{trade_date.isoformat()}.json"
+    )
+    with exclusive_lock(path.with_suffix(".lock")):
+        if path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(saved["captured_at"])
+                rows = saved["rows"]
+                if (
+                    saved["trade_date"] == trade_date.isoformat()
+                    and saved["parser_version"] == _BAK_BASIC_CACHE_VERSION
+                    and 0 <= age.total_seconds() < _BAK_BASIC_CACHE_SECONDS
+                    and _bak_basic_rows_valid(rows, trade_date)
+                    and _bak_basic_rows_hash(rows) == saved["sha256"]
+                ):
+                    record_cache_reuse(config, "tushare", "bak_basic_day")
+                    return rows, datetime.fromisoformat(saved["captured_at"])
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                logger.warning("Tushare bak_basic cache invalid for %s: %s", trade_date, exc)
+        rows = _request_bak_basic_rows(client, token, trade_date, config=config, sleep=sleep)
+        captured_at = datetime.now(timezone.utc)
+        if _bak_basic_rows_valid(rows, trade_date):
+            try:
+                write_json_atomic(
+                    path,
+                    {
+                        "trade_date": trade_date.isoformat(),
+                        "captured_at": captured_at.isoformat(),
+                        "parser_version": _BAK_BASIC_CACHE_VERSION,
+                        "sha256": _bak_basic_rows_hash(rows),
+                        "rows": rows,
+                    },
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Tushare valid bak_basic %s could not be cached: %s", trade_date, exc
+                )
+        return rows, captured_at
 
 
 def _is_st_name(value: object) -> bool:
@@ -343,6 +434,7 @@ def fetch_st_history(
         }
         pre_direct_symbols = {symbol for symbol, dates in pre_direct_dates.items() if dates}
         pre_st_dates: dict[str, set[date]] = {symbol: set() for symbol in symbols}
+        pre_captured_at: dict[date, datetime] = {}
         pre_failed: set[str] = set()
         if pre_direct_symbols:
             alias_to_symbol = {
@@ -350,32 +442,46 @@ def fetch_st_history(
                 for symbol in sorted(pre_direct_symbols)
                 for alias in _source_codes(symbol)
             }
-            try:
-                for trade_date in sorted({d for dates in pre_direct_dates.values() for d in dates}):
-                    found: set[str] = set()
-                    for item in _request_bak_basic_rows(
+            day_queue = sorted({d for dates in pre_direct_dates.values() for d in dates})
+            for position, trade_date in enumerate(day_queue):
+                required = {
+                    symbol for symbol, dates in pre_direct_dates.items() if trade_date in dates
+                }
+                try:
+                    day_rows, captured_at = _cached_bak_basic_rows(
                         client,
                         token,
                         trade_date,
                         config=config,
                         sleep=sleep,
+                        use_cache=owns_client,
+                    )
+                except SourceCoolingDown:
+                    return _empty(), symbols
+                except Exception as exc:  # noqa: BLE001 — stop the failing source
+                    logger.warning("tushare bak_basic: failed for %s: %s", trade_date, exc)
+                    remaining = set(day_queue[position:])
+                    pre_failed.update(
+                        symbol
+                        for symbol, dates in pre_direct_dates.items()
+                        if remaining.intersection(dates)
+                    )
+                    break
+                found: set[str] = set()
+                pre_captured_at[trade_date] = captured_at
+                for item in day_rows:
+                    source_code = str(item.get("ts_code") or "").strip().upper()
+                    symbol = alias_to_symbol.get(source_code)
+                    if (
+                        symbol is None
+                        or _parse_date(item.get("trade_date")) != trade_date
+                        or not str(item.get("name") or "").strip()
                     ):
-                        source_code = str(item.get("ts_code") or "").strip().upper()
-                        symbol = alias_to_symbol.get(source_code)
-                        if symbol is None or _parse_date(item.get("trade_date")) != trade_date:
-                            continue
-                        found.add(symbol)
-                        if _is_st_name(item.get("name")):
-                            pre_st_dates[symbol].add(trade_date)
-                    required = {
-                        symbol for symbol, dates in pre_direct_dates.items() if trade_date in dates
-                    }
-                    pre_failed.update(required - found)
-            except SourceCoolingDown:
-                return _empty(), symbols
-            except Exception as exc:  # noqa: BLE001 — no incomplete day becomes normal
-                logger.warning("tushare bak_basic: failed for %s: %s", trade_date, exc)
-                pre_failed.update(pre_direct_symbols)
+                        continue
+                    found.add(symbol)
+                    if _is_st_name(item.get("name")):
+                        pre_st_dates[symbol].add(trade_date)
+                pre_failed.update(required - found)
 
         for index, symbol in enumerate(symbols):
             traded_dates = dates_by_symbol.get(symbol, [])
@@ -389,6 +495,7 @@ def fetch_st_history(
                 st_dates = pre_st_dates[symbol]
                 aliases = set(_source_codes(symbol))
                 post_direct_dates = [d for d in traded_dates if d >= TUSHARE_ST_DIRECT_FLOOR]
+                post_captured_at: datetime | None = None
                 if post_direct_dates:
                     for source_code in sorted(aliases):
                         for item in _request_rows(
@@ -421,6 +528,7 @@ def fetch_st_history(
                             if kind not in {"ST", "*ST"}:
                                 raise RuntimeError(f"unknown Tushare ST type {kind!r} for {symbol}")
                             st_dates.add(trade_date)
+                    post_captured_at = datetime.now(timezone.utc)
                 rows.extend(
                     {
                         "symbol": symbol,
@@ -432,6 +540,11 @@ def fetch_st_history(
                         # designation has never survived into curated. It stays
                         # in the exchange 简称 via instruments.name.
                         "risk_warning": trade_date in st_dates,
+                        "fetched_at": (
+                            pre_captured_at[trade_date]
+                            if trade_date < TUSHARE_ST_DIRECT_FLOOR
+                            else post_captured_at
+                        ),
                     }
                     for trade_date in traded_dates
                 )

@@ -8,12 +8,14 @@ that step and would have spent 10.4h more inside it.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import polars as pl
 import pytest
 
+from cnequity.config import Config
 from cnequity.steps import reference
+from cnequity.storage.parquet import StagingWriter
 
 
 @pytest.fixture
@@ -99,3 +101,33 @@ def test_zero_removes_the_bound(config, swept, monkeypatch):
     )
 
     assert sum(len(c) for c in swept) == 100
+
+
+def test_tushare_cached_capture_time_survives_staging(tmp_path, monkeypatch):
+    day = date(2016, 12, 30)
+    captured_at = datetime(2016, 12, 30, 12, 0, tzinfo=timezone.utc)
+    config = Config(data_root=tmp_path / "lake", raw_archive_enabled=False)
+    config._backfill_start = day
+    config._backfill_end = day
+    frame = pl.DataFrame(
+        {
+            "symbol": ["920001.BJ"],
+            "trade_date": [day],
+            "is_trading": [True],
+            "status": ["normal"],
+            "risk_warning": [False],
+            "fetched_at": [captured_at],
+        }
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.tushare.st_history.fetch_st_history",
+        lambda *args, **kwargs: (frame, []),
+    )
+
+    reference._backfill_trading_status_st_source(
+        config, day, "run-1", universe=["920001.BJ"], universe_name="explicit", source="tushare"
+    )
+
+    files = StagingWriter(config.staging_root).list_run_files("trading_status", "run-1")
+    assert len(files) == 1
+    assert pl.read_parquet(files[0])["fetched_at"].to_list() == [captured_at]

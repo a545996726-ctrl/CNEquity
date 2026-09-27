@@ -465,8 +465,14 @@ def write_fetched(
     request_params: dict | None = None,
     url: str | None = None,
     snapshot_date: date | None = None,
+    preserve_fetched_at: bool = False,
 ) -> dict:
-    df = with_provenance(df, source=source, data_version=data_version_for(dataset))
+    df = with_provenance(
+        df,
+        source=source,
+        data_version=data_version_for(dataset),
+        preserve_fetched_at=preserve_fetched_at,
+    )
     publish_context = nullcontext()
     if config.should_archive_raw(dataset) and isinstance(raw_archive_evidence, RawArchiveEvidence):
         publish_context = capture_publish(
