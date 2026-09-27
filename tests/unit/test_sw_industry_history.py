@@ -112,6 +112,14 @@ def test_sw_history_reuses_valid_bytes_and_refreshes_damaged_cache(tmp_path, mon
     assert sw.fetch_sw_industry_intervals(config=config).height == 1
     assert len(calls) == 2
 
+    def fail_cache(*_args, **_kwargs):
+        raise OSError("cache volume full")
+
+    monkeypatch.setattr(sw, "write_json_atomic", fail_cache)
+    other = Config(data_root=tmp_path / "other-lake", source_intervals={"sw": 0})
+    assert sw.fetch_sw_industry_intervals(config=other).height == 1
+    assert len(calls) == 3
+
 
 def test_expand_sw_industry_as_of():
     intervals = pl.DataFrame(

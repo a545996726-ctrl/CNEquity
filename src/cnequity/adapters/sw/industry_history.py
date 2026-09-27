@@ -147,15 +147,18 @@ def fetch_sw_industry_intervals(*, client: httpx.Client | None = None, config=No
                 logger.warning("Shenwan cached history invalid; refreshing: %s", exc)
         content = download()
         intervals = parse(content)
-        write_json_atomic(
-            path,
-            {
-                "captured_at": datetime.now(timezone.utc).isoformat(),
-                "url": SW_INDUSTRY_XLS_URL,
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "content_b64": base64.b64encode(content).decode("ascii"),
-            },
-        )
+        try:
+            write_json_atomic(
+                path,
+                {
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "url": SW_INDUSTRY_XLS_URL,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_b64": base64.b64encode(content).decode("ascii"),
+                },
+            )
+        except OSError as exc:
+            logger.warning("Shenwan valid history could not be cached: %s", exc)
         return intervals
 
 
