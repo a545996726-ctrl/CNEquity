@@ -823,6 +823,19 @@ class JobEngine:
             return []
         return [step for step in planned if isinstance(step, str)]
 
+    def _retry_finalize_steps(self, run_id: str) -> tuple[str, ...]:
+        """Respect a recorded run plan when finalizing its retried staging.
+
+        Older runs and init retain their established full finalize chain. A
+        targeted run may contain only one source and compact; retrying it must
+        not launch unrelated adjustment, industry or audit work.
+        """
+        order = ("compact", "derive_adj_factors", "derive_industry_index", "audit")
+        planned = self._planned_steps(run_id)
+        if self._is_init_run(run_id) or not planned:
+            return order
+        return tuple(step for step in order if step == "compact" or step in planned)
+
     def _steps_with_batches(self, run_id: str) -> set[str]:
         """Step names this run has a batch for, however that batch ended.
 
@@ -1365,8 +1378,17 @@ class JobEngine:
         if auto_finalize and self.manifest.incomplete_batch_count(run_id) == 0:
             # A retry may have staged new rows after an earlier compact/finalize
             # attempt. Re-run the finalize chain so curated data and coverage
-            # receipts cannot lag behind the now-successful fetch.
-            results.extend(self._run_finalize_steps(run_id, trade_date, context, force=True))
+            # receipts cannot lag behind the now-successful fetch. A recorded
+            # targeted plan must not run unrelated derived datasets or audit.
+            results.extend(
+                self._run_finalize_steps(
+                    run_id,
+                    trade_date,
+                    context,
+                    force=True,
+                    steps=self._retry_finalize_steps(run_id),
+                )
+            )
         elif auto_finalize and self._has_ready_staging(run_id):
             # An unrelated failed dataset must not hold ready revisions in
             # staging. Compact itself still gates each incomplete dataset.

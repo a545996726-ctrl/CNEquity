@@ -722,7 +722,6 @@ def test_wrong_date_tdx_batch_is_not_staged_as_success(worker_config, monkeypatc
 
 def test_retry_reruns_failed_symbol_batch_only(worker_config, monkeypatch):
     from cnequity.adapters.tdx_protocol import client as tdx
-    from cnequity.derive.adj_factors import AdjFactorsResult
 
     calls: list[list[str]] = []
 
@@ -737,10 +736,6 @@ def test_retry_reruns_failed_symbol_batch_only(worker_config, monkeypatch):
         return tdx._mock_bars(symbols, start, end)
 
     monkeypatch.setattr("cnequity.orchestrator.worker_pool.fetch_daily_bars", _fetch)
-    monkeypatch.setattr(
-        "cnequity.derive.adj_factors.compute_adj_factors",
-        lambda *args, **kwargs: AdjFactorsResult(0, 0, [], []),
-    )
     monkeypatch.setattr(
         "cnequity.steps.bars.load_symbols",
         lambda _cfg: ["600519.SH", "000001.SZ"],
@@ -772,12 +767,8 @@ def test_retry_reruns_failed_symbol_batch_only(worker_config, monkeypatch):
     )
     assert curated.exists()
     steps_run = {r.get("step") for r in retry["results"]}
-    assert steps_run >= {
-        "compact",
-        "derive_adj_factors",
-        "derive_industry_index",
-        "audit",
-    }
+    assert "compact" in steps_run
+    assert not steps_run & {"derive_adj_factors", "derive_industry_index", "audit"}
 
 
 def test_partial_batch_retry_scope_is_reduced_to_missing_symbols(worker_config, monkeypatch):

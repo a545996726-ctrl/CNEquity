@@ -81,6 +81,43 @@ def test_retry_uses_the_original_runs_trade_date_not_today(tmp_path, monkeypatch
     assert seen_dates == [date.fromisoformat(stored_date)]
 
 
+def test_retry_targeted_run_does_not_start_unplanned_derives(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "data", retry_backoff_seconds=0)
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run(
+        "daily:etf_profiles_onboarding",
+        {
+            "trade_date": "2024-06-28",
+            "planned_steps": ["etf_profiles", "compact"],
+        },
+    )
+    manifest.start_batch(run_id, "etf-original", "etf_profiles", "etf_profiles")
+    manifest.finish_batch(run_id, "etf-original", "failed", error_message="connection reset")
+    # The first attempt reached compact with no ready ETF staging, as a real
+    # degraded daily run does before its failed source is retried.
+    manifest.start_batch(run_id, "compact-original", "compact", "compact")
+    manifest.finish_batch(run_id, "compact-original", "success")
+    engine = JobEngine(cfg)
+    seen_steps: list[str] = []
+
+    def recover(name, day, resumed_run_id, context, *, retry_of=None):
+        seen_steps.append(name)
+        assert day == date(2024, 6, 28)
+        batch_id = f"retry-{name}"
+        manifest.start_batch(resumed_run_id, batch_id, name, name)
+        manifest.finish_batch(resumed_run_id, batch_id, "success")
+        if retry_of:
+            manifest.supersede_batches(resumed_run_id, retry_of, superseded_by=batch_id)
+        return {"status": "success"}
+
+    monkeypatch.setattr(engine, "_run_step", recover)
+    result = engine.run_job("retry", run_id=run_id, retry_failed_only=True)
+
+    assert result["status"] == "success"
+    assert seen_steps == ["etf_profiles", "compact"]
+
+
 def test_interrupted_daily_run_retries_immediately_and_does_not_block_another_job(
     tmp_path, monkeypatch
 ):
