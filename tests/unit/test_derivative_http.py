@@ -64,6 +64,30 @@ def test_cache_survives_process_cache_clear_and_simultaneous_misses_are_merged(t
         assert len(calls) == 2
 
 
+def test_retry_event_counts_the_extra_admitted_send(tmp_path, monkeypatch):
+    from cnequity.domain.rate_limit import _read_json
+
+    cfg = Config(data_root=tmp_path / "lake", source_intervals={"sina": 0})
+    monkeypatch.setattr(common.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def handler(request):
+        calls.append(request.url)
+        if len(calls) == 1:
+            raise httpx.ReadError("transient read", request=request)
+        return httpx.Response(200, content=b"ok")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert (
+            common.fetch_bytes(
+                "https://example.test/retry", config=cfg, source="sina", client=client
+            )
+            == b"ok"
+        )
+    assert len(calls) == 2
+    assert _read_json(cfg.rate_limit_root / "events-sina.json")["retry"] == 1
+
+
 def test_prior_receipts_survive_transport_change_but_czce_options_reparse(tmp_path):
     from cnequity.storage.derivative_evidence import (
         PRE_2004_ARCHIVE_PARSER,

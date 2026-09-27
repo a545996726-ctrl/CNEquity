@@ -263,7 +263,11 @@ def fetch_datacenter(
         payload = None
         for attempt in range(max_retries):
             try:
-                resp = client.get(url)
+                resp = (
+                    client.get(url, _request_event="retry")
+                    if attempt and isinstance(client, EastMoneyClient)
+                    else client.get(url)
+                )
                 resp.raise_for_status()
                 payload = resp.json()
                 if archive is not None and archive_dataset and archive.enabled:

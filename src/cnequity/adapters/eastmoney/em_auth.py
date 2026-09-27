@@ -40,7 +40,7 @@ from cnequity.adapters.eastmoney.host_guard import (  # noqa: F401 — re-export
     Push2BudgetExhaustedError,
     Push2PausedError,
 )
-from cnequity.domain.http_policy import record_http_response
+from cnequity.domain.http_policy import record_http_response, record_request_event
 from cnequity.domain.rate_limit import source_request
 
 if TYPE_CHECKING:
@@ -316,7 +316,9 @@ class EastMoneyClient:
         try:
             with source_request(self.config, _request_source(url)):
                 host_guard.admit(self.config, url)
-                response = self._get_direct_client().get(url, headers=headers, **kwargs)
+                direct_client = self._get_direct_client()
+                record_request_event(self.config, _request_source(url), "fallback")
+                response = direct_client.get(url, headers=headers, **kwargs)
                 record_http_response(
                     self.config, _request_source(url), response, expected_json=True
                 )
@@ -347,6 +349,7 @@ class EastMoneyClient:
 
     def get(self, url: str, **kwargs) -> httpx.Response:
         host_guard.ensure_open(self.config, url)
+        request_event = kwargs.pop("_request_event", None)
         if self.config is None:
             # Bare clients retain their historical per-instance pacing. A
             # configured client gets both pacing and the shared lease from the
@@ -376,6 +379,8 @@ class EastMoneyClient:
         try:
             with source_request(self.config, _request_source(url)):
                 host_guard.admit(self.config, url)
+                if request_event is not None:
+                    record_request_event(self.config, _request_source(url), request_event)
                 response = self._client.get(url, headers=headers, **kwargs)
                 record_http_response(
                     self.config, _request_source(url), response, expected_json=True

@@ -20,7 +20,11 @@ import httpx
 import polars as pl
 
 from cnequity.adapters.numeric import finite_int64
-from cnequity.domain.http_policy import record_cache_reuse, record_http_response
+from cnequity.domain.http_policy import (
+    record_cache_reuse,
+    record_http_response,
+    record_request_event,
+)
 from cnequity.domain.rate_limit import source_request
 from cnequity.file_lock import exclusive_lock
 from cnequity.storage.atomic import write_json_atomic
@@ -237,6 +241,7 @@ def _read_board_uncached(
                     if landing.status_code not in {301, 302, 307, 308}:
                         landing.raise_for_status()
                 with source_request(config, "bse"):
+                    record_request_event(config, "bse", "retry")
                     response = client.post(_QUOTATION_API, data=request_data)
                     record_http_response(config, "bse", response, expected_json=True)
             response.raise_for_status()

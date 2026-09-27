@@ -34,7 +34,11 @@ from urllib.parse import urlsplit
 import httpx
 import polars as pl
 
-from cnequity.domain.http_policy import record_cache_reuse, record_http_response
+from cnequity.domain.http_policy import (
+    record_cache_reuse,
+    record_http_response,
+    record_request_event,
+)
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -247,6 +251,8 @@ def fetch_bytes(
                 pacing = SOURCE + "_" + host if source == SOURCE else source
                 with source_request(config, pacing):
                     check_circuit(url, config=config, source=source)
+                    if attempt:
+                        record_request_event(config, pacing, "retry")
                     resp = client.request(method, url, data=data, json=json_body, params=params)
                     record_http_response(config, pacing, resp)
                 break

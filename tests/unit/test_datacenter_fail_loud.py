@@ -92,6 +92,36 @@ def test_fetch_datacenter_retries_transient_empty_mid_pagination():
     assert client.calls == 3
 
 
+def test_configured_datacenter_retry_is_metered_after_admission(tmp_path, monkeypatch):
+    import httpx
+
+    from cnequity.adapters.eastmoney.em_auth import EastMoneyClient
+    from cnequity.config import Config
+    from cnequity.domain.rate_limit import _read_json
+
+    cfg = Config(data_root=tmp_path / "lake", source_intervals={"eastmoney_dc": 0})
+    client = EastMoneyClient(config=cfg)
+    responses = [
+        {"success": False, "message": "服务器繁忙", "code": 9701},
+        {"success": True, "result": {"pages": 1, "count": 1, "data": [{"CODE": "000001"}]}},
+    ]
+
+    def get(url, **_kwargs):
+        return httpx.Response(200, json=responses.pop(0), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(client._client, "get", get)
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.em_auth.build_eastmoney_headers", lambda *_a, **_k: {}
+    )
+    try:
+        assert fetch_datacenter(
+            client, "RPT_TEST", "CODE", max_retries=2, retry_backoff_seconds=0
+        ) == [{"CODE": "000001"}]
+    finally:
+        client.close()
+    assert _read_json(cfg.rate_limit_root / "events-eastmoney_dc.json")["retry"] == 1
+
+
 def test_fetch_datacenter_raises_when_empty_mid_pagination_persists():
     """Regression: margin_trading 2026-07-02/03 landed with exactly 500 rows because a
     persistent mid-pagination empty response was taken as end-of-data."""

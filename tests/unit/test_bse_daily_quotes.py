@@ -101,6 +101,8 @@ def test_rejects_other_sessions_and_malformed_payload(tmp_path):
 
 
 def test_retries_a_same_endpoint_waf_redirect(tmp_path):
+    from cnequity.domain.rate_limit import _read_json
+
     client = _Client({0: _jsonp([_row()], total=1)}, redirects=1)
     cfg = Config(data_root=tmp_path / "data", source_intervals={"bse": 0.0})
 
@@ -108,6 +110,7 @@ def test_retries_a_same_endpoint_waf_redirect(tmp_path):
 
     assert out.height == 1
     assert client.posted == [0, 0]
+    assert _read_json(cfg.rate_limit_root / "events-bse.json")["retry"] == 1
 
 
 def test_fails_loud_on_an_empty_page_before_advertised_total(tmp_path):

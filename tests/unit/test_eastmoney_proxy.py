@@ -51,6 +51,8 @@ direct_fallback = true
 
 
 def test_push2his_proxy_protocol_failure_retries_direct_once(tmp_path, monkeypatch):
+    from cnequity.domain.rate_limit import _read_json
+
     cfg = Config(
         data_root=tmp_path / "data",
         eastmoney_proxy="http://127.0.0.1:7890",
@@ -85,6 +87,7 @@ def test_push2his_proxy_protocol_failure_retries_direct_once(tmp_path, monkeypat
     assert client.last_route_outcome["proxy_failed"] is True
     assert client.last_route_outcome["direct_succeeded"] is True
     assert client.last_route_outcome["direct_failed"] is False
+    assert _read_json(cfg.rate_limit_root / "events-eastmoney_push2.json")["fallback"] == 1
 
 
 def test_push2his_records_when_proxy_and_direct_both_fail(tmp_path, monkeypatch):

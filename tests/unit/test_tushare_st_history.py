@@ -214,6 +214,8 @@ def test_invalid_stock_st_date_fails_closed():
 
 
 def test_retries_transient_timeout_before_emitting_evidence(tmp_path):
+    from cnequity.domain.rate_limit import _read_json
+
     client = _FlakyClient(
         {"920001.BJ": [_row("920001.BJ", "20170104")]},
         transient_failures=1,
@@ -234,3 +236,4 @@ def test_retries_transient_timeout_before_emitting_evidence(tmp_path):
     assert client.transient_failures == 0
     assert df["status"].to_list() == ["normal"]
     assert df["risk_warning"].to_list() == [True]
+    assert _read_json(cfg.rate_limit_root / "events-tushare.json")["retry"] == 1

@@ -32,6 +32,7 @@ from cnequity.domain.http_policy import (
     SourceCoolingDown,
     record_business_refusal,
     record_http_response,
+    record_request_event,
 )
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
@@ -82,6 +83,8 @@ def _post_json(
     for attempt in range(attempts):
         try:
             with source_request(config, "tushare"):
+                if attempt:
+                    record_request_event(config, "tushare", "retry")
                 response = client.post(TUSHARE_API_URL, json=payload)
                 record_http_response(config, "tushare", response)
                 response.raise_for_status()
