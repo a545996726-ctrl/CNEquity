@@ -23,8 +23,8 @@ def _cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _default(param: click.Parameter) -> str:
-    value = param.default
+def _default(param: click.Parameter, ctx: click.Context) -> str:
+    value = param.get_default(ctx, call=False)
     if value.__class__.__name__ == "Sentinel":
         return "—"
     if callable(value):
@@ -44,6 +44,7 @@ def render() -> str:
         "",
     ]
     for path, command in _leaves(cli):
+        ctx = click.Context(command)
         lines.extend([f"## `cne {path}`", "", "| 参数 | 默认值 | 说明 |", "|---|---|---|"])
         for param in command.params:
             if isinstance(param, click.Option):
@@ -56,7 +57,7 @@ def render() -> str:
                 description = f"必填；{description}" if description else "必填"
             description = description or "—"
             lines.append(
-                f"| `{_cell(label)}` | `{_cell(_default(param))}` | {_cell(description)} |"
+                f"| `{_cell(label)}` | `{_cell(_default(param, ctx))}` | {_cell(description)} |"
             )
         if not command.params:
             lines.append("| — | — | 无参数 |")

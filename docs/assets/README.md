@@ -1,5 +1,7 @@
 # 公开展示素材
 
+`cnequity-readme-banner.png` 是中文 README 顶部使用的 3:1 项目横幅，以金融数据流汇入数据湖的概念插画表达项目定位；`cnequity-github-cover.png` 是同主题的 2:1 封面。
+
 `cne-serve-hero-demo.png` 是 README 使用的合成演示图，源文件为 `serve-hero-demo.html`。图中的 42/42、行数与容量是虚构展示值，不代表当前注册数量、用户数据规模或质量。
 
 `architecture-diagram-v3.png` 是中英文 README 的概念架构图；来源协议与启用状态以当前代码和数据集目录为准。`survivorship-gap.zh.svg` 与 `survivorship-gap.svg` 是同一历史样本的中英文图，用于说明股票池口径差异，不代表当前湖覆盖或投资表现。

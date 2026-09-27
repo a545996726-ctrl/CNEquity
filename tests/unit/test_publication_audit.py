@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -10,6 +11,55 @@ from cnequity.query.reader import load
 from cnequity.steps.finalize import step_compact
 from cnequity.storage.parquet import StagingWriter
 from cnequity.storage.revisions import RevisionStore
+
+
+@pytest.mark.parametrize("backup_fails", [False, True])
+def test_manifest_backup_closes_connections(tmp_path, monkeypatch, backup_fails):
+    cfg = Config(data_root=tmp_path / "lake", publication_gate="block")
+    cfg.meta_root.mkdir(parents=True)
+    connection = sqlite3.connect(cfg.manifest_path)
+    connection.execute("CREATE TABLE receipt (value INTEGER)")
+    connection.execute("INSERT INTO receipt VALUES (42)")
+    connection.commit()
+    connection.close()
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    connections = []
+    connect = sqlite3.connect
+
+    class BackupConnection(sqlite3.Connection):
+        def backup(self, target, **kwargs):
+            if backup_fails:
+                raise sqlite3.OperationalError("backup unavailable")
+            return super().backup(target, **kwargs)
+
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs, factory=BackupConnection)
+        connections.append(connection)
+        return connection
+
+    def errors(view, day):
+        copied = connect(view.manifest_path)
+        try:
+            assert copied.execute("SELECT value FROM receipt").fetchone() == (42,)
+        finally:
+            copied.close()
+        return []
+
+    monkeypatch.setattr("cnequity.quality.publication.sqlite3.connect", tracked_connect)
+    monkeypatch.setattr("cnequity.quality.publication._errors", errors)
+    try:
+        report = evaluate_publication(cfg, "backup", date(2024, 6, 28), {"daily_bars": candidate})
+        assert report["blocked"] is backup_fails
+        if backup_fails:
+            assert report["new_errors"][0]["message"] == "backup unavailable"
+        assert len(connections) == 2
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+    finally:
+        for connection in connections:
+            connection.close()
 
 
 def _bar(close: float, stamp: str) -> pl.DataFrame:

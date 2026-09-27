@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections import Counter
+from contextlib import closing
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -81,11 +82,13 @@ def evaluate_publication(
                     shutil.copytree(source, view.meta_root / relative)
             view.meta_root.mkdir(parents=True, exist_ok=True)
             if config.manifest_path.exists():
+                # SQLite's context manager ends transactions but does not close
+                # connections. Windows needs both handles closed before cleanup.
                 with (
-                    sqlite3.connect(
-                        f"{config.manifest_path.as_uri()}?mode=ro", uri=True
+                    closing(
+                        sqlite3.connect(f"{config.manifest_path.as_uri()}?mode=ro", uri=True)
                     ) as original,
-                    sqlite3.connect(view.manifest_path) as copied,
+                    closing(sqlite3.connect(view.manifest_path)) as copied,
                 ):
                     original.backup(copied)
             baseline = _errors(view, day)
