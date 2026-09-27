@@ -1,7 +1,10 @@
 """Offline coverage for the explicit 同花顺 BJ corporate-action repair."""
 
-from datetime import date
+import json
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 
+import httpx
 import polars as pl
 
 import cnequity.steps  # noqa: F401
@@ -74,6 +77,142 @@ def test_fetch_corporate_actions_only_queries_bj_and_reports_page_failures():
     assert failed == ["430198.BJ"]
     assert frame["symbol"].unique().to_list() == ["430090.BJ"]
     assert frame["ex_date"].to_list() == [date(2022, 7, 7)] * 2
+
+
+def test_bonus_page_reused_without_refreshing_raw_observation_time(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        sources={"ths_bonus": True},
+        source_intervals={"ths": 0, "ths_bonus": 0},
+    )
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            200, content=_PAGE.encode("gb18030"), request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(ca.httpx, "get", fake_get)
+    windows = [(date(2022, 1, 1), date(2022, 12, 31))] * 2
+    for run_id, window in zip(("run-1", "run-2"), windows, strict=True):
+        frame, failed = ca.fetch_corporate_actions_ths(
+            ["430090.BJ"], *window, config=cfg, run_id=run_id, request_scope="bonus-repair"
+        )
+        assert len(frame) == 2
+        assert failed == []
+    repeated, failed = ca.fetch_corporate_actions_ths(
+        ["430090.BJ"], *windows[1], config=cfg, run_id="run-2", request_scope="bonus-repair"
+    )
+    assert len(repeated) == 2 and failed == []
+    assert len(calls) == 1
+
+    records = [
+        json.loads(path.read_text())
+        for path in (cfg.meta_root / "raw" / "corporate_actions").glob("**/*.json")
+    ]
+    assert len(records) == 2
+    assert {record["run_id"] for record in records} == {"run-1", "run-2"}
+    assert len({record["captured_at"] for record in records}) == 1
+    assert {record["http_metadata"]["cache_reuse"] for record in records} == {False, True}
+    assert len({record["payload_sha256"] for record in records}) == 1
+
+
+def test_bonus_page_single_flight_and_bad_or_expired_cache_refetches(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        sources={"ths_bonus": True},
+        source_intervals={"ths": 0, "ths_bonus": 0},
+        raw_archive_enabled=False,
+    )
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            200, content=_PAGE.encode("gb18030"), request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(ca.httpx, "get", fake_get)
+
+    def read(_):
+        return ca.fetch_corporate_actions_ths(
+            ["430090.BJ"], date(2022, 1, 1), date(2022, 12, 31), config=cfg
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(read, range(2)))
+    assert all(len(frame) == 2 and not failed for frame, failed in results)
+    assert len(calls) == 1
+
+    path = next((cfg.meta_root / "source_cache" / "ths_bonus").glob("*.json"))
+    saved = json.loads(path.read_text())
+    saved["sha256"] = "0" * 64
+    path.write_text(json.dumps(saved))
+    assert len(read(None)[0]) == 2
+    assert len(calls) == 2
+
+    saved = json.loads(path.read_text())
+    saved["captured_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    path.write_text(json.dumps(saved))
+    assert len(read(None)[0]) == 2
+    assert len(calls) == 3
+
+
+def test_bonus_page_does_not_cache_empty_or_challenge_html(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        sources={"ths_bonus": True},
+        source_intervals={"ths": 0, "ths_bonus": 0},
+        raw_archive_enabled=False,
+        max_retries=1,
+    )
+    pages = [_PAGE.replace("实施方案", "董事会预案"), "<html>challenge</html>", _PAGE]
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            200, content=pages.pop(0).encode("gb18030"), request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(ca.httpx, "get", fake_get)
+    args = (["430090.BJ"], date(2022, 1, 1), date(2022, 12, 31))
+    frame, failed = ca.fetch_corporate_actions_ths(*args, config=cfg)
+    assert frame.is_empty() and failed == []
+    frame, failed = ca.fetch_corporate_actions_ths(*args, config=cfg)
+    assert frame.is_empty() and failed == ["430090.BJ"]
+    frame, failed = ca.fetch_corporate_actions_ths(*args, config=cfg)
+    assert len(frame) == 2 and failed == []
+    assert len(calls) == 3
+
+
+def test_bonus_cache_write_failure_keeps_valid_actions(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        sources={"ths_bonus": True},
+        source_intervals={"ths": 0, "ths_bonus": 0},
+        raw_archive_enabled=False,
+    )
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            200, content=_PAGE.encode("gb18030"), request=httpx.Request("GET", url)
+        )
+
+    def fail_cache(*args, **kwargs):
+        raise OSError("cache read-only")
+
+    monkeypatch.setattr(ca.httpx, "get", fake_get)
+    monkeypatch.setattr(ca, "write_json_atomic", fail_cache)
+    frame, failed = ca.fetch_corporate_actions_ths(
+        ["430090.BJ"], date(2022, 1, 1), date(2022, 12, 31), config=cfg
+    )
+    assert len(frame) == 2 and failed == []
+    assert len(calls) == 1
+    assert not list((cfg.meta_root / "source_cache" / "ths_bonus").glob("*.json"))
 
 
 def test_step_ths_repair_is_scoped_to_delisted_bj_and_keeps_provenance(tmp_path, monkeypatch):

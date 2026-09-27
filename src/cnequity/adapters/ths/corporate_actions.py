@@ -7,12 +7,16 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
 import logging
 import math
 import re
 import time
 from collections.abc import Callable, Mapping
-from datetime import date
+from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from inspect import signature
 
@@ -23,10 +27,13 @@ from cnequity.config import Config
 from cnequity.domain.http_policy import (
     SourceCoolingDown,
     record_business_refusal,
+    record_cache_reuse,
     record_http_response,
 )
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
+from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import write_json_atomic
 from cnequity.storage.raw_archive import RawArchiveError, RawPayloadArchive, begin_capture
 
 logger = logging.getLogger(__name__)
@@ -54,6 +61,8 @@ _HEADERS = {"User-Agent": _UA, "Referer": "https://basic.10jqka.com.cn/"}
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MIN_INTERVAL = 3.0
 _MAX_RETRIES = 3
+_PAGE_CACHE_SECONDS = 86400
+_PAGE_CACHE_VERSION = 1
 
 # The first component is usually written as ``10送3股`` while subsequent
 # components omit the repeated base, e.g. ``10转4股派4.50元``. Make the
@@ -263,15 +272,23 @@ def _rows_from_page(symbol: str, html: str, start: date, end: date) -> list[dict
     return rows
 
 
-def _fetch_page(
-    code: str,
-    *,
-    config: Config | None = None,
-    archive: RawPayloadArchive | None = None,
-    run_id: str | None = None,
-    request_scope: str | None = None,
-) -> str:
-    """Fetch and decode one page; the endpoint is GB18030 despite weak headers."""
+def _is_bonus_page(html: str) -> bool:
+    parser = _BonusTableParser()
+    parser.feed(html)
+    return any(
+        any("A股除权除息日" in cell for cell in row) and any("方案进度" in cell for cell in row)
+        for row in parser.rows
+    )
+
+
+def _cacheable_bonus_page(code: str, html: str) -> bool:
+    # A structurally valid empty page does not prove that an action will never
+    # appear. Recheck it later instead of caching absence as a lasting fact.
+    return _is_bonus_page(html) and bool(_rows_from_page(f"{code}.BJ", html, date.min, date.max))
+
+
+def _download_page_wire(code: str, *, config: Config | None) -> tuple[bytes, datetime]:
+    """Return the exact GB18030 wire bytes and their actual capture time."""
     retries = config.max_retries if config is not None else _MAX_RETRIES
     backoff = float(config.retry_backoff_seconds if config is not None else 2.0)
     timeout = _DEFAULT_TIMEOUT
@@ -296,30 +313,9 @@ def _fetch_page(
         else:
             if response.status_code == 200:
                 wire = _page_wire(response)
-                if archive is not None and archive.enabled:
-                    if wire is None:
-                        raise RawArchiveError(
-                            f"THS corporate_actions {code}: response has no exact wire bytes"
-                        )
-                    archive.archive(
-                        "corporate_actions",
-                        wire,
-                        source="ths",
-                        request_params={"code": code},
-                        run_id=run_id,
-                        url=url,
-                        response_status=response.status_code,
-                        payload_format="bytes",
-                        http_metadata={"wire_exact": True, "protocol": "http"},
-                        observation_id=(
-                            f"{run_id or 'anonymous'}:bonus:{code}:"
-                            f"scope={request_scope or 'scope-unknown'}"
-                        ),
-                        request_scope=request_scope,
-                    )
                 if wire is None:
                     raise ThsCorporateActionsError(f"{url} -> HTTP 200 without response content")
-                return wire.decode("gb18030", errors="ignore")
+                return wire, datetime.now(timezone.utc)
             if response.status_code in (401, 403):
                 if response.status_code == 401:
                     record_business_refusal(config, "ths_bonus", kind="public_token_gate")
@@ -332,6 +328,124 @@ def _fetch_page(
         if attempt + 1 < max(1, retries):
             time.sleep(backoff * (attempt + 1))
     raise ThsCorporateActionsError(f"{url} failed after {max(1, retries)} attempts") from last_exc
+
+
+def _archive_page_wire(
+    code: str,
+    wire: bytes,
+    captured_at: datetime,
+    *,
+    archive: RawPayloadArchive | None,
+    run_id: str | None,
+    request_scope: str | None,
+    reused: bool,
+) -> None:
+    if archive is None or not archive.enabled:
+        return
+    archive.archive(
+        "corporate_actions",
+        wire,
+        source="ths",
+        request_params={"code": code},
+        captured_at=captured_at,
+        run_id=run_id,
+        url=_URL.format(code=code),
+        response_status=200,
+        payload_format="bytes",
+        http_metadata={"wire_exact": True, "protocol": "http", "cache_reuse": reused},
+        observation_id=(
+            f"{run_id or 'anonymous'}:bonus:{code}:"
+            f"scope={request_scope or 'scope-unknown'}:"
+            f"captured={captured_at.isoformat()}:cache={reused}"
+        ),
+        request_scope=request_scope,
+    )
+
+
+def _fetch_page(
+    code: str,
+    *,
+    config: Config | None = None,
+    archive: RawPayloadArchive | None = None,
+    run_id: str | None = None,
+    request_scope: str | None = None,
+) -> str:
+    """Fetch one page or reuse its validated bytes without refreshing evidence time."""
+    url = _URL.format(code=code)
+    if config is None:
+        wire, captured_at = _download_page_wire(code, config=None)
+        _archive_page_wire(
+            code,
+            wire,
+            captured_at,
+            archive=archive,
+            run_id=run_id,
+            request_scope=request_scope,
+            reused=False,
+        )
+        html = wire.decode("gb18030", errors="ignore")
+        if not _is_bonus_page(html):
+            raise ThsCorporateActionsError(f"{url} -> HTTP 200 without a bonus table")
+        return html
+
+    url_key = hashlib.sha256(url.encode()).hexdigest()[:16]
+    path = config.meta_root / "source_cache" / "ths_bonus" / f"{code}-{url_key}.json"
+    with exclusive_lock(path.with_suffix(".lock")):
+        if path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                captured_at = datetime.fromisoformat(saved["captured_at"])
+                age = datetime.now(timezone.utc) - captured_at
+                wire = base64.b64decode(saved["wire_b64"], validate=True)
+                if (
+                    saved["url"] == url
+                    and saved["parser_version"] == _PAGE_CACHE_VERSION
+                    and 0 <= age.total_seconds() < _PAGE_CACHE_SECONDS
+                    and hashlib.sha256(wire).hexdigest() == saved["sha256"]
+                    and _cacheable_bonus_page(code, wire.decode("gb18030", errors="ignore"))
+                ):
+                    _archive_page_wire(
+                        code,
+                        wire,
+                        captured_at,
+                        archive=archive,
+                        run_id=run_id,
+                        request_scope=request_scope,
+                        reused=True,
+                    )
+                    record_cache_reuse(config, "ths_bonus", "corporate_actions_page")
+                    return wire.decode("gb18030", errors="ignore")
+            except (OSError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+                logger.warning("THS bonus page cache invalid for %s; refreshing: %s", code, exc)
+
+        wire, captured_at = _download_page_wire(code, config=config)
+        html = wire.decode("gb18030", errors="ignore")
+        _archive_page_wire(
+            code,
+            wire,
+            captured_at,
+            archive=archive,
+            run_id=run_id,
+            request_scope=request_scope,
+            reused=False,
+        )
+        if not _is_bonus_page(html):
+            raise ThsCorporateActionsError(f"{url} -> HTTP 200 without a bonus table")
+        if _cacheable_bonus_page(code, html):
+            try:
+                write_json_atomic(
+                    path,
+                    {
+                        "url": url,
+                        "captured_at": captured_at.isoformat(),
+                        "parser_version": _PAGE_CACHE_VERSION,
+                        "sha256": hashlib.sha256(wire).hexdigest(),
+                        "wire_b64": base64.b64encode(wire).decode("ascii"),
+                    },
+                )
+            except OSError as exc:
+                logger.warning("THS valid bonus page for %s could not be cached: %s", code, exc)
+        return html
 
 
 def fetch_corporate_actions_ths(

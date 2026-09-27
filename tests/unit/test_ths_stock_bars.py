@@ -8,7 +8,9 @@ across the join with no phantom return.
 
 from __future__ import annotations
 
-from datetime import date
+import json
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -80,6 +82,121 @@ def test_transport_error_is_not_treated_as_a_missing_year(monkeypatch):
     monkeypatch.setattr(mod, "_get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("500")))
     with pytest.raises(RuntimeError, match="500"):
         fetch_stock_bars("600519.SH", date(2015, 1, 1), date(2015, 12, 31))
+
+
+def test_stock_year_reused_across_windows_and_damaged_or_expired_cache_refetched(
+    tmp_path, monkeypatch
+):
+    from cnequity.adapters.ths import stock_bars as mod
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "lake")
+    calls = []
+
+    def fake_get(url, *, config=None, timeout=20.0):
+        calls.append(url)
+        return 'cb({"data":"20150105,1,2,1,2,5,6;20150106,2,3,2,3,5,6"});'
+
+    monkeypatch.setattr(mod, "_get", fake_get)
+    windows = [(date(2015, 1, 5), date(2015, 1, 5)), (date(2015, 1, 6), date(2015, 1, 6))]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        got = list(
+            pool.map(lambda window: fetch_stock_bars("600519.SH", *window, config=cfg), windows)
+        )
+    assert [rows[0]["trade_date"] for rows in got] == [window[0] for window in windows]
+    assert len(calls) == 1
+
+    path = next((cfg.meta_root / "source_cache" / "ths_year").glob("stock-*.json"))
+    saved = json.loads(path.read_text())
+    saved["sha256"] = "0" * 64
+    path.write_text(json.dumps(saved))
+    assert len(fetch_stock_bars("600519.SH", *windows[0], config=cfg)) == 1
+    assert len(calls) == 2
+
+    saved = json.loads(path.read_text())
+    saved["captured_at"] = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    path.write_text(json.dumps(saved))
+    assert len(fetch_stock_bars("600519.SH", *windows[0], config=cfg)) == 1
+    assert len(calls) == 3
+
+
+def test_stock_and_index_year_caches_are_separate(tmp_path, monkeypatch):
+    from cnequity.adapters.ths import index_bars, stock_bars
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "lake")
+    calls = []
+
+    def fake_get(url, *, config=None, timeout=20.0):
+        calls.append(url)
+        close = 3 if "/zs_" in url else 2
+        return f'cb({{"data":"20150105,1,3,1,{close},5,6"}});'
+
+    monkeypatch.setattr(index_bars, "_get", fake_get)
+    monkeypatch.setattr(stock_bars, "_get", fake_get)
+    window = (date(2015, 1, 5), date(2015, 1, 5))
+    for _ in range(2):
+        assert (
+            index_bars.fetch_index_bars_history("399001.SZ", *window, config=cfg)[0]["close"] == 3
+        )
+        assert stock_bars.fetch_stock_bars("399001.SZ", *window, config=cfg)[0]["close"] == 2
+    assert len(calls) == 2
+    assert len(list((cfg.meta_root / "source_cache" / "ths_year").glob("*.json"))) == 2
+
+
+def test_wrong_year_and_empty_kline_are_not_cached(tmp_path, monkeypatch):
+    from cnequity.adapters.ths import stock_bars as mod
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "lake")
+    payloads = [
+        'cb({"data":"20140105,1,2,1,2,5,6"});',
+        'cb({"data":""});',
+    ]
+    calls = []
+
+    def fake_get(url, *, config=None, timeout=20.0):
+        calls.append(url)
+        return payloads.pop(0)
+
+    monkeypatch.setattr(mod, "_get", fake_get)
+    window = (date(2015, 1, 1), date(2015, 12, 31))
+    assert fetch_stock_bars("600519.SH", *window, config=cfg) == []
+    assert fetch_stock_bars("600519.SH", *window, config=cfg) == []
+    assert len(calls) == 2
+    assert not list((cfg.meta_root / "source_cache" / "ths_year").glob("*.json"))
+
+
+def test_cache_write_failure_keeps_valid_stock_rows_and_bad_text_refetches(tmp_path, monkeypatch):
+    from cnequity.adapters.ths import stock_bars, year_cache
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "lake")
+    calls = []
+
+    def fake_get(url, *, config=None, timeout=20.0):
+        calls.append(url)
+        return 'cb({"data":"20150105,1,2,1,2,5,6"});'
+
+    monkeypatch.setattr(stock_bars, "_get", fake_get)
+    write = year_cache.write_json_atomic
+
+    def fail_write(*args, **kwargs):
+        raise OSError("cache is read-only")
+
+    monkeypatch.setattr(year_cache, "write_json_atomic", fail_write)
+    window = (date(2015, 1, 5), date(2015, 1, 5))
+    assert len(fetch_stock_bars("600519.SH", *window, config=cfg)) == 1
+    assert not list((cfg.meta_root / "source_cache" / "ths_year").glob("*.json"))
+
+    monkeypatch.setattr(year_cache, "write_json_atomic", write)
+    assert len(fetch_stock_bars("600519.SH", *window, config=cfg)) == 1
+    path = next((cfg.meta_root / "source_cache" / "ths_year").glob("stock-*.json"))
+    saved = json.loads(path.read_text())
+    saved["text"] = 42
+    path.write_text(json.dumps(saved))
+    assert len(fetch_stock_bars("600519.SH", *window, config=cfg)) == 1
+    assert len(calls) == 3
 
 
 def test_hfq_derived_from_raw_is_continuous_across_a_seam():

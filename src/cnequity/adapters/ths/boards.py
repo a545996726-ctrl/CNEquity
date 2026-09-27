@@ -24,28 +24,26 @@ it changes rarely and should not cost ~150 requests on every run.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
 import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from cnequity.adapters.numeric import finite_int64
+from cnequity.adapters.ths.year_cache import cached_year_rows
 from cnequity.domain.http_policy import (
     SourceCoolingDown,
     record_business_refusal,
-    record_cache_reuse,
     record_http_response,
 )
 from cnequity.domain.market_time import shanghai_today
 from cnequity.domain.rate_limit import source_request
-from cnequity.file_lock import exclusive_lock
 from cnequity.storage.atomic import write_json_atomic
 
 if TYPE_CHECKING:
@@ -90,8 +88,6 @@ _DEFAULT_MIN_INTERVAL = 1.0
 _PAGE_HOST = "q.10jqka.com.cn"
 _PAGE_SOURCE = "ths_pages"
 _DEFAULT_PAGE_MIN_INTERVAL = 3.0
-_OLD_YEAR_CACHE_SECONDS = 30 * 86400
-_RECENT_YEAR_CACHE_SECONDS = 86400
 
 
 class ThsError(RuntimeError):
@@ -394,53 +390,16 @@ def _year_rows(board: dict, part: str, *, config: Config | None) -> list[dict]:
     """Reuse a validated annual file across overlapping historical windows."""
     code = board["sector_code"]
     url = _KLINE_URL.format(code=code, part=part)
-
-    def fetch() -> tuple[str, list[dict]]:
-        text = _get(url, config=config)
-        return text, _parse_kline(_unwrap_jsonp(text), board)
-
-    if config is None:
-        return fetch()[1]
-    path = config.meta_root / "source_cache" / "ths_year" / f"{code}-{part}.json"
-    ttl = (
-        _OLD_YEAR_CACHE_SECONDS
-        if int(part) < shanghai_today().year - 1
-        else _RECENT_YEAR_CACHE_SECONDS
+    return cached_year_rows(
+        url,
+        int(part),
+        config=config,
+        cache_name="board_year",
+        cache_filename=f"{code}-{part}.json",
+        fetch=lambda: _get(url, config=config),
+        parse=lambda text: _parse_kline(_unwrap_jsonp(text), board),
+        current_year=shanghai_today().year,
     )
-    with exclusive_lock(path.with_suffix(".lock")):
-        if path.exists():
-            try:
-                saved = json.loads(path.read_text(encoding="utf-8"))
-                age = datetime.now(timezone.utc) - datetime.fromisoformat(saved["captured_at"])
-                text = saved["text"]
-                if (
-                    saved["url"] == url
-                    and 0 <= age.total_seconds() < ttl
-                    and hashlib.sha256(text.encode("utf-8")).hexdigest() == saved["sha256"]
-                ):
-                    rows = _parse_kline(_unwrap_jsonp(text), board)
-                    if rows and all(row["trade_date"].year == int(part) for row in rows):
-                        record_cache_reuse(config, "ths", "board_year")
-                        return rows
-            except (OSError, KeyError, TypeError, ValueError, ThsError) as exc:
-                logger.warning("THS cached year %s/%s invalid; refreshing: %s", code, part, exc)
-        text, rows = fetch()
-        # An empty file or a surprising year range is not evidence that this
-        # board/year can be skipped on a later run.
-        if rows and all(row["trade_date"].year == int(part) for row in rows):
-            try:
-                write_json_atomic(
-                    path,
-                    {
-                        "captured_at": datetime.now(timezone.utc).isoformat(),
-                        "url": url,
-                        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                        "text": text,
-                    },
-                )
-            except OSError as exc:
-                logger.warning("THS valid year %s/%s could not be cached: %s", code, part, exc)
-        return rows
 
 
 def fetch_board_bars(

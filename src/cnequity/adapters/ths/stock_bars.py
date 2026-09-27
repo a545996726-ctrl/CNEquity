@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from cnequity.adapters.numeric import finite_int64
 from cnequity.adapters.ths.boards import ThsNotFoundError, _finite_float, _get, _unwrap_jsonp
+from cnequity.adapters.ths.year_cache import cached_year_rows
 
 if TYPE_CHECKING:
     from cnequity.config import Config
@@ -91,14 +92,21 @@ def fetch_stock_bars(
     rows: list[dict] = []
     seen: set[date] = set()
     for year in range(start.year, end.year + 1):
+        url = _STOCK_KLINE_URL.format(code=code, part=year)
         try:
-            payload = _unwrap_jsonp(
-                _get(_STOCK_KLINE_URL.format(code=code, part=year), config=config)
+            year_rows = cached_year_rows(
+                url,
+                year,
+                config=config,
+                cache_name="stock_year",
+                cache_filename=f"stock-{code}-{year}.json",
+                fetch=lambda url=url: _get(url, config=config),
+                parse=lambda text: _parse_stock_kline(_unwrap_jsonp(text), symbol),
             )
         except ThsNotFoundError as exc:
             logger.debug("THS %s %s unavailable: %s", symbol, year, exc)
             continue
-        for row in _parse_stock_kline(payload, symbol):
+        for row in year_rows:
             if row["trade_date"] in seen or not (start <= row["trade_date"] <= end):
                 continue
             seen.add(row["trade_date"])
