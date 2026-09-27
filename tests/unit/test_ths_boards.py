@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import pytest
@@ -196,6 +198,73 @@ def test_fetch_board_bars_uses_year_file_for_an_old_short_window(monkeypatch):
     assert any("/2020.js" in url for url in calls)
     assert not any("/last.js" in url for url in calls)
     assert len(rows) == 1
+
+
+def test_valid_year_file_is_shared_across_windows_and_refetched_if_damaged(tmp_path, monkeypatch):
+    board = {
+        "sector_code": "881121",
+        "sector_name": "煤炭",
+        "board_type": "industry",
+        "detail_code": "881121",
+    }
+    cfg = Config(data_root=tmp_path / "lake")
+    calls = []
+
+    def fake_get(url, *, config=None, timeout=20.0):
+        calls.append(url)
+        return 'cb({"data":"20200102,10,12,9,11,1000,1e9;20200103,11,13,10,12,1100,1.1e9"});'
+
+    monkeypatch.setattr(ths, "_get", fake_get)
+    monkeypatch.setattr(ths, "shanghai_today", lambda: date(2026, 8, 15))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        windows = list(
+            pool.map(
+                lambda days: ths.fetch_board_bars(board, days[0], days[1], config=cfg),
+                [(date(2020, 1, 2), date(2020, 1, 2)), (date(2020, 1, 3), date(2020, 1, 3))],
+            )
+        )
+    assert [len(rows) for rows in windows] == [1, 1]
+    assert len(calls) == 1
+
+    from cnequity.domain.rate_limit import _read_json
+
+    assert _read_json(cfg.rate_limit_root / "reuse-ths.json")["hits"] == 1
+    path = next((cfg.meta_root / "source_cache" / "ths_year").glob("*.json"))
+    saved = json.loads(path.read_text())
+    saved["sha256"] = "0" * 64
+    path.write_text(json.dumps(saved))
+    assert len(ths.fetch_board_bars(board, date(2020, 1, 2), date(2020, 1, 3), config=cfg)) == 2
+    assert len(calls) == 2
+
+
+def test_ths_empty_year_is_not_cached_and_last_remains_live(tmp_path, monkeypatch):
+    board = {
+        "sector_code": "881121",
+        "sector_name": "煤炭",
+        "board_type": "industry",
+        "detail_code": "881121",
+    }
+    cfg = Config(data_root=tmp_path / "lake")
+    monkeypatch.setattr(ths, "shanghai_today", lambda: date(2026, 8, 15))
+    calls = []
+
+    def fake_get(url, *, config=None, timeout=20.0):
+        calls.append(url)
+        if "/last.js" in url:
+            return 'cb({"data":"20260814,10,12,9,11,1000,1e9"});'
+        return 'cb({"data":""});'
+
+    monkeypatch.setattr(ths, "_get", fake_get)
+    for _ in range(2):
+        assert ths.fetch_board_bars(board, date(2020, 1, 2), date(2020, 1, 3), config=cfg) == []
+    assert len(calls) == 2
+    assert not list((cfg.meta_root / "source_cache" / "ths_year").glob("*.json"))
+    for _ in range(2):
+        assert (
+            len(ths.fetch_board_bars(board, date(2026, 8, 14), date(2026, 8, 14), config=cfg)) == 1
+        )
+    assert len(calls) == 4
+    assert all("/last.js" in url for url in calls[2:])
 
 
 def test_fetch_board_bars_last_window_overrides_annual_overlap(monkeypatch):
