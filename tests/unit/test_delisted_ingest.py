@@ -40,7 +40,13 @@ def _bars(symbol: str, first: date, last: date) -> pl.DataFrame:
 
 
 def _cfg(tmp_path, catalog: dict[str, str], live=("600519.SH",)):
-    cfg = Config(data_root=tmp_path / "data", sources={"sina": True})
+    # Fetches are injected fixture functions. Keep source admission enabled
+    # while avoiding real pacing waits (including in the mocked retry clock).
+    cfg = Config(
+        data_root=tmp_path / "data",
+        sources={"sina": True},
+        source_intervals={"sina": 0, "sina_bars": 0},
+    )
     path = catalog_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"delisted": catalog, "never_issued": []}))

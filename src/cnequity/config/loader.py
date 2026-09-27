@@ -82,7 +82,7 @@ class Config:
     retry_backoff_seconds: int = 5
     batch_stale_seconds: int = 3600
     tdx_enabled: bool = True
-    tdx_min_interval_ms: int = 50
+    tdx_min_interval_ms: int = 100
     tdx_lock_timeout_sec: float = 15.0
     tdx_servers: str = "auto"
     tdx_connect_timeout_sec: int = 10
@@ -577,7 +577,10 @@ class Config:
         return RateLimitSpec(
             str(self.rate_limit_root),
             "tdx_protocol",
-            self.tdx_min_interval_ms / 1000.0,
+            max(
+                self.tdx_min_interval_ms / 1000.0,
+                self.source_intervals.get("tdx_protocol", 0.0),
+            ),
             self.tdx_lock_timeout_sec,
             # Fall back to the TDX lane width, not the global ``workers``
             # budget.  This cap is a socket-level semaphore; when it is
@@ -945,7 +948,7 @@ def load_config(path: str | Path) -> Config:
         retry_backoff_seconds=int(orch.get("retry_backoff_seconds", 5)),
         batch_stale_seconds=int(orch.get("batch_stale_seconds", 3600)),
         tdx_enabled=bool(tdx.get("enabled", True)),
-        tdx_min_interval_ms=int(tdx.get("min_interval_ms", 50)),
+        tdx_min_interval_ms=int(tdx.get("min_interval_ms", 100)),
         tdx_lock_timeout_sec=float(tdx.get("lock_timeout_sec", 15.0)),
         tdx_servers=str(tdx.get("servers", "auto")),
         tdx_connect_timeout_sec=int(tdx.get("connect_timeout_sec", 10)),

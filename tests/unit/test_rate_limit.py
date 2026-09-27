@@ -19,6 +19,67 @@ from cnequity.file_lock import LockUnavailable
 INTERVAL = 0.1
 
 
+def test_minimal_config_keeps_source_pacing_and_explicit_override(tmp_path):
+    from cnequity.adapters.throttle import SourceRateLimiters
+    from cnequity.config import load_config
+    from cnequity.diagnostics.source_limits import effective_source_policy
+
+    cfg = Config(data_root=tmp_path / "lake")
+    assert cfg.tdx_rate_limit_spec().min_interval == 0.1
+    limiters = SourceRateLimiters(cfg)
+    for source, interval in {
+        "cninfo": 1.0,
+        "eastmoney_push2": 4.0,
+        "ths_pages": 3.0,
+        "baostock": 1.0,
+    }.items():
+        assert limiters._limiters[source].min_interval == interval
+        assert (
+            effective_source_policy(cfg, source)["pacing_seconds"][source]["configured_seconds"]
+            == interval
+        )
+    for source, family, cap in (
+        ("cninfo", "cninfo", 2),
+        ("eastmoney_push2", "eastmoney_push2", 1),
+        ("ths_pages", "ths", 1),
+        ("baostock", "baostock", 1),
+    ):
+        assert limiters._concurrency[family].limit == cap
+        assert effective_source_policy(cfg, source)["configured_max_concurrency"] == cap
+
+    explicit = Config(data_root=tmp_path / "other", source_intervals={"cninfo": 0.0})
+    assert SourceRateLimiters(explicit)._limiters["cninfo"].min_interval == 0.0
+    minimal_toml = tmp_path / "minimal.toml"
+    minimal_toml.write_text('[data]\nroot = "./minimal-lake"\n', encoding="utf-8")
+    loaded = load_config(minimal_toml)
+    assert loaded.tdx_rate_limit_spec().min_interval == 0.1
+    assert SourceRateLimiters(loaded)._limiters["cninfo"].min_interval == 1.0
+    assert not cfg.data_root.exists()
+
+
+@pytest.mark.parametrize(("alias_interval", "expected"), [(0.0, 0.1), (0.25, 0.25)])
+def test_tdx_wire_and_request_lanes_use_stricter_interval(tmp_path, alias_interval, expected):
+    from cnequity.adapters.throttle import SourceRateLimiters
+    from cnequity.diagnostics.source_limits import effective_source_policy
+
+    cfg = Config(
+        data_root=tmp_path / "lake",
+        tdx_min_interval_ms=100,
+        tdx_lock_timeout_sec=7.0,
+        source_intervals={"tdx_protocol": alias_interval},
+    )
+    assert cfg.tdx_rate_limit_spec().min_interval == expected
+    request_lane = SourceRateLimiters(cfg)._limiters["tdx_protocol"]
+    assert request_lane.min_interval == expected
+    assert request_lane.lock_timeout == 7.0
+    assert (
+        effective_source_policy(cfg, "tdx_protocol")["pacing_seconds"]["tdx_protocol"][
+            "configured_seconds"
+        ]
+        == expected
+    )
+
+
 def test_meter_counts_admitted_scope_once_but_not_local_rejection(tmp_path):
     cfg = Config(data_root=tmp_path / "lake")
     with cfg.source_request("bse"):
@@ -412,12 +473,12 @@ def test_source_aliases_share_one_vendor_request_spacing(tmp_path):
     with cfg.source_request("ths_bonus"):
         pass
     second = json.loads(path.read_text())["next_allowed_at"]
-    assert second - first >= 0.019
-    assert json.loads(path.read_text())["min_interval"] == 0.02
+    assert second - first >= 0.9
+    assert json.loads(path.read_text())["min_interval"] == 1.0
     from cnequity.diagnostics.source_limits import effective_source_policy
 
     report = effective_source_policy(cfg, "ths_pages")
-    assert report["pacing_seconds"]["ths"]["effective_seconds"] == 0.02
+    assert report["pacing_seconds"]["ths"]["effective_seconds"] == 1.0
 
 
 @pytest.mark.parametrize(

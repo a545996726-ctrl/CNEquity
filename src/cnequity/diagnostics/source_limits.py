@@ -12,18 +12,26 @@ from cnequity.adapters.eastmoney import host_guard
 from cnequity.diagnostics.source_health import PROBES
 from cnequity.domain.datasets import DATASETS
 from cnequity.domain.http_policy import cooldown_status, source_family
-from cnequity.domain.rate_limit import _policy_day, _read_json, _safe_source_name
+from cnequity.domain.rate_limit import (
+    DEFAULT_SOURCE_CONCURRENCY,
+    DEFAULT_SOURCE_INTERVALS,
+    DEFAULT_UNKNOWN_SOURCE_INTERVAL_SECONDS,
+    _policy_day,
+    _read_json,
+    _safe_source_name,
+)
 
 
 def effective_source_policy(config, source: str, aliases: set[str] | None = None) -> dict:
     """Read the configured and same-day shared limits without reserving a slot."""
     family = source_family(source)
+    intervals = {**DEFAULT_SOURCE_INTERVALS, **config.source_intervals}
     names = {family, source}
     names.update(name for name in (aliases or set()) if source_family(name) == family)
     names.update(
         name
         for mapping in (
-            config.source_intervals,
+            intervals,
             config.source_concurrency,
             config.http_workers,
             config.source_workers,
@@ -43,8 +51,10 @@ def effective_source_policy(config, source: str, aliases: set[str] | None = None
         # Match the direct wire adapter and the shared source-request helper.
         # A macOS process-pool budget of one does not imply one TDX socket.
         configured_cap = config.tdx_rate_limit_spec().concurrency_limit
+    elif family.startswith("futures_exchange_"):
+        configured_cap = DEFAULT_SOURCE_CONCURRENCY["futures_exchange"]
     else:
-        configured_cap = int(config.workers)
+        configured_cap = DEFAULT_SOURCE_CONCURRENCY.get(family, int(config.workers))
     day = _policy_day(time.time())
     concurrency = _read_json(
         config.rate_limit_root / f"concurrency-{_safe_source_name(family)}.json"
@@ -57,25 +67,23 @@ def effective_source_policy(config, source: str, aliases: set[str] | None = None
     )
     pacing = {}
     for name in sorted(names):
-        configured = config.source_intervals.get(name)
+        configured = intervals.get(name)
         if name == family and configured is None:
             family_intervals = [
-                value
-                for alias, value in config.source_intervals.items()
-                if source_family(alias) == family
+                value for alias, value in intervals.items() if source_family(alias) == family
             ]
             if family_intervals:
                 configured = max(family_intervals)
-        if configured is None and name == "tdx_protocol" and config.tdx_enabled:
-            configured = config.tdx_min_interval_ms / 1000.0
-        elif configured is None and name == "sina":
-            configured = 0.3
+        if name == "tdx_protocol" and config.tdx_enabled:
+            configured = config.tdx_rate_limit_spec().min_interval
         elif configured is None and name.startswith("futures_exchange_"):
-            configured = config.source_intervals.get("futures_exchange", 1.0)
+            configured = intervals["futures_exchange"]
+        elif configured is None and name != family:
+            configured = intervals.get(family)
+        if configured is None:
+            configured = DEFAULT_UNKNOWN_SOURCE_INTERVAL_SECONDS
         saved = _read_json(config.rate_limit_root / f"{_safe_source_name(name)}.json")
         saved_interval = saved.get("min_interval") if saved.get("policy_day") == day else None
-        if configured is None and saved_interval is None:
-            continue
         effective = (
             max(configured or 0.0, saved_interval)
             if type(saved_interval) in (int, float)
@@ -163,6 +171,7 @@ def build_source_limits(config) -> dict:
     """Report known limits and repair ranges without creating lake files."""
     names = (
         set(config.sources)
+        | set(DEFAULT_SOURCE_INTERVALS)
         | set(config.source_intervals)
         | set(config.source_concurrency)
         | set(config.http_workers)

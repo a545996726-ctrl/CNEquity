@@ -28,7 +28,13 @@ _NEVER_ISSUED = {"600013.SH", "600014.SH", "600024.SH"}
 
 
 def _cfg(tmp_path, live=("600519.SH", "000001.SZ")):
-    cfg = Config(data_root=tmp_path / "data", sources={"sina": True})
+    # These sweeps use an injected local probe; pacing real wire calls would
+    # only make the fixture's 40-code loops wait without testing source policy.
+    cfg = Config(
+        data_root=tmp_path / "data",
+        sources={"sina": True},
+        source_intervals={"sina": 0, "sina_bars": 0},
+    )
     part = cfg.curated_root / "instruments"
     part.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({"symbol": list(live)}).write_parquet(part / "part-merged.parquet")

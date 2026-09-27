@@ -16,6 +16,53 @@ from pathlib import Path
 from cnequity.file_lock import exclusive_lock
 
 DEFAULT_LOCK_TIMEOUT_SECONDS = 15.0
+# Code-level defaults for minimal TOML and programmatic Config callers. The
+# packaged example may override these per source; omission must not turn a
+# network adapter into an unpaced request loop.
+DEFAULT_SOURCE_INTERVALS: dict[str, float] = {
+    "eastmoney": 0.5,
+    "eastmoney_push2": 4.0,
+    "eastmoney_dc": 1.0,
+    "ths": 1.0,
+    "ths_pages": 3.0,
+    "ths_bonus": 3.0,
+    "ths_data": 3.0,
+    "cninfo": 1.0,
+    "pboc": 1.0,
+    "nbs": 1.0,
+    "exchange": 1.0,
+    "futures_exchange": 1.0,
+    "sw": 1.0,
+    "cni": 1.0,
+    "sina": 0.3,
+    "sina_bars": 1.0,
+    "bse": 1.0,
+    "baostock": 1.0,
+    "tushare": 1.0,
+    "ths_official": 0.4,
+}
+DEFAULT_UNKNOWN_SOURCE_INTERVAL_SECONDS = 1.0
+# Family-wide in-flight defaults for configs that omit source caps. Aliases
+# with a stricter published example cap (THS pages, Sina bars) set the family
+# default; explicit source caps still determine the family limit when present.
+DEFAULT_SOURCE_CONCURRENCY: dict[str, int] = {
+    "eastmoney": 4,
+    "eastmoney_push2": 1,
+    "eastmoney_dc": 2,
+    "ths": 1,
+    "cninfo": 2,
+    "pboc": 2,
+    "nbs": 2,
+    "exchange": 2,
+    "futures_exchange": 1,
+    "sw": 1,
+    "cni": 1,
+    "sina": 2,
+    "bse": 2,
+    "baostock": 1,
+    "tushare": 2,
+    "ths_official": 2,
+}
 logger = logging.getLogger(__name__)
 
 

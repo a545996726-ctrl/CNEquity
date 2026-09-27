@@ -9,6 +9,10 @@ from cnequity.config import Config
 from cnequity.domain.http_policy import check_source_cooldown, source_probe_slot
 from cnequity.domain.http_policy import source_family as _source_family
 from cnequity.domain.rate_limit import (
+    DEFAULT_LOCK_TIMEOUT_SECONDS,
+    DEFAULT_SOURCE_CONCURRENCY,
+    DEFAULT_SOURCE_INTERVALS,
+    DEFAULT_UNKNOWN_SOURCE_INTERVAL_SECONDS,
     RateLimiter,
     SourceConcurrencyLimiter,
     record_metered_attempt,
@@ -26,15 +30,19 @@ class SourceRateLimiters:
 
     def __post_init__(self) -> None:
         state_dir = self.config.rate_limit_root
+        intervals = {**DEFAULT_SOURCE_INTERVALS, **self.config.source_intervals}
         if self.config.tdx_enabled:
-            interval = self.config.tdx_min_interval_ms / 1000.0
+            interval = self.config.tdx_rate_limit_spec().min_interval
+            intervals["tdx_protocol"] = interval
             self._limiters["tdx_protocol"] = RateLimiter(
                 "tdx_protocol",
                 interval,
                 state_dir,
                 lock_timeout=self.config.tdx_lock_timeout_sec,
             )
-        for source, interval in self.config.source_intervals.items():
+        for source, interval in intervals.items():
+            if source == "tdx_protocol" and self.config.tdx_enabled:
+                continue  # Keep the wire lane's stricter interval and lock timeout.
             self._limiters[source] = RateLimiter(source, interval, state_dir)
         # Alias lanes also need one family-wide start spacing. An explicit
         # family interval is the aggregate floor; keep slower endpoint lanes
@@ -45,8 +53,17 @@ class SourceRateLimiters:
             family = _source_family(name)
             family_intervals[family] = max(family_intervals.get(family, 0.0), limiter.min_interval)
         for family, interval in family_intervals.items():
-            family_interval = self.config.source_intervals.get(family, interval)
-            self._limiters[family] = RateLimiter(family, family_interval, state_dir)
+            family_interval = intervals.get(family, interval)
+            self._limiters[family] = RateLimiter(
+                family,
+                family_interval,
+                state_dir,
+                lock_timeout=(
+                    self.config.tdx_lock_timeout_sec
+                    if family == "tdx_protocol"
+                    else DEFAULT_LOCK_TIMEOUT_SECONDS
+                ),
+            )
 
         # Every source with an interval gets a default cap as well.  The
         # default follows the legacy scheduler budget, while an explicit
@@ -92,20 +109,22 @@ class SourceRateLimiters:
             # TDX's wire adapter uses the daily lane width, including on
             # macOS where the unrelated process-pool budget is one worker.
             return self.config.tdx_daily_worker_count()
-        return max(1, int(self.config.workers))
+        if family.startswith("futures_exchange_"):
+            return DEFAULT_SOURCE_CONCURRENCY["futures_exchange"]
+        return DEFAULT_SOURCE_CONCURRENCY.get(family, max(1, int(self.config.workers)))
 
     def wait(self, source: str) -> None:
         limiter = self._limiters.get(source)
         family = _source_family(source)
-        if limiter is None and (
-            family in self._limiters or source.startswith("futures_exchange_") or source == "sina"
-        ):
+        if limiter is None:
             base = self._limiters.get(
                 "futures_exchange" if source.startswith("futures_exchange_") else family
             )
             state_dir = self.config.rate_limit_root
             limiter = RateLimiter(
-                source, base.min_interval if base else (0.3 if source == "sina" else 1.0), state_dir
+                source,
+                base.min_interval if base else DEFAULT_UNKNOWN_SOURCE_INTERVAL_SECONDS,
+                state_dir,
             )
             self._limiters[source] = limiter
         if limiter is not None:
