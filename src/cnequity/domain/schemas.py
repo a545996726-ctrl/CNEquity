@@ -37,6 +37,10 @@ def data_version_for(dataset: str) -> str:
     return DATASET_DATA_VERSION.get(dataset, DEFAULT_DATA_VERSION)
 
 
+# Columns a writer may leave out; validation adds them as null. Older rows and
+# sources that do not publish the value read the same way.
+OPTIONAL_COLUMNS = frozenset({"pre_close"})
+
 DAILY_BARS_SCHEMA = {
     "symbol": pl.Utf8,
     "trade_date": pl.Date,
@@ -44,6 +48,11 @@ DAILY_BARS_SCHEMA = {
     "high": pl.Float64,
     "low": pl.Float64,
     "close": pl.Float64,
+    # The exchange's previous close for the session, when a source publishes
+    # it (exchange and BSE boards, TDX quotes). On an ex-date it is the
+    # ex-rights reference price, so the day's factor step is close_prev /
+    # pre_close. Null where the source does not carry it, e.g. K-line history.
+    "pre_close": pl.Float64,
     "volume": pl.Int64,
     "amount": pl.Float64,
     "source": pl.Utf8,
@@ -1108,6 +1117,8 @@ def _validate_bar_semantics(df: pl.DataFrame, dataset: str) -> None:
         checks.append(pl.col("volume") < 0)
     if "amount" in df.columns:
         checks.append(pl.col("amount").is_not_null() & (pl.col("amount") < 0))
+    if "pre_close" in df.columns:
+        checks.append(pl.col("pre_close").is_not_null() & (pl.col("pre_close") <= 0))
 
     if all(col in df.columns for col in ("open", "high", "low", "close")):
         # Intraday sources emit zero-volume carried-forward placeholders for
@@ -1277,6 +1288,11 @@ def validate_dataframe(
         from cnequity.domain.trading_status import normalize_legacy
 
         df = normalize_legacy(df)
+
+    schema = DATASET_SCHEMAS.get(dataset, {})
+    absent = [c for c in OPTIONAL_COLUMNS if c in schema and c not in df.columns]
+    if absent:
+        df = df.with_columns(pl.lit(None, dtype=schema[c]).alias(c) for c in absent)
 
     if dataset == "corporate_actions":
         for name, dtype in (

@@ -17,10 +17,12 @@ from typing import Any
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.market_profile import OTC_SCOPED_DATASETS
 from cnequity.query.reader import (
     ADJUSTABLE_DATASETS,
     DATE_COLUMNS,
     PIT_DATASETS,
+    _has_listing_dates,
     _merge_revision_selection,
     _revision_for_dataset,
     load,
@@ -40,7 +42,7 @@ class ReadResult:
     receipt: dict[str, Any]
 
 
-def _dependencies(dataset: str, options: Mapping[str, Any]) -> set[str]:
+def _dependencies(dataset: str, options: Mapping[str, Any], config: Config) -> set[str]:
     dependencies = {dataset}
     if dataset == "flash_news_wire":
         dependencies.add("news_headlines")
@@ -50,6 +52,12 @@ def _dependencies(dataset: str, options: Mapping[str, Any]) -> set[str]:
         dependencies.update({"corporate_actions", "instruments"})
     if options.get("universe") or options.get("profile") or options.get("universe_profile"):
         dependencies.update({"instruments", "trading_status", "trading_calendar"})
+    if (
+        dataset in OTC_SCOPED_DATASETS
+        and not options.get("include_otc")
+        and _has_listing_dates(config)
+    ):
+        dependencies.add("instruments")
     return dependencies
 
 
@@ -128,7 +136,7 @@ def load_with_receipt(
     """
 
     cfg = resolve_config(config=config, data_root=data_root)
-    dependencies = _dependencies(dataset, options)
+    dependencies = _dependencies(dataset, options, cfg)
     states = {name: dataset_state(name, config=cfg) for name in sorted(dependencies)}
     selection = _merge_revision_selection(options.get("revision"), options.get("revision_map"))
     pins: dict[str, int | str] = {}

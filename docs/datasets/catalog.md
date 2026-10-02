@@ -312,6 +312,7 @@ THS 官方估值快照只能从启用后按日积累，不能用旧日期重放�
 | `st_labels_vs_exchange` | trading_status | 沪深交易所证券列表简称 |
 | `daily_bars_vs_exchange` | daily_bars | 沪深交易所自身发布的收盘行情 |
 | `adj_factor_corporate_action_divergence` | adj_factors | 由 `corporate_actions` 独立重算的复权因子步长 |
+| `adj_factor_pre_close_divergence` | adj_factors | 交易所公布的前收盘（`daily_bars.pre_close`）给出的步长 `前一交易日收盘 ÷ pre_close` |
 
 价格与成交额使用各自的容差。成交额还按偏差标的占比判定，避免统计范围差异造成逐只误报。交易所停牌零成交记录不作为行情缺口；`daily_bars_missing_vs_exchange` 只统计有成交的标的。
 

@@ -7,6 +7,7 @@ from datetime import date
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.market_profile import exchange_start
 from cnequity.domain.symbols import (
     CDR_PREFIXES,
     ETF_PREFIXES,
@@ -308,6 +309,7 @@ def tradable_symbols_on_date(
 
     out = (
         instruments.filter(_all_a_symbol_expr(universe=universe))
+        .with_columns(_exchange_listing_expr().alias("list_date"))
         .filter(pl.col("list_date").is_null() | (pl.col("list_date") <= trade_date))
         .filter(pl.col("delist_date").is_null() | (pl.col("delist_date") >= trade_date))
         .select("symbol")
@@ -336,6 +338,18 @@ def tradable_symbols_on_date(
     if not bad.is_empty():
         out = out.filter(~pl.col("symbol").is_in(bad))
     return out
+
+
+def _exchange_listing_expr() -> pl.Expr:
+    """Listing date as the universe reads it: a Beijing security's exchange start.
+
+    Its NEEQ over-the-counter quotes before that are not part of any universe.
+    """
+    return (
+        pl.when(pl.col("symbol").str.ends_with(".BJ"))
+        .then(exchange_start(pl.col("list_date")))
+        .otherwise(pl.col("list_date"))
+    )
 
 
 def apply_universe_filter(
@@ -377,7 +391,7 @@ def apply_universe_filter(
         return df
 
     valid_symbols = instruments.filter(_all_a_symbol_expr(universe=universe))["symbol"]
-    inst = instruments.select(["symbol", "list_date", "delist_date"])
+    inst = instruments.select("symbol", _exchange_listing_expr().alias("list_date"), "delist_date")
     df = df.join(inst, on="symbol", how="left")
     df = df.filter(
         pl.col("list_date").is_null() | (pl.col("list_date") <= pl.col(date_col))

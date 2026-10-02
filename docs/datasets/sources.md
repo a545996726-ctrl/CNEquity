@@ -203,7 +203,7 @@
 | 项 | 值 |
 |------|-------|
 | Step | `derive_adj_factors`（finalize 波次） |
-| 主源 | sina（qfq/hfq 因子序列） |
+| 主源 | sina（qfq/hfq 因子序列）；北交所交易所阶段为 `derived_actions`：按交易所除权规则由湖内公司行为与前收盘计算，新浪作对照 |
 | 备源 | baostock（用 raw / 后复权收盘价之比推导因子） |
 | 输入 | daily_bars 交易日 + 外部因子 API |
 | 频率 | compact 之后每日 |
@@ -212,6 +212,7 @@
 | **已知缺口** | 股票从 Sina 的 `f` 字段取因子，ETF/LOF 从 `s` 字段取因子（hfq 直接使用 `s`，qfq 使用 `1/s`）。新浪支持部分北交所标的，但新上市未交易、已退市或源端无因子的标的仍可能缺失；以最新 `adj_factor_coverage` / `adj_factor_source_unavailable` finding 和 `meta/quality/health-latest.json` 为准。对正式退市且新浪明确返回空序列的标的，派生会写入 `meta/state/adj_factors.json.source_unavailable_symbols`，停止无效重试但不会伪造因子。 |
 | **查询侧后果** | `load(adjust="hfq")` 默认 `strict_adj=False`，缺因子的行按 `factor=1.0` 返回，即**未复权价出现在复权结果里**，只由 `adj_is_exact=False` 标记。实际不精确行数随查询窗口、标的范围和最新因子覆盖变化；请以结果中的 `adj_is_exact=False` 以及最新 `meta/quality/health-latest.json` 的 `adj_factor_coverage` finding 为准。|
 | **怎么办** | 要严格失败而不是静默降级：`load(..., strict_adj=True)`。**它不是默认值**：新上市的票在拿到第一个因子前必然缺，所以严格模式会让 `universe="all_a"` 的 hfq 查询长期抛错。默认容忍 + `adj_is_exact` 标记 + 审计告警，是在「不静默污染」和「查询可用」之间的取舍 |
+| **北交所** | 交易所上市起点（`list_date` 与 2020-07-27 中较晚者）之后的因子由公司行为计算：每个事件在其生效交易日按 `前收盘 ÷ 除权参考价` 出台阶，重整转增用公告的参考价；序列从该证券首个交易所交易日的已存水平起算，因此与新浪一致的证券数值不变。新浪仍会取数，台阶与计算值相差超过核验容差时报 `adj_factor_computed_vendor_divergence`，新浪有台阶而计算值没有，通常意味着湖内漏记了公司行为。新三板时期的因子行保持原值 |
 | **自愈** | `derive_adj_factors` 每次增量运行都会找出「有 bar 但因子够不到」的标的并重排其完整历史，单次上限 500 只。所以 `cne backfill daily_bars` 补的历史会在随后的日更里自动补上因子，无需 `--full` |
 
 ### v1.0-full（第二批）

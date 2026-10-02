@@ -245,6 +245,8 @@ def quote_bars(client, symbols: list[str], trade_date: date, *, pace=None) -> di
             if min(prices) <= 0:
                 continue
             symbol = f"{row['code']}.{'SH' if row['market'] == MARKET_SH else 'SZ'}"
+            last_close = row.get("last_close_raw")
+            pre_close = round(last_close * coefficient, 4) if last_close else None
             out[symbol] = {
                 "symbol": symbol,
                 "trade_date": trade_date,
@@ -252,6 +254,7 @@ def quote_bars(client, symbols: list[str], trade_date: date, *, pace=None) -> di
                 "high": prices[1],
                 "low": prices[2],
                 "close": prices[3],
+                "pre_close": pre_close if pre_close and pre_close > 0 else None,
                 "volume": int(row["vol"]) * 100,
                 "amount": float(row["amount"]),
             }

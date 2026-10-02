@@ -132,10 +132,11 @@ def test_total_return_is_for_daily_bars_only(lake):
         load("minute_bars", config=lake, adjust="total_return")
 
 
-def test_a_total_return_receipt_pins_the_distribution_inputs():
+def test_a_total_return_receipt_pins_the_distribution_inputs(tmp_path):
+    from cnequity.config import Config
     from cnequity.query.receipt import _dependencies
 
-    deps = _dependencies("daily_bars", {"adjust": "total_return"})
+    deps = _dependencies("daily_bars", {"adjust": "total_return"}, Config(data_root=tmp_path))
     assert {"adj_factors", "corporate_actions", "instruments"} <= deps
 
 

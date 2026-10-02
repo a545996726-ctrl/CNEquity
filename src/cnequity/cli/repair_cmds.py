@@ -84,3 +84,18 @@ def orphan_symbols(config_path: str, apply: bool):
     from cnequity.storage.orphan_symbol_repair import repair_orphan_symbols
 
     _emit(repair_orphan_symbols(_cfg(config_path), apply=apply))
+
+
+@repair.command("stale-suspensions")
+@config_option
+@click.option("--apply", is_flag=True, help="核验后发布新版本；默认只输出计划。")
+def stale_suspensions(config_path: str, apply: bool):
+    """删除已被实际成交日线否定的推断停牌（trading_status 中 derived_bar_gap 来源的行）。
+
+    \b
+    这类行由缺失的日线推断而来；某次运行漏抓了行情时，缺口会被误记为停牌。
+    行情补齐后，同一天有成交的日线即证明该行错误。独立来源的停牌记录不受影响。
+    """
+    from cnequity.storage.orphan_symbol_repair import repair_stale_derived_suspensions
+
+    _emit(repair_stale_derived_suspensions(_cfg(config_path), apply=apply))

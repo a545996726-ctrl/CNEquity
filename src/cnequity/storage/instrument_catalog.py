@@ -37,8 +37,15 @@ def load_curated_trading_status(
     start: date | None = None,
     end: date | None = None,
     symbols: list[str] | None = None,
+    include_inferred: bool = False,
 ) -> pl.DataFrame | None:
     """Load the available status evidence without making a network request.
+
+    ``derived_bar_gap`` rows are left out unless ``include_inferred``: they
+    are inferred from the very bars this evidence is used to judge, so a
+    session that lost its Beijing bars in a failed run came back as 223
+    "suspensions" that excused the gap, kept it out of the next fetch and out
+    of the coverage gate (2026-08-07).
 
     ``trading_status`` is an advisory but independently fetched daily
     snapshot.  Daily-bar routing may use it to prove that a missing symbol was
@@ -71,4 +78,12 @@ def load_curated_trading_status(
             sorted(required - set(frame.columns)),
         )
         return None
+    if not include_inferred and "source" in frame.columns:
+        from cnequity.domain.trading_status import DERIVED_BAR_GAP_SOURCE
+
+        # Before the canonical pick, so an independent row on the same key
+        # surfaces instead of the inference that outranked it.
+        frame = frame.filter(
+            pl.col("source").is_null() | (pl.col("source") != DERIVED_BAR_GAP_SOURCE)
+        )
     return dedupe_by_primary_key(frame, "trading_status")

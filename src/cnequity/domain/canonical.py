@@ -133,6 +133,23 @@ def _retain_payment_evidence(frame, dataset):
     )
 
 
+def _retain_pre_close(frame, dataset):
+    """A K-line refresh of a session cannot erase the exchange's previous close.
+
+    ``pre_close`` comes only from tip quotes; the history sweep that later
+    reconciles the same session does not carry it. Within one primary key the
+    latest published value is carried to a row that has none; a row's own
+    value is never rewritten.
+    """
+    schema = frame.collect_schema() if isinstance(frame, pl.LazyFrame) else frame.schema
+    keys = PRIMARY_KEYS.get(dataset, [])
+    if "pre_close" not in schema.names() or not keys:
+        return frame
+    return frame.with_columns(
+        pl.col("pre_close").fill_null(pl.col("pre_close").forward_fill().over(keys))
+    )
+
+
 def dedupe_by_primary_key(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
     """Keep one row per registered PK, preferring the freshest provenance.
 
@@ -147,7 +164,7 @@ def dedupe_by_primary_key(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
         return df
     if any(column in df.columns for column in ("fetched_at", "source", "data_version")):
         df = _sort_for_canonical(df, dataset)
-    df = _retain_payment_evidence(df, dataset)
+    df = _retain_pre_close(_retain_payment_evidence(df, dataset), dataset)
     out = df.unique(subset=primary_key, keep="last", maintain_order=True)
     return out.drop(*_HELPER_COLUMNS, strict=False)
 
@@ -160,7 +177,7 @@ def dedupe_lazy_by_primary_key(lf: pl.LazyFrame, dataset: str) -> pl.LazyFrame:
         return lf
     if any(column in columns for column in ("fetched_at", "source", "data_version")):
         lf = _sort_for_canonical(lf, dataset)
-    lf = _retain_payment_evidence(lf, dataset)
+    lf = _retain_pre_close(_retain_payment_evidence(lf, dataset), dataset)
     return lf.unique(subset=primary_key, keep="last", maintain_order=True).drop(
         *_HELPER_COLUMNS, strict=False
     )

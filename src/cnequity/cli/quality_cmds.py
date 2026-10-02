@@ -26,7 +26,8 @@ from cnequity.cli._shared import (
     resolve_config_path,
 )
 from cnequity.cli.backfill_cmds import _require_known_dataset, _run_backfill
-from cnequity.domain.market_time import BSE_FIRST_SESSION, is_session_final, shanghai_today
+from cnequity.domain.market_profile import BSE_FIRST_SESSION
+from cnequity.domain.market_time import is_session_final, shanghai_today
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.quality.audit import run_audit
 from cnequity.storage.atomic import write_json_atomic

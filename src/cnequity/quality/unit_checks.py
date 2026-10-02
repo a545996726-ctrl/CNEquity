@@ -34,6 +34,7 @@ from datetime import date, timedelta
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.market_profile import block_trade_bars_expr
 from cnequity.query.canonical import dedupe_lazy_by_primary_key
 from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
 
@@ -167,7 +168,7 @@ def _net_of_beijing_block_trades(
     Beijing rows this check raised that had a block trade on record, 830
     fell inside their range once it was netted out.
     """
-    beijing = broken.filter(pl.col("symbol").str.ends_with(".BJ"))
+    beijing = broken.filter(block_trade_bars_expr())
     root = config.curated_root / "block_trades"
     if beijing.is_empty() or not dataset_has_parquet(root):
         return broken
@@ -176,7 +177,7 @@ def _net_of_beijing_block_trades(
             scan_parquet_root(root, partition_col="trade_date", start=start, end=end),
             "block_trades",
         )
-        .filter(pl.col("symbol").str.ends_with(".BJ"))
+        .filter(block_trade_bars_expr())
         .group_by("symbol", "trade_date")
         .agg(
             (pl.col("volume").sum() * _BLOCK_TRADE_SCALE).alias("_block_volume"),
@@ -286,9 +287,7 @@ def daily_bars_implied_price_findings(
     # netted yet: its breach is unverified, not a row that disagrees with itself.
     covered_until = _block_trade_coverage_end(config)
     awaiting = (
-        broken.filter(
-            pl.col("symbol").str.ends_with(".BJ") & (pl.col("trade_date") > covered_until)
-        )
+        broken.filter(block_trade_bars_expr() & (pl.col("trade_date") > covered_until))
         if covered_until is not None
         else broken.clear()
     )

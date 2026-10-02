@@ -18,7 +18,7 @@ from cnequity.adapters.tdx_protocol.client import (
 from cnequity.config import Config
 from cnequity.domain.frames import with_columns_unless_blank
 from cnequity.domain.http_policy import SourceCoolingDown
-from cnequity.domain.market_time import BSE_FIRST_SESSION
+from cnequity.domain.market_profile import BSE_FIRST_SESSION, served
 from cnequity.domain.schemas import with_provenance
 from cnequity.domain.symbols import (
     is_all_a_symbol,
@@ -35,6 +35,7 @@ from cnequity.orchestrator.manifest import Manifest
 from cnequity.orchestrator.registry import register_step
 from cnequity.quality.failover import snapshot_trading_status_exchange
 from cnequity.quality.st_coverage import (
+    ST_EVIDENCE_UNSUPPORTED_EXCHANGES,
     ST_EVIDENCE_VERSION,
     build_st_scope,
     current_st_universe,
@@ -548,7 +549,7 @@ def _beijing_status(
     """
     if not config.sources.get("bse", True):
         return frame
-    bj = [s for s in day_symbols if s.endswith(".BJ")]
+    bj = served("bse_boards", day_symbols)
     if not bj or frame.is_empty():
         return frame
     from cnequity.adapters.bse.trading_status import fetch_trading_status_bse
@@ -612,7 +613,7 @@ def _drop_unlisted_codes(
 
     unlisted: set[str] = set()
     sh_sz_board = None
-    sh_sz = {s for s in candidates if not s.endswith(".BJ")}
+    sh_sz = set(served("exchange_boards", candidates))
     if sh_sz and config.sources.get("exchange", True):
         from cnequity.adapters.exchange.trading_status import fetch_trading_status_exchange
 
@@ -830,8 +831,8 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
         does not cost the others their reading.
         """
         frames: list[pl.DataFrame] = []
-        sh_sz = [s for s in day_symbols if not s.endswith(".BJ")]
-        bj = [s for s in day_symbols if s.endswith(".BJ")]
+        sh_sz = served("exchange_boards", day_symbols)
+        bj = served("bse_boards", day_symbols)
 
         if sh_sz and config.sources.get("exchange", True):
             from cnequity.adapters.exchange.trading_status import fetch_trading_status_exchange
@@ -1320,7 +1321,7 @@ def _backfill_trading_status_st(
     }
     if unsupported_symbols:
         result["unsupported_symbols"] = len(unsupported_symbols)
-        result["unsupported_exchanges"] = ["BJ"]
+        result["unsupported_exchanges"] = sorted(ST_EVIDENCE_UNSUPPORTED_EXCHANGES)
     if any(item.get("status") == "warning" for item in results):
         result["status"] = "warning"
         result["failed_symbols"] = sum(int(item.get("failed_symbols", 0)) for item in results)

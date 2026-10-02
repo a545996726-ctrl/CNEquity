@@ -147,12 +147,12 @@ from cnequity.orchestrator.engine import JobEngine
 @click.option(
     "--ths-repair",
     is_flag=True,
-    help="仅 corporate_actions：用同花顺显式修复已退市的北交所标的。",
+    help="仅 corporate_actions，历史迁移用：用同花顺补已退市北交所标的的历史分红除权。",
 )
 @click.option(
     "--eastmoney-bj-repair",
     is_flag=True,
-    help="仅 corporate_actions：通过现行的 920xxx 东财代码修复北交所老代码。",
+    help="仅 corporate_actions，历史迁移用：通过现行的 920xxx 东财代码补北交所老代码的历史分红除权。",
 )
 @click.option(
     "--eastmoney-date-repair",
@@ -171,12 +171,18 @@ from cnequity.orchestrator.engine import JobEngine
 @click.option(
     "--bse-tip-repair",
     is_flag=True,
-    help="仅 daily_bars：用北交所官网补已有交易日的 BJ 成交额，不重抓 Sina。",
+    help=(
+        "仅 daily_bars，历史迁移用：用北交所官网补已有当期交易日的 BJ 成交额，不重抓 Sina。"
+        "日更已以北交所行情板为 BJ 当期主源。"
+    ),
 )
 @click.option(
     "--bj-amount-repair",
     is_flag=True,
-    help="仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。",
+    help=(
+        "仅 daily_bars，已由 --tdx-amount-repair 取代：从 TDX 补 Sina 从未发布过的北交所成交额，"
+        "已存的价格和成交量一律不动。需要 --start/--end。"
+    ),
 )
 @click.option(
     "--tdx-amount-repair",
@@ -402,7 +408,9 @@ def backfill(
         symbols = list(dict.fromkeys(s.upper() for s in symbols))
         symbols_str = ",".join(symbols)
     if dataset == "trading_status" and symbols:
-        bj_symbols = [symbol for symbol in symbols if symbol.endswith(".BJ")]
+        from cnequity.domain.market_profile import unserved
+
+        bj_symbols = unserved("baostock", symbols)
         if bj_symbols:
             raise click.ClickException(
                 "trading_status 的 Baostock 历史 ST 回填不支持 BJ 标的：" + ", ".join(bj_symbols)
@@ -492,6 +500,12 @@ def backfill(
         raise click.ClickException("--tdx-amount-repair 只适用于 daily_bars")
     if bj_amount_repair and tdx_amount_repair:
         raise click.ClickException("--bj-amount-repair 与 --tdx-amount-repair 只能用一个")
+    if bj_amount_repair:
+        click.echo(
+            "提示：--bj-amount-repair 已由 --tdx-amount-repair 取代，"
+            "后者按开高低收与成交量核对后才补成交额，并覆盖沪深北。",
+            err=True,
+        )
     if baostock_repair:
         cfg._corporate_actions_baostock_repair = True
     if ths_repair:

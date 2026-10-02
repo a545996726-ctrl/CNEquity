@@ -22,6 +22,7 @@ from typing import Any
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.market_profile import unserved_exchanges
 from cnequity.domain.symbols import is_all_a_symbol, is_cdr_symbol, parse_symbol
 from cnequity.query.canonical import dedupe_by_primary_key, dedupe_lazy_by_primary_key
 from cnequity.query.parquet_scan import (
@@ -37,7 +38,7 @@ ST_COVERAGE_CLAIM = "historical_st_evidence"
 # Baostock's k-data ``isST`` history does not contain North Exchange (BJ)
 # securities. Keep this explicit instead of retrying 580 symbols forever and
 # then presenting a partial receipt as if it covered the full all-A universe.
-ST_EVIDENCE_UNSUPPORTED_EXCHANGES = frozenset({"BJ"})
+ST_EVIDENCE_UNSUPPORTED_EXCHANGES = frozenset(unserved_exchanges("baostock"))
 #: The exchange board reads BJ status every session. It cannot answer for a
 #: date it did not observe, so it is evidence for a trailing window only —
 #: never for the deep history Baostock and Tushare serve.

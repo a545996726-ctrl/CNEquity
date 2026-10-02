@@ -226,7 +226,11 @@ def test_sina_history_repair_asks_tdx_only_for_null_sina_rows(tmp_path, monkeypa
     assert asked == [["600005.SH", "920001.BJ"]]
     assert result["rows_written"] == 1
     step_compact(lake, day, "repair", {})
-    stored = {r["symbol"]: r for r in load("daily_bars", config=lake).iter_rows(named=True)}
+    # The fixture's Beijing row predates the exchange; read the lake as stored.
+    stored = {
+        r["symbol"]: r
+        for r in load("daily_bars", config=lake, include_otc=True).iter_rows(named=True)
+    }
     assert stored["600005.SH"]["amount"] == 50_000.0
     assert stored["600005.SH"]["source"] == "tdx_protocol"
     assert stored["600005.SH"]["volume"] == 1000

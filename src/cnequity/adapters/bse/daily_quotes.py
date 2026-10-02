@@ -116,6 +116,8 @@ def _row_to_quote(row: dict[str, Any], expected_date: date) -> dict[str, Any] | 
     low = _float(row.get("hqzdcj"), minimum=0.0)
     close = _float(row.get("hqzjcj"), minimum=0.0)
     amount = _float(row.get("hqcjje"), minimum=0.0)
+    # 昨收: the exchange's previous close, the ex-rights reference on an ex-date.
+    pre_close = _float(row.get("hqzrsp"), minimum=0.0) or None
     if None in (open_, high, low, close, amount):
         return None
     try:
@@ -129,6 +131,7 @@ def _row_to_quote(row: dict[str, Any], expected_date: date) -> dict[str, Any] | 
         "high": high,
         "low": low,
         "close": close,
+        "pre_close": pre_close,
         "volume": volume,
         "amount": amount,
     }
@@ -304,12 +307,13 @@ def fetch_daily_quotes(
                 "high": pl.Float64,
                 "low": pl.Float64,
                 "close": pl.Float64,
+                "pre_close": pl.Float64,
                 "volume": pl.Int64,
                 "amount": pl.Float64,
             }
         )
     return (
-        pl.DataFrame(rows)
+        pl.DataFrame(rows, schema_overrides={"pre_close": pl.Float64})
         .unique(subset=["symbol", "trade_date"], keep="last")
         .sort(["trade_date", "symbol"])
     )

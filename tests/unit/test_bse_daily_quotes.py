@@ -60,6 +60,7 @@ def _row(code: str = "920571", trade_date: str = "20260821"):
         "hqzgcj": "9.66",
         "hqzdcj": "9.06",
         "hqzjcj": "9.60",
+        "hqzrsp": "9.10",
         "hqcjsl": "33952730",
         "hqcjje": "322779288.68",
     }
@@ -85,6 +86,7 @@ def test_fetches_current_bse_quote_and_paginates(tmp_path):
     assert out.height == 21
     assert {"920571.BJ", "920591.BJ"}.issubset(set(out["symbol"].to_list()))
     assert out.filter(out["symbol"] == "920571.BJ")["amount"].item() == pytest.approx(322779288.68)
+    assert out.filter(out["symbol"] == "920571.BJ")["pre_close"].item() == 9.10
 
 
 def test_rejects_other_sessions_and_malformed_payload(tmp_path):

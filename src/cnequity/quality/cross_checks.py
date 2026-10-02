@@ -2023,6 +2023,32 @@ def _fund_symbols(config: Config) -> list[str]:
 _CONTRADICTION_SCHEMA = {"symbol": pl.Utf8, "ex_date": pl.Date, "kind": pl.Utf8}
 
 
+def _exchange_factor_sessions(config: Config, factors: pl.DataFrame) -> pl.DataFrame:
+    """Factor rows from each security's exchange start on.
+
+    A Beijing security's NEEQ over-the-counter history is out of default
+    reads; judging its factor there reported 201 of 227 Beijing
+    contradictions for quotes no reader sees.
+    """
+    from cnequity.domain.market_profile import otc_quote_expr
+
+    root = config.curated_root / "instruments"
+    if not dataset_has_parquet(root):
+        return factors
+    frame = dedupe_lazy_by_primary_key(scan_parquet_root(root), "instruments").collect()
+    # Without listing dates only the select tier's opening bounds the cut.
+    listing = (
+        frame.select("symbol", "list_date").unique("symbol")
+        if "list_date" in frame.columns
+        else pl.DataFrame(schema={"symbol": pl.Utf8, "list_date": pl.Date})
+    )
+    return (
+        factors.join(listing, on="symbol", how="left")
+        .filter(~otc_quote_expr().fill_null(False))
+        .drop("list_date")
+    )
+
+
 def factor_action_contradictions(
     config: Config, *, symbols: Collection[str] | None = None
 ) -> tuple[pl.DataFrame, int]:
@@ -2062,6 +2088,7 @@ def factor_action_contradictions(
         .collect()
         .sort(["symbol", "trade_date"])
     )
+    factors = _exchange_factor_sessions(config, factors)
     if factors.is_empty():
         return empty, 0
     jumps = (

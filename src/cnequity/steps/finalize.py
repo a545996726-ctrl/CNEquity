@@ -455,6 +455,48 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 )
                 change_log.append({"partition": None, **summarize_changes(previous, current, ds)})
         else:
+            if ds == "daily_bars":
+                # Rules that need the previous close or the corporate actions
+                # can only be checked where staged rows meet the committed lake.
+                from cnequity.storage.staged_contracts import enforce_daily_bar_contracts
+
+                staged_action_files = writer.list_run_files("corporate_actions", run_id)
+                staged_status_files = writer.list_run_files("trading_status", run_id)
+                audit_findings.extend(
+                    enforce_daily_bar_contracts(
+                        config,
+                        run_id,
+                        writer.list_run_files(ds, run_id),
+                        committed_root=committed_root,
+                        actions_root=revisions.current_root("corporate_actions"),
+                        instruments_root=revisions.current_root("instruments"),
+                        status_root=revisions.current_root("trading_status"),
+                        staged_status=(
+                            pl.concat(
+                                [
+                                    pl.read_parquet(f).select(
+                                        "symbol", "trade_date", "status", "source"
+                                    )
+                                    for f in staged_status_files
+                                ],
+                                how="vertical_relaxed",
+                            )
+                            if staged_status_files
+                            else None
+                        ),
+                        staged_actions=(
+                            pl.concat(
+                                [
+                                    pl.read_parquet(f).select("symbol", "ex_date")
+                                    for f in staged_action_files
+                                ],
+                                how="vertical_relaxed",
+                            )
+                            if staged_action_files
+                            else None
+                        ),
+                    )
+                )
             rows = compact_dataset(
                 config.staging_root,
                 config.curated_root,

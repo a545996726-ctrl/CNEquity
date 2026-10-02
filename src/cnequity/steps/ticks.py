@@ -99,7 +99,9 @@ def resolve_scope(config: Config) -> list[str]:
     # TDX has no Beijing route for transaction records — the adapter raises on
     # those rather than returning empty, so dropping them here keeps a scope
     # that happens to include one from reading as a wall of failures.
-    symbols = [s for s in symbols if not s.endswith(".BJ")]
+    from cnequity.domain.market_profile import served
+
+    symbols = served("tdx_intraday", symbols)
 
     limit = config.trade_ticks_max_symbols
     if len(symbols) > limit:

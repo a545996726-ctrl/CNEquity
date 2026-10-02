@@ -178,7 +178,9 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
     # CNINFO's A-share directory does not identify historical BJ/NEEQ codes.
     # Keep those rows for the remaining-source report, but do not spend a
     # mainland CNINFO request on a different market's issuer directory.
-    cninfo_pending = pending.filter(~pl.col("symbol").str.ends_with(".BJ"))
+    from cnequity.domain.market_profile import serves_expr
+
+    cninfo_pending = pending.filter(serves_expr("cninfo_issuer_directory"))
     cninfo_keys, cninfo_diagnostics = repair_cninfo_payment_notices(
         config, run_id, cninfo_pending, metrics=metrics
     )

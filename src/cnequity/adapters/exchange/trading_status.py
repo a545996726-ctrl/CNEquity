@@ -109,7 +109,9 @@ def _fetch_sse(trade_date: date, *, config=None) -> list[dict]:
 
     rows = []
     for item in payload.get("list") or []:
-        if not isinstance(item, (list, tuple)) or len(item) < len(SSE_STATUS_SELECT):
+        # The trailing ``prev_close`` is not needed here; a snapshot cached
+        # before it was selected still carries every status field.
+        if not isinstance(item, (list, tuple)) or len(item) < len(SSE_STATUS_SELECT) - 1:
             continue
         code = str(item[0]).strip().zfill(6)
         if len(code) != 6 or not code.isdigit() or not _keep_symbol(code, "SH"):

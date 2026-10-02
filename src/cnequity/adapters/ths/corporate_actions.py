@@ -30,6 +30,7 @@ from cnequity.domain.http_policy import (
     record_cache_reuse,
     record_http_response,
 )
+from cnequity.domain.market_profile import serves
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import parse_symbol
 from cnequity.file_lock import exclusive_lock
@@ -489,7 +490,7 @@ def fetch_corporate_actions_ths(
         except ValueError:
             logger.warning("ths corporate_actions: skipping invalid symbol %s", symbol)
             continue
-        if info.exchange != "BJ":
+        if not serves("ths_delisted_actions", symbol):
             continue
         window = symbol_windows.get(symbol, (start, end)) if symbol_windows else (start, end)
         if window[0] > window[1]:

@@ -56,7 +56,9 @@ def resolve_scope(config: Config, *, all_symbols=None) -> list[str]:
             symbols = frame["symbol"].to_list()
         else:
             symbols = all_symbols()
-        return [s for s in symbols if not s.endswith(".BJ")]
+        from cnequity.domain.market_profile import served
+
+        return served("tdx_intraday", symbols)
     if scope == "watchlist":
         symbols = [s.strip() for s in config.minute_bars_symbols if s.strip()]
         if not symbols:

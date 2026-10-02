@@ -8,6 +8,7 @@ from pathlib import Path
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.market_profile import BJ
 from cnequity.domain.symbols import filter_ingest_universe, is_cdr_symbol
 from cnequity.domain.trading_status import risk_warning_expr
 from cnequity.query.canonical import dedupe_by_primary_key
@@ -97,8 +98,9 @@ def _limit_threshold(symbol: str, risk_warning: bool | None) -> float:
     if risk_warning:
         return 0.045
     code, _, exchange = str(symbol).partition(".")
-    if exchange == "BJ":
-        return 0.295
+    if exchange == BJ.exchange:
+        # Half a percent under the current limit: a close at the limit rounds to it.
+        return BJ.era("bse").price_limit - 0.005
     if code.startswith("30") or code.startswith("688"):
         return 0.195
     return 0.095

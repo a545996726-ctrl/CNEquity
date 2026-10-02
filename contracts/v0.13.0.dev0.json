@@ -812,6 +812,7 @@
         "high": "float64",
         "low": "float64",
         "open": "float64",
+        "pre_close": "float64",
         "source": "string",
         "symbol": "string",
         "trade_date": "date",
@@ -911,6 +912,7 @@
         "high": "float64",
         "low": "float64",
         "open": "float64",
+        "pre_close": "float64",
         "source": "string",
         "symbol": "string",
         "trade_date": "date",
@@ -2784,6 +2786,7 @@
         "high": "float64",
         "low": "float64",
         "open": "float64",
+        "pre_close": "float64",
         "source": "string",
         "symbol": "string",
         "trade_date": "date",
@@ -2886,6 +2889,7 @@
         "high": "float64",
         "low": "float64",
         "open": "float64",
+        "pre_close": "float64",
         "source": "string",
         "symbol": "string",
         "trade_date": "date",
@@ -6814,7 +6818,7 @@
       "watermark": true
     }
   },
-  "fingerprint": "1deb2ca2ef66c66a0dca806fa4f81530f11475c61c0ea7caf02e8b09747cc003",
+  "fingerprint": "cfe5d3bd9ff12a4dfe2d24e3b60cb700cc80bb4a784a0a2c79bdd2da9b11970d",
   "format": "cnequity.dataset-contract",
   "pit_contract": {
     "modes": [

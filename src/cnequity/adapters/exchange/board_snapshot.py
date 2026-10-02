@@ -17,9 +17,12 @@ _SOURCE = "exchange"
 _TIMEOUT_SECONDS = 60.0
 _SSE_HEADERS = {"Referer": "https://www.sse.com.cn/"}
 _SZSE_HEADERS = {"Referer": "https://www.szse.cn/"}
-_SSE_URL = (
+# The field order of each row follows `select`; the quote and status parsers
+# read rows by position from this tuple.
+SSE_SELECT = ("code", "name", "open", "high", "low", "last", "volume", "amount", "prev_close")
+SSE_URL = (
     "http://yunhq.sse.com.cn:32041/v1/sh1/list/exchange/equity"
-    "?select=code,name,open,high,low,last,volume,amount&begin=0&end=6000"
+    f"?select={','.join(SSE_SELECT)}&begin=0&end=6000"
 )
 _SZSE_URL = (
     "https://www.szse.cn/api/report/ShowReport?SHOWTYPE=xlsx"
@@ -54,7 +57,7 @@ def sse_snapshot(trade_date: date, *, config, client_factory) -> dict:
     def fetch():
         with source_request(config, _SOURCE):
             response = client_factory().get(
-                _SSE_URL,
+                SSE_URL,
                 headers=_SSE_HEADERS,
                 impersonate="chrome",
                 timeout=_TIMEOUT_SECONDS,

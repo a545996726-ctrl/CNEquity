@@ -40,12 +40,12 @@
 | `--payment-date-repair` | `False` | 仅 corporate_actions：先应用已审发行人公告，再用 Baostock 匹配真实派息日；早于除息日的付款日视为未知。 |
 | `--issuer-notice-repair` | `False` | 仅 corporate_actions：只用发行人实施公告（已审清单、巨潮、北交所）修复付款日和已审送转条款；未匹配事件保留缺口，不请求 Baostock。 |
 | `--baostock-repair` | `False` | 仅 corporate_actions：用 Baostock 显式修复已退市的沪深标的。 |
-| `--ths-repair` | `False` | 仅 corporate_actions：用同花顺显式修复已退市的北交所标的。 |
-| `--eastmoney-bj-repair` | `False` | 仅 corporate_actions：通过现行的 920xxx 东财代码修复北交所老代码。 |
+| `--ths-repair` | `False` | 仅 corporate_actions，历史迁移用：用同花顺补已退市北交所标的的历史分红除权。 |
+| `--eastmoney-bj-repair` | `False` | 仅 corporate_actions，历史迁移用：通过现行的 920xxx 东财代码补北交所老代码的历史分红除权。 |
 | `--eastmoney-date-repair` | `False` | 仅 corporate_actions：按 --ex-dates 指定的除权日向东财逐日要历史除权行。回补路径的主源是 TDX，东财只有日更的等值过滤能取到 2015-09-29 以前的行。 |
 | `--ex-dates` | `—` | 配合 --eastmoney-date-repair：逗号分隔的除权日 YYYY-MM-DD。 |
-| `--bse-tip-repair` | `False` | 仅 daily_bars：用北交所官网补已有交易日的 BJ 成交额，不重抓 Sina。 |
-| `--bj-amount-repair` | `False` | 仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。 |
+| `--bse-tip-repair` | `False` | 仅 daily_bars，历史迁移用：用北交所官网补已有当期交易日的 BJ 成交额，不重抓 Sina。日更已以北交所行情板为 BJ 当期主源。 |
+| `--bj-amount-repair` | `False` | 仅 daily_bars，已由 --tdx-amount-repair 取代：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。 |
 | `--tdx-amount-repair` | `False` | 仅 daily_bars：新浪补上的沪深北历史行与通达信一起核对，只在开高低收一致且成交量差小于一手时补成交额；通达信没有的代码保留新浪行。已存的价格和成交量一律不动。需要 --start/--end。 |
 | `--tdx-volume-repair` | `False` | 仅 daily_bars：重读 TDX，只改写已存 TDX 行的成交量（修 2026-09-17 前的解码错误）；价格须一致，64.5 元以下被放大的成交额一并改写；不新增行。需要 --symbols 和 --start/--end。 |
 | `--turnover-repair` | `False` | 仅 daily_bars：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；开高低收须在半分钱内一致，不一致或未提供的保留原值。需要 --start/--end。 |
@@ -211,6 +211,13 @@
 | `--apply` | `False` | 写入并发布新版本；默认只输出计划。 |
 
 ## `cne repair orphan-symbols`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--apply` | `False` | 核验后发布新版本；默认只输出计划。 |
+
+## `cne repair stale-suspensions`
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|

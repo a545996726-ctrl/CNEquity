@@ -941,6 +941,28 @@ def _action_terms(config: Config, symbols: list[str], start: date, end: date) ->
     )
 
 
+def _drop_pre_exchange_actions(config: Config, terms: pl.DataFrame) -> pl.DataFrame:
+    """Beijing actions from before a security's exchange start are NEEQ history.
+
+    Its exchange-era factor starts after them, so they explain no step there;
+    the prepended prior row would otherwise land one on the listing session.
+    """
+    from cnequity.domain.market_profile import otc_quote_expr
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    root = config.curated_root / "instruments"
+    listing = pl.DataFrame(schema={"symbol": pl.Utf8, "list_date": pl.Date})
+    if dataset_has_parquet(root):
+        frame = dedupe_lazy_by_primary_key(scan_parquet_root(root), "instruments").collect()
+        if "list_date" in frame.columns:
+            listing = frame.select("symbol", "list_date").unique("symbol")
+    return (
+        terms.join(listing, on="symbol", how="left")
+        .filter(~otc_quote_expr(day="ex_date").fill_null(False))
+        .drop("list_date")
+    )
+
+
 def _corporate_action_crosscheck_findings(config: Config, out: pl.DataFrame) -> list[dict]:
     """Compare every stored factor step against the step the actions imply.
 
@@ -1009,6 +1031,16 @@ def _corporate_action_crosscheck_findings(config: Config, out: pl.DataFrame) -> 
     # which is where the factor steps; compare the action there.
     terms = _action_terms(config, symbols, start, end)
     if not terms.is_empty():
+        # An action dated before the series' first row has no close before it
+        # inside this series; mapping it forward would pile a security's whole
+        # earlier history onto its first measurable step.
+        series_start = series.group_by("symbol").agg(pl.col("trade_date").min().alias("_first"))
+        terms = (
+            terms.join(series_start, on="symbol")
+            .filter(pl.col("ex_date") > pl.col("_first"))
+            .drop("_first")
+        )
+        terms = _drop_pre_exchange_actions(config, terms)
         terms = (
             effective_session(terms, steps.select("symbol", "trade_date"))
             .filter(pl.col("effective_session").is_not_null())
@@ -1087,6 +1119,101 @@ def _corporate_action_crosscheck_findings(config: Config, out: pl.DataFrame) -> 
         for row in worst.iter_rows(named=True)
     )
     return findings
+
+
+def _pre_close_step_findings(config: Config, out: pl.DataFrame) -> list[dict]:
+    """Check factor steps against the exchange's own previous close.
+
+    On a session with ``pre_close``, the exchange has already stated the
+    ex-rights reference price, so the step must be ``close_prev / pre_close``
+    (1.0 on an ordinary day). This holds for any action the lake has
+    recorded or failed to record. ``pre_close`` is published to the cent, so
+    the tolerance widens by half a cent's share of the price.
+    """
+    if out.is_empty() or not config.adj_factors_crosscheck_enabled:
+        return []
+    if not {"symbol", "trade_date", "adjust_type", "factor"}.issubset(out.columns):
+        return []
+    symbols = sorted(set(out.get_column("symbol").unique().to_list()))
+    start = out.get_column("trade_date").min()
+    end = out.get_column("trade_date").max()
+    if not symbols or start is None or end is None:
+        return []
+    from cnequity.query.parquet_scan import collect_parquet_root
+
+    series = out.select("symbol", "trade_date", "adjust_type", "factor")
+    prior = _prior_factor_rows(config, symbols, start)
+    if not prior.is_empty():
+        series = pl.concat([prior.select(series.columns), series], how="vertical_relaxed")
+    try:
+        bars = collect_parquet_root(
+            config.curated_root / "daily_bars",
+            partition_col="trade_date",
+            start=series.get_column("trade_date").min(),
+            end=end,
+            symbols=symbols,
+        )
+    except FileNotFoundError:
+        return []
+    if bars.is_empty() or "pre_close" not in bars.columns:
+        return []
+    bars = bars.select("symbol", "trade_date", "close", "pre_close").unique(
+        subset=["symbol", "trade_date"], keep="last"
+    )
+    tolerance = config.adj_factors_crosscheck_tolerance_bps
+    diverged = (
+        series.unique(subset=["symbol", "trade_date", "adjust_type"], keep="last")
+        .join(bars, on=["symbol", "trade_date"], how="inner")
+        .sort(["symbol", "adjust_type", "trade_date"])
+        .with_columns(
+            pl.col("factor").shift(1).over(["symbol", "adjust_type"]).alias("_prev_factor"),
+            pl.col("close").shift(1).over(["symbol", "adjust_type"]).alias("_prev_close"),
+        )
+        .filter(
+            pl.col("trade_date").is_between(start, end)
+            & (pl.col("pre_close") > 0)
+            & (pl.col("_prev_factor") > 0)
+            & (pl.col("factor") > 0)
+            & (pl.col("_prev_close") > 0)
+        )
+        .with_columns(
+            (pl.col("factor") / pl.col("_prev_factor")).alias("_actual"),
+            (pl.col("_prev_close") / pl.col("pre_close")).alias("_expected"),
+        )
+        .with_columns(
+            ((pl.col("_actual") / pl.col("_expected") - 1).abs() * 10_000.0).alias("_bps"),
+            (tolerance + 0.005 / pl.col("pre_close") * 10_000.0).alias("_tolerance"),
+        )
+        .filter(pl.col("_bps") > pl.col("_tolerance"))
+        .sort("_bps", descending=True)
+    )
+    if diverged.is_empty():
+        return []
+    return [
+        {
+            "dataset": "adj_factors",
+            "severity": "warning",
+            "check": "adj_factor_pre_close_divergence",
+            "message": (
+                f"{diverged.height} factor step(s) disagree with the exchange's previous "
+                "close (expected step = prior close / pre_close); either the factor or "
+                "the lake's prior close for that session is wrong"
+            ),
+            "steps": diverged.height,
+            "symbols": diverged.get_column("symbol").n_unique(),
+            "sample": [
+                {
+                    "symbol": r["symbol"],
+                    "adjust_type": r["adjust_type"],
+                    "trade_date": r["trade_date"].isoformat(),
+                    "actual": r["_actual"],
+                    "expected": r["_expected"],
+                    "bps": round(r["_bps"], 1),
+                }
+                for r in diverged.head(20).iter_rows(named=True)
+            ],
+        }
+    ]
 
 
 def _degenerate_action_findings(degenerate: pl.DataFrame) -> list[dict]:
@@ -1241,6 +1368,209 @@ def _process_symbol_adj(
     finally:
         if own_client:
             client.close()
+
+
+def _apply_computed_factors(config: Config, out: pl.DataFrame) -> tuple[pl.DataFrame, list[dict]]:
+    """Replace Beijing exchange-era factors with ones computed from corporate actions.
+
+    Sina's Beijing factor misses some dividends and prices bonus-with-cash
+    events off the exchange's rule, so the factor is derived from the lake's
+    own actions (``derive/action_factors``). Each security's series starts at
+    the stored level on its first exchange session, so a security whose steps
+    already agree keeps its values. Rows before the exchange start (NEEQ
+    quotes) are left as they are. Sina is still fetched: where its own steps
+    disagree with the computed ones on this run's dates, that is reported,
+    which is how an action the lake failed to record gets noticed.
+    """
+    from cnequity.derive.action_factors import SOURCE as COMPUTED
+    from cnequity.derive.action_factors import action_factor_series
+    from cnequity.domain.action_sessions import effective_session
+    from cnequity.domain.market_profile import COMPUTED_FACTOR_EXCHANGES, exchange_start
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    suffixes = tuple(f".{e}" for e in COMPUTED_FACTOR_EXCHANGES)
+    scope = out.filter(
+        (pl.col("adjust_type") == STORED_ADJUST_TYPE)
+        & pl.any_horizontal([pl.col("symbol").str.ends_with(x) for x in suffixes])
+    )
+    if scope.is_empty():
+        return out, []
+    symbols = sorted(scope.get_column("symbol").unique().to_list())
+    instruments_root = config.curated_root / "instruments"
+    listing = pl.DataFrame(schema={"symbol": pl.Utf8, "list_date": pl.Date})
+    if dataset_has_parquet(instruments_root):
+        frame = dedupe_lazy_by_primary_key(
+            scan_parquet_root(instruments_root), "instruments"
+        ).collect()
+        if "list_date" in frame.columns:
+            listing = frame.select("symbol", "list_date").unique("symbol")
+    starts = (
+        pl.DataFrame({"symbol": symbols})
+        .join(listing, on="symbol", how="left")
+        .with_columns(exchange_start(pl.col("list_date")).alias("_start"))
+        .select("symbol", "_start")
+    )
+    bars = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(
+                config.curated_root / "daily_bars",
+                partition_col="trade_date",
+                symbols=symbols,
+                traded_only=True,
+            ),
+            "daily_bars",
+        )
+        .select("symbol", "trade_date", "close")
+        .collect()
+        .join(starts, on="symbol")
+        .filter(pl.col("trade_date") >= pl.col("_start"))
+    )
+    if bars.is_empty():
+        return out, []
+    terms = _action_terms(
+        config, symbols, bars.get_column("trade_date").min(), bars.get_column("trade_date").max()
+    )
+    stored_root = config.derived_root / "adj_factors"
+    stored = (
+        scan_parquet_root(stored_root, partition_col="trade_date", symbols=symbols)
+        .filter(pl.col("adjust_type") == STORED_ADJUST_TYPE)
+        .select("symbol", "trade_date", "factor")
+        .collect()
+        if dataset_has_parquet(stored_root)
+        else pl.DataFrame(schema={"symbol": pl.Utf8, "trade_date": pl.Date, "factor": pl.Float64})
+    )
+    levels = pl.concat(
+        [stored, scope.select("symbol", "trade_date", "factor")], how="vertical_relaxed"
+    ).unique(["symbol", "trade_date"], keep="first")
+    series_parts: list[pl.DataFrame] = []
+    skipped: list[str] = []
+    for symbol, sym_bars in bars.partition_by("symbol", as_dict=True).items():
+        symbol = symbol[0] if isinstance(symbol, tuple) else symbol
+        sym_terms = terms.filter(pl.col("symbol") == symbol)
+        series, unpriced = action_factor_series(sym_bars, sym_terms)
+        skipped.extend(f"{symbol}|{item['ex_date']}" for item in unpriced)
+        first = sym_bars.get_column("trade_date").min()
+        anchor_row = levels.filter((pl.col("symbol") == symbol) & (pl.col("trade_date") == first))
+        anchor = float(anchor_row.get_column("factor")[0]) if anchor_row.height else 1.0
+        series_parts.append(
+            series.with_columns(pl.lit(symbol).alias("symbol"), pl.col("factor") * anchor)
+        )
+    computed = pl.concat(series_parts, how="vertical_relaxed").sort("symbol", "trade_date")
+
+    target = (
+        scope.select("symbol", "trade_date", "adjust_type")
+        .join(starts, on="symbol")
+        .filter(pl.col("trade_date") >= pl.col("_start"))
+        .drop("_start")
+        .sort("symbol", "trade_date")
+    )
+    aligned = target.join_asof(
+        computed.rename({"factor": "_computed"}),
+        on="trade_date",
+        by="symbol",
+        strategy="backward",
+        check_sortedness=False,
+    ).filter(pl.col("_computed").is_not_null())
+    findings: list[dict] = []
+
+    # Sina's own steps on this run's dates, against the computed ones.
+    sina_steps = []
+    window = target.group_by("symbol").agg(
+        pl.col("trade_date").min().alias("_lo"), pl.col("trade_date").max().alias("_hi")
+    )
+    for symbol in symbols:
+        cache = _load_cache(config, symbol, STORED_ADJUST_TYPE)
+        if cache is None or cache.height < 2:
+            continue
+        steps = (
+            cache.sort("trade_date")
+            .with_columns((pl.col("factor") / pl.col("factor").shift(1)).alias("_sina"))
+            .filter((pl.col("_sina") - 1).abs() > 1e-6)
+            .select(pl.lit(symbol).alias("symbol"), pl.col("trade_date").alias("ex_date"), "_sina")
+        )
+        sina_steps.append(steps)
+    computed_steps = (
+        computed.with_columns(
+            (pl.col("factor") / pl.col("factor").shift(1).over("symbol")).alias("_mine")
+        )
+        .filter((pl.col("_mine") - 1).abs() > 1e-6)
+        .select("symbol", "trade_date", "_mine")
+    )
+    if sina_steps:
+        sina = pl.concat(sina_steps, how="vertical_relaxed")
+        sina = (
+            effective_session(sina, bars.select("symbol", "trade_date"))
+            .filter(pl.col("effective_session").is_not_null())
+            .select("symbol", pl.col("effective_session").alias("trade_date"), "_sina")
+        )
+        compared = (
+            sina.join(computed_steps, on=["symbol", "trade_date"], how="full", coalesce=True)
+            .join(window, on="symbol")
+            .filter(pl.col("trade_date").is_between(pl.col("_lo"), pl.col("_hi")))
+            .with_columns(
+                (
+                    (pl.col("_sina").fill_null(1.0) / pl.col("_mine").fill_null(1.0) - 1).abs()
+                    * 10_000.0
+                ).alias("_bps")
+            )
+            .filter(pl.col("_bps") > config.adj_factors_crosscheck_tolerance_bps)
+            .sort("symbol", "trade_date")
+        )
+        if compared.height:
+            findings.append(
+                {
+                    "dataset": "adj_factors",
+                    "severity": "warning",
+                    "check": "adj_factor_computed_vendor_divergence",
+                    "message": (
+                        f"{compared.height} Beijing factor step(s) where Sina and the factor "
+                        "computed from corporate actions disagree; a Sina step with no "
+                        "computed one usually means an action the lake has not recorded"
+                    ),
+                    "steps": compared.height,
+                    "sample": [
+                        {
+                            "symbol": r["symbol"],
+                            "trade_date": r["trade_date"].isoformat(),
+                            "sina": r["_sina"],
+                            "computed": r["_mine"],
+                        }
+                        for r in compared.head(20).iter_rows(named=True)
+                    ],
+                }
+            )
+    if skipped:
+        findings.append(
+            {
+                "dataset": "adj_factors",
+                "severity": "warning",
+                "check": "adj_factor_computed_unpriced_action",
+                "message": (
+                    f"{len(skipped)} Beijing action(s) imply a non-positive ex-rights "
+                    "reference price; left out of the computed factor"
+                ),
+                "sample": skipped[:20],
+            }
+        )
+
+    replaced = (
+        out.join(
+            aligned.select("symbol", "trade_date", "adjust_type", "_computed"),
+            on=["symbol", "trade_date", "adjust_type"],
+            how="left",
+        )
+        .with_columns(
+            pl.coalesce("_computed", "factor").alias("factor"),
+            pl.when(pl.col("_computed").is_not_null())
+            .then(pl.lit(COMPUTED))
+            .otherwise(
+                pl.col("_vendor") if "_vendor" in out.columns else pl.lit(None, dtype=pl.Utf8)
+            )
+            .alias("_vendor"),
+        )
+        .drop("_computed")
+    )
+    return replaced, findings
 
 
 def _write_adj_partitions(
@@ -1527,8 +1857,11 @@ def _compute_adj_factors_locked(
         return AdjFactorsResult(0, len(tasks), failed, findings)
 
     out = pl.concat(frames, how="diagonal_relaxed").unique(subset=_ADJ_PK, keep="last")
+    out, computed_findings = _apply_computed_factors(config, out)
+    findings.extend(computed_findings)
     findings.extend(_factor_continuity_findings(out))
     findings.extend(_corporate_action_crosscheck_findings(config, out))
+    findings.extend(_pre_close_step_findings(config, out))
     vendors = out.get_column("_vendor") if "_vendor" in out.columns else None
     out = out.drop("_vendor") if vendors is not None else out
     out = with_provenance(out, source=config.adj_factors_source, data_version="v1")

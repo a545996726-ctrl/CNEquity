@@ -19,7 +19,9 @@ from cnequity.steps.delisted import (
 from cnequity.storage.parquet import StagingWriter
 
 _START = date(2016, 1, 1)
-_BAR_COLS = [c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at")]
+_BAR_COLS = [
+    c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at", "pre_close")
+]
 
 
 def _bars(symbol: str, first: date, last: date) -> pl.DataFrame:

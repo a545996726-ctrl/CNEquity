@@ -68,7 +68,10 @@ _PROBE_TAIL_LEN = 10
 _WINDOW_TAIL_BUFFER_DAYS = 14
 _SYNTHETIC_COPY_GAP = timedelta(days=90)
 
-_OUTPUT_COLS = [c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at")]
+# Sina's kline carries no previous close; validation fills ``pre_close`` null.
+_OUTPUT_COLS = [
+    c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at", "pre_close")
+]
 
 
 class SinaBarsError(RuntimeError):

@@ -1660,3 +1660,123 @@ def test_crosscheck_compares_a_halt_dated_action_on_resumption(crosscheck_config
     )
     out = _factor_frame("600423.SH", traded, [1.0, 10.0 / 4.0])
     assert _corporate_action_crosscheck_findings(crosscheck_config, out) == []
+
+
+def test_beijing_factors_are_computed_from_actions_and_sina_is_the_alarm(adj_config, monkeypatch):
+    days = [date(2024, 6, 24), date(2024, 6, 25), date(2024, 6, 26), date(2024, 6, 27)]
+    for day in days:
+        _write_bar(adj_config, "920001.BJ", day)
+    inst = adj_config.curated_root / "instruments"
+    inst.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["920001.BJ"],
+            "list_date": [date(2023, 1, 3)],
+            "name": ["x"],
+            "exchange": ["BJ"],
+        }
+    ).write_parquet(inst / "part-0.parquet")
+    # A dividend on 06-26 that Sina's factor never steps on.
+    _write_action(adj_config, "920001.BJ", days[2], cash_dividend=0.05)
+
+    def flat_sina(symbol, adjust_type, client=None):
+        return pl.DataFrame({"trade_date": [days[0], days[-1]], "factor": [1.0, 1.0]})
+
+    monkeypatch.setattr("cnequity.derive.adj_factors.fetch_adj_factor_series", flat_sina)
+    result = compute_adj_factors(adj_config, full=True)
+
+    stored = (
+        pl.concat(
+            [
+                pl.read_parquet(p)
+                for p in (adj_config.derived_root / "adj_factors").rglob("*.parquet")
+            ]
+        )
+        .filter(pl.col("symbol") == "920001.BJ")
+        .sort("trade_date")
+    )
+    close = stored.select("trade_date", "factor", "source").rows()
+    prev_close = 1.0  # _write_bar's close
+    step = prev_close / (prev_close - 0.05)
+    assert [round(f, 9) for _, f, _ in close] == [1.0, 1.0, round(step, 9), round(step, 9)]
+    assert {s for _, _, s in close} == {"derived_actions"}
+    # Sina still answered and disagreed, which is reported rather than written.
+    (divergence,) = [
+        f for f in result.findings if f["check"] == "adj_factor_computed_vendor_divergence"
+    ]
+    assert divergence["sample"][0]["trade_date"] == days[2].isoformat()
+    assert divergence["sample"][0]["sina"] is None
+
+
+def test_crosscheck_does_not_pile_older_actions_onto_the_first_step(crosscheck_config):
+    from cnequity.derive.adj_factors import _corporate_action_crosscheck_findings
+
+    # Two dividends years before the series begins; a flat factor after it.
+    _write_bars(crosscheck_config, "600519.SH", _DAYS, 10.0)
+    _write_action(crosscheck_config, "600519.SH", date(2019, 6, 3), cash_dividend=0.5)
+    _write_action(crosscheck_config, "600519.SH", date(2020, 6, 3), cash_dividend=0.5)
+    out = _factor_frame("600519.SH", _DAYS, [1.0, 1.0, 1.0])
+    assert _corporate_action_crosscheck_findings(crosscheck_config, out) == []
+
+
+def _write_bars_with_pre_close(cfg, symbol, rows):
+    """``rows``: (day, close, pre_close) as an exchange board reports them."""
+    for day, close, pre_close in rows:
+        part = cfg.curated_root / "daily_bars" / f"trade_date={day.isoformat()}"
+        part.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {
+                "symbol": [symbol],
+                "trade_date": [day],
+                "open": [close],
+                "high": [close],
+                "low": [close],
+                "close": [close],
+                "pre_close": [pre_close],
+                "volume": [100],
+                "amount": [close * 100],
+            },
+            schema_overrides={"pre_close": pl.Float64},
+        ).write_parquet(part / f"{symbol}.parquet")
+
+
+def test_pre_close_check_accepts_the_exchange_reference_step(crosscheck_config):
+    from cnequity.derive.adj_factors import _pre_close_step_findings
+
+    _write_bars_with_pre_close(
+        crosscheck_config,
+        "600519.SH",
+        [(_DAYS[0], 10.0, None), (_DAYS[1], 10.0, 9.5), (_DAYS[2], 10.0, 10.0)],
+    )
+    step = 10.0 / 9.5
+    out = _factor_frame("600519.SH", _DAYS, [1.0, step, step])
+
+    assert _pre_close_step_findings(crosscheck_config, out) == []
+
+
+def test_pre_close_check_flags_a_step_the_factor_missed(crosscheck_config):
+    """No corporate action is recorded: the exchange's figure alone convicts it."""
+    from cnequity.derive.adj_factors import _pre_close_step_findings
+
+    _write_bars_with_pre_close(
+        crosscheck_config,
+        "600519.SH",
+        [(_DAYS[0], 10.0, None), (_DAYS[1], 10.0, 9.5), (_DAYS[2], 10.0, 10.0)],
+    )
+    out = _factor_frame("600519.SH", _DAYS, [1.0, 1.0, 1.0])
+
+    findings = _pre_close_step_findings(crosscheck_config, out)
+    assert [f["check"] for f in findings] == ["adj_factor_pre_close_divergence"]
+    assert findings[0]["steps"] == 1
+    sample = findings[0]["sample"][0]
+    assert sample["trade_date"] == "2024-06-27"
+    assert sample["expected"] == pytest.approx(10.0 / 9.5)
+
+
+def test_pre_close_check_is_silent_on_a_lake_without_the_column(crosscheck_config):
+    from cnequity.derive.adj_factors import _pre_close_step_findings
+
+    _write_bars(crosscheck_config, "600519.SH", _DAYS, 10.0)
+    out = _factor_frame("600519.SH", _DAYS, [1.0, 1.0, 1.2])
+
+    assert _pre_close_step_findings(crosscheck_config, out) == []

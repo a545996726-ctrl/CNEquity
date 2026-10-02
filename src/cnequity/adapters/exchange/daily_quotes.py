@@ -34,12 +34,18 @@ and drop out of the shared universe the check compares over.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
 
-from cnequity.adapters.exchange.board_snapshot import sse_snapshot, szse_report
+from cnequity.adapters.exchange.board_snapshot import (
+    SSE_SELECT,
+    SSE_URL,  # noqa: F401 — re-exported for trading_status
+    sse_snapshot,
+    szse_report,
+)
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol, is_etf_symbol
 
 logger = logging.getLogger(__name__)
@@ -50,7 +56,17 @@ _TIMEOUT_SECONDS = 60.0
 # unregistered name, so a typo here disables pacing without any error.
 _SOURCE = "exchange"
 
-QUOTE_COLUMNS = ("symbol", "trade_date", "open", "high", "low", "close", "volume", "amount")
+QUOTE_COLUMNS = (
+    "symbol",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "volume",
+    "amount",
+)
 _EMPTY_QUOTES = pl.DataFrame(
     schema={
         "symbol": pl.Utf8,
@@ -59,6 +75,7 @@ _EMPTY_QUOTES = pl.DataFrame(
         "high": pl.Float64,
         "low": pl.Float64,
         "close": pl.Float64,
+        "pre_close": pl.Float64,
         "volume": pl.Float64,
         "amount": pl.Float64,
     }
@@ -66,12 +83,7 @@ _EMPTY_QUOTES = pl.DataFrame(
 
 # SSE's own quote host. One request covers 主板 (60x), 科创板 (688/689) and B
 # shares (900); the B shares are dropped by `is_all_a_symbol`. The field order
-# of each row follows `select`, so the two must be edited together.
-SSE_SELECT = ("code", "name", "open", "high", "low", "last", "volume", "amount")
-SSE_URL = (
-    "http://yunhq.sse.com.cn:32041/v1/sh1/list/exchange/equity"
-    f"?select={','.join(SSE_SELECT)}&begin=0&end=6000"
-)
+# of each row follows `SSE_SELECT` (defined with the request in `board_snapshot`).
 _SSE_HEADERS = {"Referer": "https://www.sse.com.cn/"}
 # HHMMSS, as the snapshot reports it. 15:00 is the continuous-auction close;
 # the closing call is settled by the time the field passes it.
@@ -95,6 +107,8 @@ _SZSE_COLUMNS = {
 }
 # The export states both in 万 (10k). Curated is shares and yuan.
 _SZSE_SCALE = 10_000.0
+# Optional: a missing or "-" previous close leaves the row's prices intact.
+_SZSE_PRE_CLOSE = "前收"
 
 
 class ExchangeQuotesUnavailable(RuntimeError):
@@ -197,16 +211,19 @@ def fetch_sse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
     rows: list[dict] = []
     untraded = 0
     for item in payload.get("list") or []:
-        if not isinstance(item, (list, tuple)) or len(item) < len(SSE_SELECT):
+        # ``prev_close`` is optional: a snapshot cached before it was selected
+        # still prices the session.
+        if not isinstance(item, (list, tuple)) or len(item) < len(SSE_SELECT) - 1:
             continue
         code = str(item[0]).strip().zfill(6)
         if len(code) != 6 or not code.isdigit() or not _keep_symbol(code, "SH"):
             continue
         try:
-            values = [float(v) for v in item[2 : len(SSE_SELECT)]]
+            values = [float(v) for v in item[2 : len(SSE_SELECT) - 1]]
         except (TypeError, ValueError):
             continue
         open_, high, low, close, volume, amount = values
+        prev_close = _positive(item[len(SSE_SELECT) - 1]) if len(item) >= len(SSE_SELECT) else None
         if _is_untraded_quote(open_, high, low, close):
             untraded += 1
             continue
@@ -218,6 +235,7 @@ def fetch_sse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
                 "high": high,
                 "low": low,
                 "close": close,
+                "pre_close": prev_close,
                 "volume": volume,
                 "amount": amount,
             }
@@ -230,6 +248,14 @@ def fetch_sse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
     if not rows:
         logger.warning("SSE daily quotes returned no usable rows; format may have changed")
     return _finish(rows)
+
+
+def _positive(value) -> float | None:
+    try:
+        parsed = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
 
 
 def fetch_szse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
@@ -247,7 +273,8 @@ def fetch_szse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
 
     rows: list[dict] = []
     untraded = 0
-    for record in pdf[list(_SZSE_COLUMNS)].to_dict("records"):
+    wanted = [*_SZSE_COLUMNS, *([_SZSE_PRE_CLOSE] if _SZSE_PRE_CLOSE in pdf.columns else [])]
+    for record in pdf[wanted].to_dict("records"):
         code = str(record["证券代码"]).strip().zfill(6)
         if len(code) != 6 or not code.isdigit() or not _keep_symbol(code, "SZ"):
             continue
@@ -274,6 +301,7 @@ def fetch_szse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
                 "high": values["high"],
                 "low": values["low"],
                 "close": values["close"],
+                "pre_close": _positive(record.get(_SZSE_PRE_CLOSE)),
                 "volume": values["volume"] * _SZSE_SCALE,
                 "amount": values["amount"] * _SZSE_SCALE,
             }

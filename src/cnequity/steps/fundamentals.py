@@ -419,8 +419,10 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
     # baostock carries no Beijing names: every BJ query fails after its retries
     # (347 of them cost ~2 h of the 2026-09-26 outage fill, then failed the
     # sweep). They are not a gap this source can close, so they are not asked.
-    baostock_unserved = sorted(s for s in universe if s.endswith(".BJ"))
-    universe = [s for s in universe if not s.endswith(".BJ")]
+    from cnequity.domain.market_profile import served, unserved
+
+    baostock_unserved = sorted(unserved("baostock", universe))
+    universe = served("baostock", universe)
     if history_end < history_start:
         return {
             "rows_read": 0,

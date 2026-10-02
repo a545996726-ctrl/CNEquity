@@ -137,6 +137,17 @@ bars = load(
 
 这些路线补的是行情；BJ 历史 ST 仍需独立证据。完整来源与修复入口见[数据源说明](sources.md#daily_bars)。
 
+### 北交所上市前的新三板行情
+
+北交所证券在交易所上市前的场外行情（新三板做市、集合竞价）交易规则不同，没有可核对的涨跌幅。`daily_bars` 与 `adj_factors` 默认不返回这部分：每只北交所证券从其**交易所上市起点**读起，即 `instruments.list_date` 与精选层开板日 2020-07-27 中较晚者。沪深证券不受影响。
+
+```python
+bars = load("daily_bars", symbols=["920826.BJ"])                    # 2021-01-12 起
+otc = load("daily_bars", symbols=["920826.BJ"], include_otc=True)   # 含新三板行情
+```
+
+`universe="all_a"` 同样按交易所上市起点判定北交所证券是否在册。数据不会删除，仍保存在湖中。
+
 ## PIT（Point-in-Time）
 
 PIT 数据集：`financial_statement_items`、`announcement_index`、
@@ -202,7 +213,8 @@ cne query --sql "SELECT * FROM instruments LIMIT 5"
 
 | 视图 | 说明 |
 |------|------|
-| `daily_bars` | 未复权 |
+| `daily_bars` | 未复权；不含北交所上市前的新三板行情，与 `load()` 默认一致 |
+| `daily_bars_including_otc` | 未复权，含北交所新三板行情（`adj_factors_including_otc` 同理） |
 | `daily_bars_hfq` | 后复权价列 |
 | `daily_bars_qfq` | 前复权价列 |
 | `daily_bars_adj` | 含 adj_* 与 adj_is_exact |

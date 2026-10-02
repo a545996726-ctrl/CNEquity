@@ -668,3 +668,74 @@ def test_backfill_mode_drops_the_daily_tail_window(tmp_path, monkeypatch):
     cfg._backfill = True
     step_trading_status_derive(cfg, trade_date, "run-init", {})
     assert seen == {"start": None, "end": None}
+
+
+def test_a_session_the_bar_feed_missed_is_not_inferred_as_a_halt(tmp_path):
+    from cnequity.storage.state import StateStore
+
+    root = tmp_path / "data"
+    cfg = Config(data_root=root)
+    days = [date(2024, 6, 26), date(2024, 6, 27), date(2024, 6, 28)]
+    stamp = "2024-06-28T00:00:00+00:00"
+    for d in days:
+        _write(
+            root,
+            "trading_calendar",
+            "trade_date",
+            d.isoformat(),
+            pl.DataFrame(
+                {
+                    "trade_date": [d],
+                    "is_trading": [True],
+                    "source": ["seed"],
+                    "data_version": ["v1"],
+                    "fetched_at": [stamp],
+                }
+            ),
+        )
+        if d != days[1]:
+            _write(
+                root,
+                "daily_bars",
+                "trade_date",
+                d.isoformat(),
+                pl.DataFrame(
+                    {
+                        "symbol": ["920001.BJ"],
+                        "trade_date": [d],
+                        "open": [1.0],
+                        "high": [1.0],
+                        "low": [1.0],
+                        "close": [1.0],
+                        "volume": [1],
+                        "amount": [1.0],
+                        "source": ["tdx_protocol"],
+                        "data_version": ["v1"],
+                        "fetched_at": [stamp],
+                    }
+                ),
+            )
+    (root / "curated" / "instruments").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["920001.BJ"],
+            "name": ["A"],
+            "exchange": ["BJ"],
+            "asset_type": ["stock"],
+            "list_date": [date(2023, 1, 3)],
+            "delist_date": [None],
+            "prev_symbol": [None],
+            "source": ["bse"],
+            "data_version": ["v1"],
+            "fetched_at": [stamp],
+        },
+        schema_overrides={"delist_date": pl.Date, "prev_symbol": pl.Utf8},
+    ).write_parquet(root / "curated" / "instruments" / "part-merged.parquet")
+
+    assert derive_suspension_history(cfg, "probe") == 1
+    # Once the session is known to be missing from the feed, the hole is a
+    # failed fetch waiting for a refetch, not a halt.
+    StateStore(cfg.meta_root).record_missing_dates(
+        "daily_bars", [days[1]], reason="bj_session_incomplete"
+    )
+    assert derive_suspension_history(cfg, "after-ledger") == 0

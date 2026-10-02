@@ -169,6 +169,7 @@ scripts/migrate_trading_status_risk_warning.py --config configs/cnequity.toml --
 | high | float64 |  |
 | low | float64 |  |
 | close | float64 |  |
+| pre_close | float64 | 可空。交易所公布的前收盘；除权日即除权参考价（见下「前收盘」） |
 | volume | int64 | **股**（见下「成交量单位」）；`data_version=v2` 才保证 |
 | amount | float64 | 人民币 |
 | source | string |  |
@@ -193,6 +194,10 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 ```
 
 `source ∈ {tdx_protocol, sina}` 且 `data_version=v1` 的行 `volume ×100`；其余 v1 行原样保留（本就是股）；所有被处理的行改写为 `data_version=v2`。已是 v2 的行跳过，脚本幂等、可中断续跑。**`fetched_at` 不重新打戳**——这些行确实是当时抓的，改掉就抹掉了数据被观测到的时间；记录本次重新解释的列是 `data_version`，这正是它的用途。`--apply` 会就地改写 curated，请先备份。
+
+##### 前收盘（`pre_close`）
+
+交易所行情公布的当日前收盘，来自上交所行情快照、北交所行情板和通达信实时行情（深市经通达信），从 0.13.0 起随日更写入；K 线历史（通达信历史、新浪、Baostock、同花顺）不提供，这些行和既有历史为空。除权除息日的前收盘就是交易所算出的除权参考价，所以 `前一交易日收盘 ÷ pre_close` 就是当日应有的复权因子台阶，平日为 1。派生复权因子时按此核对，偏离超过容差（另加前收盘半分钱的舍入）报 `adj_factor_pre_close_divergence`。之后用 K 线回补同一交易日时，已有的前收盘会保留。`index_bars` 共用这一列，目前没有写入来源。
 
 ##### 北交所的成交量和成交额含大宗交易
 

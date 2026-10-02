@@ -13,8 +13,9 @@ from cnequity.config import Config
 _D = date(2026, 9, 24)
 
 
-def _quote(market, code, *, price, open_, high, low, vol, amount):
+def _quote(market, code, *, price, open_, high, low, vol, amount, last_close=None):
     return {
+        "last_close_raw": last_close,
         "market": market,
         "code": code,
         "price_raw": price,
@@ -49,6 +50,7 @@ def test_quotes_become_bars_scaled_by_security_type():
                 low=123105,
                 vol=31239,
                 amount=3.8e9,
+                last_close=124800,
             ),
             _quote(
                 1, "510300", price=4515, open_=4578, high=4579, low=4512, vol=7102519, amount=3.2e9
@@ -63,10 +65,13 @@ def test_quotes_become_bars_scaled_by_security_type():
         "high": 1256.13,
         "low": 1231.05,
         "close": 1237.0,
+        "pre_close": 1248.0,
         "volume": 3123900,
         "amount": 3.8e9,
     }
     assert bars["510300.SH"]["close"] == 4.515  # funds quote in 0.001
+    # No previous close in the payload is a null, not a zero.
+    assert bars["510300.SH"]["pre_close"] is None
 
 
 def test_suspended_and_unpriced_symbols_stay_with_the_per_symbol_path():

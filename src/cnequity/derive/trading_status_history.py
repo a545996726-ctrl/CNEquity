@@ -136,7 +136,31 @@ def _suspended_pairs(
         )
         .select(["symbol", "trade_date"])
     )
-    return expected.join(bars, on=["symbol", "trade_date"], how="anti")
+    gaps = expected.join(bars, on=["symbol", "trade_date"], how="anti")
+    # A session the bar feed is known to have missing is a failed fetch, not
+    # a market fact: inferring halts from it would label the gap "suspended"
+    # and hide it from the refetch (2026-08-07, 223 Beijing names).
+    unfetched = _unfetched_sessions(config)
+    if unfetched:
+        gaps = gaps.filter(~pl.col("trade_date").is_in(sorted(unfetched)))
+    return gaps
+
+
+def _unfetched_sessions(config: Config) -> set[date]:
+    from cnequity.storage.state import StateStore
+
+    days: set[date] = set()
+    for row in StateStore(config.meta_root).get_payload("daily_bars").get("missing_ranges", []):
+        try:
+            first = date.fromisoformat(str(row["start"]))
+            last = date.fromisoformat(str(row.get("end") or row["start"]))
+        except (KeyError, ValueError):
+            continue
+        day = first
+        while day <= last:
+            days.add(day)
+            day = date.fromordinal(day.toordinal() + 1)
+    return days
 
 
 def derive_suspension_history(

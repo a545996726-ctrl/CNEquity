@@ -10,6 +10,7 @@ import polars as pl
 from cnequity.config import Config
 from cnequity.domain.action_evidence import evidence_level_sql
 from cnequity.domain.datasets import DATASETS, DatasetSpec
+from cnequity.domain.market_profile import OTC_SCOPED_DATASETS, otc_quote_sql
 from cnequity.domain.partitions import uses_hive
 from cnequity.domain.schemas import DATASET_SCHEMAS, PRIMARY_KEYS
 from cnequity.domain.trading_status import evidence_rank_sql
@@ -204,6 +205,10 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
 
     for name, spec in sorted(DATASETS.items()):
         view_name = "flash_news_wire_legacy" if name == "flash_news_wire" else name
+        if name in OTC_SCOPED_DATASETS:
+            # The public view leaves out Beijing NEEQ quotes, as load() does;
+            # it is defined below, once instruments exists to bind against.
+            view_name = f"{name}_including_otc"
         glob_path, hive = _view_glob(root, spec)
         if _glob_has_files(glob_path) or require_data:
             source = (
@@ -224,6 +229,25 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
             )
         else:
             con.execute(_empty_view_sql(name).replace(f"VIEW {name} AS", f"VIEW {view_name} AS"))
+
+    instrument_columns = {row[0] for row in con.execute("DESCRIBE instruments").fetchall()}
+    # Without listing dates the cut is the select tier's opening alone, as in load().
+    listing = (
+        "SELECT symbol, MIN(list_date) AS list_date FROM instruments GROUP BY symbol"
+        if {"symbol", "list_date"} <= instrument_columns
+        else "SELECT NULL::VARCHAR AS symbol, NULL::DATE AS list_date WHERE FALSE"
+    )
+    for name in sorted(OTC_SCOPED_DATASETS):
+        date_col = DATASETS[name].date_col or DATASETS[name].partition_col or "trade_date"
+        con.execute(
+            f"""
+            CREATE OR REPLACE VIEW {name} AS
+            SELECT b.*
+            FROM {name}_including_otc b
+            LEFT JOIN ({listing}) i ON b.symbol = i.symbol
+            WHERE NOT COALESCE({otc_quote_sql("b.symbol", f"b.{date_col}", "i.list_date")}, FALSE)
+            """
+        )
 
     # Existing flash revisions remain readable, while every new EastMoney
     # item is stored only in news_headlines. Keep the wire's public columns and

@@ -14,6 +14,7 @@ gate. Previous revisions stay readable.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -77,7 +78,19 @@ def _repair_locked(config: Config, *, apply: bool) -> dict:
         )
         entry.update(rows=int(hit.get_column("len").sum()), partitions=hit.height)
         if apply:
-            entry.update(_publish(config, store, dataset, partition_col, base, set(orphans)))
+            dropped = list(orphans)
+            entry.update(
+                _publish(
+                    config,
+                    store,
+                    dataset,
+                    partition_col,
+                    base,
+                    keep=lambda frame, d=dropped: frame.filter(~pl.col("symbol").is_in(d)),
+                    reason="orphan_symbol_repair",
+                    metadata={"orphan_symbols": len(orphans)},
+                )
+            )
     report["applied"] = apply
     return report
 
@@ -88,8 +101,12 @@ def _publish(
     dataset: str,
     partition_col: str,
     base: Path,
-    orphans: set[str],
+    *,
+    keep: Callable[[pl.DataFrame], pl.DataFrame],
+    reason: str,
+    metadata: dict,
 ) -> dict:
+    """Rewrite the partitions ``keep`` shrinks and publish one gated revision."""
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
     from cnequity.quality.publication import check_repair_publication
 
@@ -103,11 +120,11 @@ def _publish(
         if not files:
             continue
         frame = pl.concat([pl.read_parquet(p) for p in files], how="diagonal_relaxed")
-        keep = frame.filter(~pl.col("symbol").is_in(list(orphans)))
-        if keep.height == frame.height:
+        kept = keep(frame)
+        if kept.height == frame.height:
             continue
         value = directory.name.partition("=")[2]
-        if keep.is_empty():
+        if kept.is_empty():
             # The commit carries an undeclared partition only while it is
             # still present, so removing it here removes it from the revision.
             target = layer / dataset / directory.name
@@ -117,7 +134,7 @@ def _publish(
             emptied += 1
             continue
         changed.append(
-            writer.write_partition(dataset, partition_col, value, keep, "part-merged.parquet")
+            writer.write_partition(dataset, partition_col, value, kept, "part-merged.parquet")
         )
     if not changed and emptied:
         # commit() reads "no changed files" as "unchanged", so a change made
@@ -145,7 +162,7 @@ def _publish(
                     "part-merged.parquet",
                 )
             )
-    run_id = f"orphan-symbols-{dataset}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    run_id = f"{reason}-{dataset}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     publication = check_repair_publication(config, dataset, run_id, changed)
     contract = dataset_contract(dataset)
     revision = store.commit(
@@ -155,18 +172,89 @@ def _publish(
         schema_version=int(contract["schema_version"]),
         contract_fingerprint=contract_fingerprint(contract),
         metadata={
-            "reason": "orphan_symbol_repair",
-            "orphan_symbols": len(orphans),
+            "reason": reason,
+            **metadata,
             "partitions_emptied": emptied,
             "publication_audit": publication["report_path"],
         },
     )
     if revision is None:
-        raise RuntimeError(f"{dataset}: orphan removal produced no revision; nothing published")
-    logger.info("%s: removed rows for %d security(ies) without bars", dataset, len(orphans))
+        raise RuntimeError(f"{dataset}: {reason} produced no revision; nothing published")
+    logger.info("%s: %s published revision %s", dataset, reason, revision.revision)
     return {
         "revision": revision.revision,
         "partitions_rewritten": len(changed),
         "partitions_emptied": emptied,
         "publication_audit": publication["report_path"],
     }
+
+
+def repair_stale_derived_suspensions(config: Config, *, apply: bool = False) -> dict:
+    """Plan (default) or remove ``derived_bar_gap`` rows a traded bar contradicts.
+
+    Such a row says a security was suspended because its bar was missing. Once
+    the bar is fetched it is wrong: 223 Beijing rows for 2026-08-07 were
+    inferred from a run that lost the Beijing leg, not from a halt.
+    """
+    with lake_mutation_lock(config.meta_root, blocking=True):
+        return _repair_stale_locked(config, apply=apply)
+
+
+def _repair_stale_locked(config: Config, *, apply: bool) -> dict:
+    from cnequity.domain.canonical import dedupe_lazy_by_primary_key
+    from cnequity.domain.trading_status import DERIVED_BAR_GAP_SOURCE
+
+    store = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
+    store.ensure_current("trading_status")
+    base = store.current_root("trading_status")
+    bars_root = store.current_root("daily_bars")
+    report: dict = {"applied": False, "rows": 0}
+    if base is None or bars_root is None:
+        return report
+    derived = (
+        scan_parquet_root(base, partition_col="trade_date")
+        .filter(pl.col("source") == DERIVED_BAR_GAP_SOURCE)
+        .select("symbol", "trade_date")
+        .unique()
+        .collect()
+    )
+    if derived.is_empty():
+        return report
+    traded = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(
+                bars_root,
+                partition_col="trade_date",
+                symbols=derived.get_column("symbol").unique().to_list(),
+            ),
+            "daily_bars",
+        )
+        .filter(pl.col("volume").fill_null(0) > 0)
+        .select("symbol", "trade_date")
+        .collect()
+    )
+    stale = derived.join(traded, on=["symbol", "trade_date"])
+    report.update(rows=stale.height, sample=[f"{s}|{d}" for s, d in stale.head(20).iter_rows()])
+    if not apply or stale.is_empty():
+        return report
+    marked = stale.with_columns(pl.lit(True).alias("_stale"))
+
+    def keep(frame: pl.DataFrame) -> pl.DataFrame:
+        flagged = frame.join(marked, on=["symbol", "trade_date"], how="left")
+        drop = (pl.col("source") == DERIVED_BAR_GAP_SOURCE) & pl.col("_stale").fill_null(False)
+        return flagged.filter(~drop).drop("_stale")
+
+    report.update(
+        _publish(
+            config,
+            store,
+            "trading_status",
+            "trade_date",
+            base,
+            keep=keep,
+            reason="stale_derived_suspensions",
+            metadata={"rows": stale.height},
+        )
+    )
+    report["applied"] = True
+    return report

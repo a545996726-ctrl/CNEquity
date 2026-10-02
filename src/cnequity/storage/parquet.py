@@ -18,6 +18,7 @@ from cnequity.domain.pit import (
 )
 from cnequity.domain.schemas import (
     DATASET_SCHEMAS,
+    OPTIONAL_COLUMNS,
     PRIMARY_KEYS,
     SchemaValidationError,
     sanitize_dataset_rows,
@@ -104,7 +105,10 @@ class StagingWriter:
             except SchemaValidationError as exc:
                 # A missing column is a batch-level fault; bisecting it would
                 # only reject every row one at a time.
-                if frame.height <= 1 or any(column not in frame.columns for column in required):
+                if frame.height <= 1 or any(
+                    column not in frame.columns and column not in OPTIONAL_COLUMNS
+                    for column in required
+                ):
                     rejected.append(frame)
                     reasons.add(str(exc))
                 else:

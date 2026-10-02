@@ -182,7 +182,7 @@ def test_quotes_and_status_share_one_request_per_exchange(tmp_path, monkeypatch)
             return {
                 "date": 20260915,
                 "time": 153000,
-                "list": [["600519", "贵州茅台", 100, 101, 99, 100, 10, 1000]],
+                "list": [["600519", "贵州茅台", 100, 101, 99, 100, 10, 1000, 99.5]],
             }
 
     class Client:

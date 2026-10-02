@@ -29,6 +29,7 @@ from datetime import date
 import polars as pl
 
 from cnequity.adapters.baostock._session import check_result, fetch_per_symbol, to_baostock_symbol
+from cnequity.domain.market_profile import serves
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ def fetch_adj_factor_series_baostock(
     distinction Sina's own error type carries. Beijing is not covered by this
     vendor at all and is refused before any request.
     """
-    if symbol.upper().endswith(".BJ"):
+    if not serves("baostock", symbol.upper()):
         raise BaostockAdjFactorUnavailableError(f"baostock has no Beijing coverage for {symbol}")
 
     captured: dict[str, dict[date, float]] = {}
@@ -172,7 +173,7 @@ def fetch_adj_factor_series_baostock_many(
         captured[sym] = (raw, hfq)
         return [{"symbol": sym}]
 
-    served = [s for s in symbols if not s.upper().endswith(".BJ")]
+    served = [s for s in symbols if serves("baostock", s.upper())]
     _rows, failed = fetch_per_symbol(
         served,
         start,
@@ -260,7 +261,7 @@ def fetch_adjust_factor_events_baostock_many(
     2006 share-reform step the two vendors treat differently. A symbol with no
     rows cannot be told apart from an unanswered one and is returned as failed.
     """
-    served = [s for s in symbols if not s.upper().endswith(".BJ")]
+    served = [s for s in symbols if serves("baostock", s.upper())]
     rows, failed = fetch_per_symbol(
         served,
         start,

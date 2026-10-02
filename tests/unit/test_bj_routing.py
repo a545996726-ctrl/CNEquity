@@ -19,7 +19,9 @@ from cnequity.steps.delisted import catalog_path
 from cnequity.steps.reference import _merge_untdxable_instruments
 from cnequity.storage.parquet import StagingWriter
 
-_BAR_COLS = [c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at")]
+_BAR_COLS = [
+    c for c in DAILY_BARS_SCHEMA if c not in ("source", "data_version", "fetched_at", "pre_close")
+]
 
 
 def _bars(symbol: str, days: list[date]) -> pl.DataFrame:

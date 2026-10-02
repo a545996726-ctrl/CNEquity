@@ -21,6 +21,7 @@ from cnequity.domain.datasets import (
     intraday_dataset_names,
     pit_dataset_names,
 )
+from cnequity.domain.market_profile import OTC_SCOPED_DATASETS, otc_quote_expr
 from cnequity.domain.pit import (
     PIT_STORAGE_COLUMNS,
     PitMode,
@@ -364,6 +365,40 @@ def _catalog_coverage_bounds(config: Config, dataset: str) -> tuple[date | None,
     return bounds[0], bounds[1]
 
 
+def _has_listing_dates(config: Config) -> bool:
+    """Whether a committed ``instruments`` exists for the NEEQ cut to read.
+
+    Without one the cut falls back to the select tier's opening date alone,
+    and the read depends on nothing more than the dataset itself.
+    """
+    from cnequity.storage.revisions import RevisionStore
+
+    store = RevisionStore(config.meta_root, config.curated_root, config.derived_root, create=False)
+    return store.current_root("instruments") is not None
+
+
+def _drop_otc_quotes(
+    df: pl.DataFrame, config: Config, read_context: ReadContext | None, date_col: str
+) -> pl.DataFrame:
+    """Leave out Beijing rows from before the security's exchange start."""
+    from cnequity.query.universe import _load_instruments
+
+    # A pinned read carries instruments when the lake has a committed one;
+    # otherwise the listing dates come from what the lake holds now.
+    pinned = read_context if read_context and "instruments" in read_context.roots else None
+    instruments = _load_instruments(config, pinned)
+    listing = (
+        instruments.select("symbol", "list_date").unique("symbol")
+        if not instruments.is_empty() and "list_date" in instruments.columns
+        else pl.DataFrame(schema={"symbol": pl.Utf8, "list_date": pl.Date})
+    )
+    return (
+        df.join(listing.rename({"list_date": "_list_date"}), on="symbol", how="left")
+        .filter(~otc_quote_expr(day=date_col, list_date="_list_date").fill_null(False))
+        .drop("_list_date")
+    )
+
+
 def _read_dataset(
     config: Config,
     dataset: str,
@@ -375,6 +410,7 @@ def _read_dataset(
     strict_universe: bool = False,
     revision: RevisionRef | None = None,
     read_context: ReadContext | None = None,
+    include_otc: bool = True,
 ) -> pl.DataFrame:
     root = read_context.roots[dataset] if read_context else _dataset_root(config, dataset)
     if not dataset_has_parquet(
@@ -401,6 +437,8 @@ def _read_dataset(
         )
     except FileNotFoundError as exc:
         raise ReaderError(_missing_dataset_message(dataset, root, config.data_root)) from exc
+    if not include_otc and dataset in OTC_SCOPED_DATASETS and not df.is_empty():
+        df = _drop_otc_quotes(df, config, read_context, DATE_COLUMNS.get(dataset, "trade_date"))
     # Apply semantic scope before strict schema validation.  Live snapshots
     # legitimately contain retired, future-listed, and unavailable quote
     # rows; those rows are outside an ``all_a`` query and must not make a
@@ -731,6 +769,7 @@ def load(
     data_root: str | Path | None = None,
     revision: RevisionSelection | None = None,
     revision_map: Mapping[str, RevisionRef] | None = None,
+    include_otc: bool = False,
 ) -> pl.DataFrame:
     """Load a curated dataset with optional adjustment, universe, and PIT filters.
 
@@ -751,6 +790,12 @@ def load(
         a fund's hfq adjusts unit splits only. Its level equals hfq on each
         fund's first bar in scope, so compare returns, not levels, across
         queries with different starts. hfq and qfq keep their meaning.
+    include_otc:
+        ``daily_bars`` / ``adj_factors`` only. A Beijing security's rows from
+        before its exchange start — the later of its listing date and the NEEQ
+        select tier's opening, 2020-07-27 — are NEEQ over-the-counter quotes
+        under different trading rules, and are left out unless this is
+        ``True``. Shanghai and Shenzhen rows are never affected.
     universe:
         ``all_a`` — drop unlisted/delisted rows per day via ``instruments``, and
         drop ST/suspended rows when ``trading_status`` has data for that day.
@@ -856,6 +901,9 @@ def load(
         dependencies.update({"corporate_actions", "instruments"})
     if effective_universe:
         dependencies.update({"instruments", "trading_status", "trading_calendar"})
+    if dataset in OTC_SCOPED_DATASETS and not include_otc and _has_listing_dates(cfg):
+        # Which Beijing rows are NEEQ quotes is read from listing dates.
+        dependencies.add("instruments")
     selected_revisions = {
         name: (
             _revision_for_dataset(revision_selection, name, fallback_primary=name == dataset)
@@ -933,6 +981,7 @@ def load(
             strict_universe=effective_strict_universe,
             revision=_revision_for_dataset(revision_selection, dataset),
             read_context=read_context,
+            include_otc=include_otc,
         )
     if resolved_profile is not None and dataset == "daily_bars":
         _require_profile_delisting_evidence(cfg, df, resolved_profile, read_context)

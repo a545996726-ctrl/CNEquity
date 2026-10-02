@@ -101,3 +101,42 @@ def test_apply_removes_only_securities_without_bars(tmp_path):
     old = load("adj_factors", config=cfg, revision=1)
     assert "519019.SH" in old.get_column("symbol").to_list()
     assert repair_orphan_symbols(cfg)["datasets"]["adj_factors"]["orphan_symbols"] == 0
+
+
+def test_an_inferred_suspension_a_traded_bar_contradicts_is_removed(tmp_path):
+    from cnequity.storage.orphan_symbol_repair import repair_stale_derived_suspensions
+
+    cfg = _lake(tmp_path)
+    part = cfg.curated_root / "trading_status" / "trade_date=2024-01"
+    part.mkdir(parents=True)
+
+    def row(symbol, day, source):
+        return {
+            "symbol": symbol,
+            "trade_date": day,
+            "is_trading": False,
+            "status": "suspended",
+            "risk_warning": None,
+            "source": source,
+            "data_version": "v1",
+            "fetched_at": FETCHED,
+        }
+
+    pl.DataFrame(
+        [
+            row("600519.SH", DAYS[0], "derived_bar_gap"),  # it traded: stale
+            row("600519.SH", date(2024, 1, 4), "derived_bar_gap"),  # no bar: stands
+            row("000001.SZ", DAYS[0], "bse"),  # independent evidence: never touched
+        ],
+        schema_overrides={"risk_warning": pl.Boolean},
+    ).write_parquet(part / "part-0.parquet")
+    _commit(cfg, "trading_status", cfg.curated_root / "trading_status")
+
+    assert repair_stale_derived_suspensions(cfg)["rows"] == 1
+    report = repair_stale_derived_suspensions(cfg, apply=True)
+    assert report["applied"] is True
+    kept = load("trading_status", config=cfg).sort("symbol", "trade_date")
+    assert kept.select("symbol", "trade_date", "source").rows() == [
+        ("000001.SZ", DAYS[0], "bse"),
+        ("600519.SH", date(2024, 1, 4), "derived_bar_gap"),
+    ]

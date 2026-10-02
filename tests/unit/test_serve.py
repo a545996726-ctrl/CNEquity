@@ -64,6 +64,8 @@ def _full_row(dataset: str, **values) -> dict:
         row.update({"open": 9.0, "high": 11.0, "low": 8.0, "close": 10.0, "volume": 100})
         if "amount" in row:
             row["amount"] = 1_000.0
+        if "pre_close" in row:
+            row["pre_close"] = 9.5
     row["source"] = "tdx_protocol"
     row["data_version"] = "v2"
     return {**row, **values}

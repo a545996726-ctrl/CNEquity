@@ -162,11 +162,11 @@ def _sse_payload(rows, *, day=20260828, time=162906):
     return {"date": day, "time": time, "list": rows}
 
 
-# code, name, open, high, low, last, volume, amount — shared status/quote request.
+# code, name, open, high, low, last, volume, amount, prev_close — shared status/quote request.
 _SSE_ROWS = [
-    ["600000", "浦发银行", 9.01, 9.04, 8.95, 9.00, 58786810, 528817735],
-    ["688267", "中触媒", 18.23, 19.56, 18.23, 19.26, 2852200, 54524888],
-    ["900902", "市北B股", 0.5, 0.5, 0.5, 0.5, 1000, 500],
+    ["600000", "浦发银行", 9.01, 9.04, 8.95, 9.00, 58786810, 528817735, 8.98],
+    ["688267", "中触媒", 18.23, 19.56, 18.23, 19.26, 2852200, 54524888, 18.40],
+    ["900902", "市北B股", 0.5, 0.5, 0.5, 0.5, 1000, 500, 0.5],
 ]
 
 
@@ -176,6 +176,7 @@ def test_sse_quotes_parse_and_drop_b_shares(monkeypatch):
     assert out.get_column("symbol").to_list() == ["600000.SH", "688267.SH"]
     row = out.filter(out["symbol"] == "600000.SH").to_dicts()[0]
     assert (row["open"], row["high"], row["low"], row["close"]) == (9.01, 9.04, 8.95, 9.00)
+    assert row["pre_close"] == 8.98
     # The endpoint already states shares and yuan; nothing is rescaled.
     assert row["volume"] == 58786810
     assert row["amount"] == 528817735
@@ -217,6 +218,7 @@ _SZSE_ROWS = [
         "最高": "11.68",
         "最低": "11.48",
         "今收": "11.65",
+        "前收": "11.60",
         "成交量(万股)": "8,385.19",
         "成交金额(万元)": "97,367.83",
     },
@@ -248,6 +250,7 @@ def test_szse_quotes_are_rescaled_from_wan_units(monkeypatch):
     # 8,385.19 万股 -> shares; 97,367.83 万元 -> yuan. Separators and all.
     assert row["volume"] == pytest.approx(83_851_900.0)
     assert row["amount"] == pytest.approx(973_678_300.0)
+    assert row["pre_close"] == 11.60
 
 
 def test_szse_missing_columns_are_reported_not_guessed(monkeypatch):

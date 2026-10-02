@@ -175,7 +175,9 @@ def snapshot_trading_status_exchange(
     build the availability record that a decision about authority needs.
     Returns the row count so a caller can report it.
     """
-    sh_sz = [symbol for symbol in symbols if not symbol.endswith(".BJ")]
+    from cnequity.domain.market_profile import served
+
+    sh_sz = served("exchange_boards", symbols)
     if not sh_sz or not config.sources.get("exchange", True):
         return 0
     from cnequity.adapters.exchange.trading_status import fetch_trading_status_exchange

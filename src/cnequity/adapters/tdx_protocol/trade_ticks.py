@@ -33,6 +33,7 @@ from datetime import date, datetime, time
 from cnequity.adapters.tdx_protocol._wire import MAX_TICK_PAGE
 from cnequity.adapters.tdx_protocol._wire.constants import SECURITY_COEFFICIENT
 from cnequity.adapters.tdx_protocol._wire.helper import get_security_type
+from cnequity.domain.market_profile import EXCHANGES, serves
 from cnequity.domain.rate_limit import RateLimitSpec, source_request_slot_spec, wait_spec
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,8 @@ def fetch_trade_ticks(
     real answer, not a failure. Every other incomplete outcome raises.
     """
     code, _, exch = symbol.partition(".")
-    if exch == "BJ":
+    # An unknown suffix is reported below as such, not as a coverage gap.
+    if exch in EXCHANGES and not serves("tdx_intraday", symbol):
         # The server answers with an empty list rather than an error, which is
         # indistinguishable from "did not trade" — and would quietly write a
         # Beijing name into the lake as permanently suspended.

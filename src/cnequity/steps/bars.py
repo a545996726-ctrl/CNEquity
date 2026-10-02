@@ -2216,6 +2216,7 @@ def _fetch_tip_via_tdx_quotes(
             "high": pl.Float64,
             "low": pl.Float64,
             "close": pl.Float64,
+            "pre_close": pl.Float64,
             "volume": pl.Int64,
             "amount": pl.Float64,
         },
@@ -3633,7 +3634,10 @@ def _gapfill_missing_keys_via_ths(
 ) -> dict:
     """Use THS only for exact keys still absent after cheaper batch routes."""
     from cnequity.adapters.ths.stock_bars import fetch_stock_bars
+    from cnequity.domain.market_profile import serves
 
+    # A key THS is not trusted for stays missing for a source that is.
+    missing_keys = {key for key in missing_keys if serves("ths_daily_bars", key[0])}
     ths_enabled = config.sources.get("ths", False)
     if not missing_keys or not ths_enabled:
         # See the baostock link: "disabled" is a claim about configuration, and
@@ -4474,7 +4478,9 @@ def _supplement_bse_tip_amounts(
     date and every OHLCV field agrees exactly with the Sina row already staged.
     A mismatch keeps the Sina row unchanged and becomes an audit finding.
     """
-    bse_symbols = sorted({symbol for symbol in symbols if symbol.endswith(".BJ")})
+    from cnequity.domain.market_profile import served
+
+    bse_symbols = sorted(set(served("bse_boards", symbols)))
     if not bse_symbols or not config.sources.get("bse", False):
         return merged, []
 
@@ -4638,7 +4644,9 @@ def fetch_bars_via_sina(
     # this check BJ symbols unnecessarily enter the much larger Sina sweep.
     # ``fetch`` is injectable for tests, so skip this live path when a fake
     # fetcher is supplied.
-    bse_symbols = [symbol for symbol in requested_symbols if symbol.upper().endswith(".BJ")]
+    from cnequity.domain.market_profile import served
+
+    bse_symbols = [s for s in requested_symbols if served("bse_boards", [s.upper()])]
     bse_attempted = False
     if use_parallel and bse_symbols and config.sources.get("bse", False):
         sessions = list_trading_dates(config, start, end)
@@ -5051,7 +5059,9 @@ def _history_plan(config: Config, start: date, end: date) -> list[tuple[str, dat
     # misses legacy BSE/NEEQ codes (43/83/87xxxx), which are also represented as
     # ``.BJ`` in the instrument lake and must not enter this THS-only history
     # path.
-    symbols = [s for s in load_symbols(config) if not s.upper().endswith(".BJ")]
+    from cnequity.domain.market_profile import served
+
+    symbols = [s for s in load_symbols(config) if served("ths_official_deep_history", [s.upper()])]
     inst = load_curated_instruments(config)
     if inst is None:
         # No instruments to plan against: fall back to the full window rather

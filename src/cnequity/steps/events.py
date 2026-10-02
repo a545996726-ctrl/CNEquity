@@ -478,7 +478,11 @@ def _delisted_bj_windows(
     start: date,
     end: date,
 ) -> dict[str, tuple[date, date]]:
-    return _delisted_windows(config, symbols, start, end, ("BJ",))
+    from cnequity.domain.market_profile import COVERAGE
+
+    return _delisted_windows(
+        config, symbols, start, end, tuple(sorted(COVERAGE["ths_delisted_actions"]))
+    )
 
 
 def _validate_earnings_schedule_snapshot(df: pl.DataFrame) -> pl.DataFrame:
