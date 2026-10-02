@@ -138,10 +138,15 @@ def test_archive_corruption_blocks_marking(legacy):
 
 def test_legacy_experiment_running_manifest_blocks_purge(legacy, tmp_path):
     import sqlite3
+    from contextlib import closing
 
     store, cleaner, source, _, _ = legacy
     (source / "meta").mkdir()
-    with sqlite3.connect(source / "meta/manifest.db") as db:
+    # `with sqlite3.connect()` commits and leaves the connection open. Archive
+    # then hashes the file with a raw read, which Windows denies while SQLite
+    # still holds its byte-range lock. Close first; the running row is what
+    # the purge must see, not a live connection.
+    with closing(sqlite3.connect(source / "meta/manifest.db")) as db, db:
         db.execute("CREATE TABLE ingestion_runs (run_id TEXT, status TEXT)")
         db.execute("INSERT INTO ingestion_runs VALUES ('trial-worker', 'running')")
     ArtifactStore(store).archive("experiment/test", tmp_path / "archives")

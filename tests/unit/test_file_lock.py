@@ -419,32 +419,52 @@ def test_a_brief_queue_is_waited_out_in_silence(tmp_path, caplog, monkeypatch):
     with exclusive_lock(path, blocking=False):
         pass
 
-    # Stamps on one monotonic clock rather than an event set after release:
-    # the holder used to `released.set()` *after* leaving the with-block, so a
-    # runner that descheduled it in that gap let this acquire return first and
-    # failed a correct implementation. Comparing the two stamps is the same
-    # question with no window to lose — a queued acquire cannot start before
-    # the release it waited for.
+    # `is_locked` answers by taking the lock itself. Polling it while the
+    # holder does a non-blocking acquire races: the probe wins, the holder
+    # dies with LockUnavailable, and this assertion sees an empty stamp.
+    # The holder instead keeps the lock until this thread has entered the
+    # blocking acquire, then stamps on the way out. A queued acquire cannot
+    # finish before that stamp.
     released_at: list[float] = []
     acquired_at: list[float] = []
+    holding = threading.Event()
+    entered_wait = threading.Event()
+    saw_contention: list[bool] = []
+    waiter = threading.current_thread()
+    real_acquire = file_lock_mod._acquire
+
+    def _acquire(handle, *, blocking, timeout=None):
+        if threading.current_thread() is not waiter:
+            return real_acquire(handle, blocking=blocking, timeout=timeout)
+        if not blocking:
+            try:
+                return real_acquire(handle, blocking=False, timeout=timeout)
+            except LockUnavailable:
+                saw_contention.append(True)
+                raise
+        entered_wait.set()
+        return real_acquire(handle, blocking=blocking, timeout=timeout)
+
+    monkeypatch.setattr(file_lock_mod, "_acquire", _acquire)
 
     def _hold():
-        with exclusive_lock(path, blocking=False):
+        with exclusive_lock(path, blocking=True, timeout=5):
+            holding.set()
+            if not entered_wait.wait(5):
+                return
             time.sleep(0.15)
             released_at.append(time.monotonic())
 
     thread = threading.Thread(target=_hold)
     thread.start()
     try:
-        # Let the holder take it, so this acquire really does queue.
-        deadline = time.monotonic() + 5
-        while not is_locked(path) and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert holding.wait(5), "holder never acquired the lock"
         with caplog.at_level(logging.INFO, logger="cnequity.file_lock"):
             with exclusive_lock(path, blocking=True, timeout=30.0):
                 acquired_at.append(time.monotonic())
     finally:
         thread.join(10)
     assert released_at and acquired_at
-    assert acquired_at[0] >= released_at[0], "the acquire must have queued, not walked straight in"
+    assert saw_contention, "the acquire must have queued, not walked straight in"
+    assert acquired_at[0] >= released_at[0]
     assert not [r for r in caplog.records if "waiting for" in r.message]
