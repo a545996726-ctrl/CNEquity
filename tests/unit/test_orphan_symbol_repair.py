@@ -4,7 +4,7 @@ import polars as pl
 
 from cnequity.config import Config
 from cnequity.query import load
-from cnequity.storage.orphan_symbol_repair import repair_orphan_symbols
+from cnequity.storage.repairs.orphan_symbols import repair_orphan_symbols
 from cnequity.storage.revisions import RevisionStore
 
 FETCHED = datetime(2026, 9, 30, tzinfo=timezone.utc)
@@ -104,7 +104,7 @@ def test_apply_removes_only_securities_without_bars(tmp_path):
 
 
 def test_an_inferred_suspension_a_traded_bar_contradicts_is_removed(tmp_path):
-    from cnequity.storage.orphan_symbol_repair import repair_stale_derived_suspensions
+    from cnequity.storage.repairs.orphan_symbols import repair_stale_derived_suspensions
 
     cfg = _lake(tmp_path)
     part = cfg.curated_root / "trading_status" / "trade_date=2024-01"

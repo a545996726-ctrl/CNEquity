@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from cnequity.storage.lifecycle import LifecycleError, LifecycleStore, reference_fingerprint
-from cnequity.storage.lifecycle_artifacts import ArtifactStore
-from cnequity.storage.lifecycle_experiments import ExperimentRetirement
+from cnequity.storage.lifecycle.artifacts import ArtifactStore
+from cnequity.storage.lifecycle.experiments import ExperimentRetirement
 
 
 @pytest.fixture
@@ -99,7 +99,7 @@ def test_active_and_referenced_experiments_never_selected(legacy):
 
 
 def test_partial_delete_retry_is_confined_and_path_reuse_blocks(legacy, monkeypatch):
-    import cnequity.storage.lifecycle_experiments as module
+    import cnequity.storage.lifecycle.experiments as module
 
     store, cleaner, source, _, _ = legacy
     cleaner.apply(cleaner.plan()["plan_id"])

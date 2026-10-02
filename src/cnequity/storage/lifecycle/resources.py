@@ -7,7 +7,7 @@ from pathlib import Path
 
 from cnequity.file_lock import lake_mutation_lock
 from cnequity.storage.lifecycle import LifecycleError, LifecycleStore, reference_fingerprint
-from cnequity.storage.lifecycle_snapshot import read_dependencies
+from cnequity.storage.lifecycle.snapshot import read_dependencies
 from cnequity.storage.revisions import _reject_symlink_path
 
 

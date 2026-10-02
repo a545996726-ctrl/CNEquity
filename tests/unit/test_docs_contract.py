@@ -49,7 +49,7 @@ def test_documented_counts_match_the_registries():
     claims = [
         (ROOT / "README.md", f"**{len(DATASETS)} 个数据集"),
         (ROOT / "README.en.md", f"**{len(DATASETS)} datasets"),
-        (ROOT / "README.pypi.md", f"所有 {len(DATASETS)} 个数据集"),
+        (ROOT / "README.pypi.md", f"**{len(DATASETS)} 个数据集"),
     ]
     for path, needle in claims:
         assert needle in path.read_text(encoding="utf-8"), (

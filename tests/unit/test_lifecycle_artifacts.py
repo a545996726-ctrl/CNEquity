@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from cnequity.storage.lifecycle import LifecycleError, LifecycleStore, reference_fingerprint
-from cnequity.storage.lifecycle_artifacts import ArtifactStore
+from cnequity.storage.lifecycle.artifacts import ArtifactStore
 from cnequity.storage.revisions import RevisionConsistencyError
 
 
@@ -94,7 +94,7 @@ def test_archive_corruption_rejected(artifacts, tmp_path, change):
 
 
 def test_interruption_or_concurrent_source_write_never_registers(artifacts, tmp_path, monkeypatch):
-    import cnequity.storage.lifecycle_artifacts as module
+    import cnequity.storage.lifecycle.artifacts as module
 
     obj, source = setup_source(artifacts, tmp_path)
     real_copy = module.copy2_isolated
@@ -133,7 +133,7 @@ def test_source_links_rejected(artifacts, tmp_path):
 def test_managed_workspace_requires_explicit_seal_and_new_writes_block_retirement(
     artifacts, tmp_path
 ):
-    from cnequity.storage.lifecycle_experiments import ExperimentRetirement
+    from cnequity.storage.lifecycle.experiments import ExperimentRetirement
 
     obj, source = setup_source(artifacts, tmp_path)
     record = artifacts.archive(obj["object_id"], tmp_path / "archives")

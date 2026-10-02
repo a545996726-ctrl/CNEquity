@@ -17,8 +17,8 @@ from typing import Literal
 
 from cnequity.config import Config
 from cnequity.storage.lifecycle import LifecycleError, LifecycleStore, _read, digest
-from cnequity.storage.lifecycle_experiments import ExperimentRetirement
-from cnequity.storage.lifecycle_purge import eligible, unfinished
+from cnequity.storage.lifecycle.experiments import ExperimentRetirement
+from cnequity.storage.lifecycle.purge import eligible, unfinished
 
 Kind = Literal["revisions", "experiments"]
 Phase = Literal["mark", "purge"]

@@ -397,7 +397,7 @@ def _backfill_valuation_metrics(config: Config, trade_date: date, run_id: str) -
 
 def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id: str) -> dict:
     from cnequity.adapters.baostock.valuation import fetch_valuation_history
-    from cnequity.storage.valuation_orphans import purge_valuation_orphan_symbols
+    from cnequity.storage.repairs.valuation_orphans import purge_valuation_orphan_symbols
 
     # Drop leftover PE/PB for names that never have bars (pre-filter backfills).
     purge_summary = purge_valuation_orphan_symbols(config)
@@ -448,7 +448,7 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
         }
 
     from cnequity.domain.valuation import reconstruct_total_mv
-    from cnequity.storage.valuation_repair import load_share_counts
+    from cnequity.storage.repairs.valuation_basis import load_share_counts
 
     # Year-end share counts miss intra-year changes; the lake's own share
     # history gives the count effective on each session where it has one.

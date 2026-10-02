@@ -282,7 +282,7 @@ def test_symbols_needing_backfill_does_not_count_duplicate_rows(cfg):
 
 def test_backfill_valuation_locked_nothing_to_do(cfg, monkeypatch):
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda config: {"purged": 0},
     )
     monkeypatch.setattr(fund, "load_symbols", lambda config: ["600519.SH"])
@@ -296,7 +296,7 @@ def test_backfill_valuation_locked_nothing_to_do(cfg, monkeypatch):
 
 def test_backfill_valuation_locked_history_end_before_start(cfg, monkeypatch):
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda config: {"purged": 0},
     )
     monkeypatch.setattr(fund, "load_symbols", lambda config: ["600519.SH"])
@@ -313,7 +313,7 @@ def test_backfill_valuation_locked_history_end_before_start(cfg, monkeypatch):
 
 def test_backfill_valuation_locked_writes_chunks(cfg, monkeypatch):
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda config: {"purged": 1},
     )
     monkeypatch.setattr(fund, "load_symbols", lambda config: ["600519.SH", "000001.SZ"])
@@ -357,7 +357,7 @@ def test_backfill_valuation_locked_honors_requested_window(cfg, monkeypatch):
     cfg._backfill_start = date(2024, 5, 1)
     cfg._backfill_end = date(2024, 6, 1)
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda config: {"purged": 0},
     )
     monkeypatch.setattr(fund, "load_symbols", lambda config: ["600519.SH"])
@@ -410,7 +410,7 @@ def test_backfill_valuation_locked_honors_requested_window(cfg, monkeypatch):
 )
 def test_backfill_valuation_locked_rejects_out_of_scope_rows(cfg, monkeypatch, update, message):
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda config: {"purged": 0},
     )
     monkeypatch.setattr(fund, "load_symbols", lambda config: ["600519.SH"])
@@ -445,7 +445,7 @@ def test_backfill_valuation_locked_rejects_out_of_scope_rows(cfg, monkeypatch, u
 
 def test_backfill_valuation_locked_aborts_on_runtime_error(cfg, monkeypatch):
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda config: {"purged": 0},
     )
     monkeypatch.setattr(fund, "load_symbols", lambda config: ["600519.SH"])

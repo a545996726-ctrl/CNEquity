@@ -19,7 +19,7 @@ from cnequity.query.parquet_scan import (
     partition_files_in_range,
 )
 from cnequity.storage.parquet import StagingWriter, compact_dataset
-from cnequity.storage.repartition import (
+from cnequity.storage.repairs.repartition import (
     RepartitionError,
     repartition_candidates,
     repartition_dataset,

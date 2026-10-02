@@ -1,6 +1,6 @@
 # CLI 参数与默认值
 
-由 `scripts/dev/sync_cli_options.py` 从 Click 注册表生成。命令用途、副作用与操作场景分别见 [CLI 参考](cli.md) 和 [副作用清单](cli-surface.md)。
+由 `scripts/dev/sync_docs.py` 从 Click 注册表生成。命令用途、副作用与操作场景分别见 [CLI 参考](cli.md) 和 [副作用清单](cli-surface.md)。
 
 ## `cne audit`
 

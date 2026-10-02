@@ -223,7 +223,7 @@ def clean_source_snapshots(
     Always keeps the newest run_id per ``(dataset, source, data_version)`` so
     ``read_latest`` / source_diff still have a peer even after long idle gaps.
     """
-    from cnequity.storage.lifecycle_resources import resource_holds
+    from cnequity.storage.lifecycle.resources import resource_holds
 
     with resource_holds(meta_root, dry_run=dry_run) as holds:
         return _clean_source_snapshots(

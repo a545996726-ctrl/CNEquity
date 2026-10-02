@@ -14,8 +14,8 @@ from cnequity.domain.valuation import (
     reconstruct_total_mv,
 )
 from cnequity.query import load
+from cnequity.storage.repairs.valuation_basis import repair_valuation_basis
 from cnequity.storage.revisions import RevisionStore
-from cnequity.storage.valuation_repair import repair_valuation_basis
 
 DAY = date(2024, 3, 1)
 FETCHED = datetime(2026, 1, 1, tzinfo=timezone.utc)

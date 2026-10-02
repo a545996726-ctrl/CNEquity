@@ -213,7 +213,7 @@ class LifecycleStore:
             fingerprint = reference_fingerprint(manifest["reference_roots"])
             if fingerprint != manifest.get("reference_fingerprint"):
                 raise LifecycleError("References changed since inventory; refresh the import")
-            from cnequity.storage.lifecycle_snapshot import read_dependencies
+            from cnequity.storage.lifecycle.snapshot import read_dependencies
 
             restored = read_dependencies(self.meta)
             inherited = restored["protection"] if restored else {}
@@ -279,7 +279,7 @@ class LifecycleStore:
             value = self.registry(required=True)
             assert value is not None
             known = {o["object_id"] for o in self.inventory()}
-            from cnequity.storage.lifecycle_resources import resource_exists
+            from cnequity.storage.lifecycle.resources import resource_exists
 
             known.update(item["object_id"] for item in value["experiments"])
             known.update(value.get("artifacts", {}))
@@ -463,7 +463,7 @@ class LifecycleStore:
         return report
 
     def plan(self, *, keep: int = 5, phase: str = "mark") -> dict:
-        from cnequity.storage.lifecycle_purge import prepare, unfinished
+        from cnequity.storage.lifecycle.purge import prepare, unfinished
 
         if phase not in ("mark", "purge"):
             raise LifecycleError("Invalid lifecycle plan phase")
@@ -492,12 +492,12 @@ class LifecycleStore:
     def purge(
         self, plan_id: str, *, maintenance: bool = False, manifest: Path | None = None
     ) -> dict:
-        from cnequity.storage.lifecycle_purge import execute
+        from cnequity.storage.lifecycle.purge import execute
 
         return execute(self, plan_id, maintenance=maintenance, manifest=manifest)
 
     def mark(self, plan_id: str) -> dict:
-        from cnequity.storage.lifecycle_purge import unfinished
+        from cnequity.storage.lifecycle.purge import unfinished
 
         with lake_mutation_lock(self.meta):
             if unfinished(self):

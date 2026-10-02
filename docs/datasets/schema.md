@@ -1,6 +1,6 @@
 # Schema 契约
 
-本页用于查字段、类型和单位。数据集用途见[目录](catalog.md)，读取方式见[查询指南](query-guide.md)，兼容性与版本见[数据契约](contract.md)。列名与类型由 `scripts/dev/sync_schema_docs.py` 同步，解释文字人工维护。
+本页用于查字段、类型和单位。数据集用途见[目录](catalog.md)，读取方式见[查询指南](query-guide.md)，兼容性与版本见[数据契约](contract.md)。列名与类型由 `scripts/dev/sync_docs.py` 同步，解释文字人工维护。
 
 ### 全局约定
 

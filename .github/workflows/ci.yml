@@ -38,24 +38,12 @@ jobs:
         # deliberately makes no claim about vendor speed or availability.
         run: python scripts/dev/benchmark_offline.py --check --max-elapsed-seconds 10 --max-concurrency 2
 
-      - name: Schema docs in sync
-        # docs/datasets/schema.md is hand-written prose around generated column
-        # tables. Nothing kept the tables honest: 11 of 42 datasets had no
-        # section at all, and a column added to domain/schemas.py reached the
-        # page only if someone remembered.
-        run: python scripts/dev/sync_schema_docs.py --check
-
-      - name: Config examples in sync
-        run: python scripts/dev/sync_config_templates.py --check
-
-      - name: Derivative source docs in sync
-        run: python scripts/dev/sync_derivative_sources.py --check
-
-      - name: CLI side-effect docs in sync
-        run: python scripts/dev/sync_cli_surface.py --check
-
-      - name: CLI options in sync
-        run: python scripts/dev/sync_cli_options.py --check
+      - name: Generated docs in sync
+        # Schema column tables, the example config mirror, the derivative
+        # capability table and both CLI references are mirrors of code. The
+        # schema page is synced rather than generated: its prose is
+        # hand-written and only the column tables are kept honest here.
+        run: python scripts/dev/sync_docs.py --check
 
       - name: Public package boundary
         run: |

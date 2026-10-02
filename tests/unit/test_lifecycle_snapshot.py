@@ -9,7 +9,7 @@ import pytest
 from cnequity.config import Config
 from cnequity.storage.atomic import write_json_atomic
 from cnequity.storage.lifecycle import LifecycleError, LifecycleStore, digest, reference_fingerprint
-from cnequity.storage.lifecycle_snapshot import (
+from cnequity.storage.lifecycle.snapshot import (
     DEPENDENCIES_PATH,
     export_dependencies,
     read_dependencies,

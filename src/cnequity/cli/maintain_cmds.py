@@ -409,12 +409,12 @@ def derive(
         summary = derive_sector_code_map(cfg)
         click.echo(json.dumps(summary, indent=2, default=str))
     elif name == "valuation_orphans":
-        from cnequity.storage.valuation_orphans import purge_valuation_orphan_symbols
+        from cnequity.storage.repairs.valuation_orphans import purge_valuation_orphan_symbols
 
         summary = purge_valuation_orphan_symbols(cfg)
         click.echo(json.dumps(summary, indent=2, default=str))
     elif name == "bse_code_migration":
-        from cnequity.storage.bse_code_migration import migrate_bse_legacy_codes
+        from cnequity.storage.repairs.bse_code_migration import migrate_bse_legacy_codes
 
         summary = migrate_bse_legacy_codes(cfg, apply=apply_changes)
         if not apply_changes:

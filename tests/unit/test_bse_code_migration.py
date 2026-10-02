@@ -16,7 +16,7 @@ import pytest
 
 from cnequity.config import Config
 from cnequity.domain.datasets import DATASETS
-from cnequity.storage import bse_code_migration as mig
+from cnequity.storage.repairs import bse_code_migration as mig
 
 MAPPING = {"430090.BJ": "920090.BJ", "832278.BJ": "920278.BJ"}
 
@@ -225,8 +225,8 @@ def test_the_apply_closes_its_own_run(tmp_path, monkeypatch):
     import sqlite3
 
     from cnequity.config import Config
-    from cnequity.storage.bse_code_migration import migrate_bse_legacy_codes
     from cnequity.storage.layout import init_data_layout
+    from cnequity.storage.repairs.bse_code_migration import migrate_bse_legacy_codes
 
     cfg = Config(data_root=tmp_path / "data")
     init_data_layout(cfg)

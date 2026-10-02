@@ -30,7 +30,7 @@ def layout(dataset: str, config_path: str, apply: bool):
     同一主键的多份观察只在非空值完全一致时互补填空；有冲突的键按规范规则整行取一份。
     重复键的全部原始观察写入 _quarantine 作为证据，旧版本继续保留。
     """
-    from cnequity.storage.layout_repair import LayoutRepairError, repair_layout
+    from cnequity.storage.repairs.layout import LayoutRepairError, repair_layout
 
     try:
         _emit(repair_layout(_cfg(config_path), dataset.lower(), apply=apply))
@@ -49,7 +49,7 @@ def valuation_basis(config_path: str, apply: bool):
     无法核对的保留原值并标注 vwap 口径；总市值按 share_structure 当日有效总股本重建，
     无股本记录的保留年末股本估算并标注。已有口径的行不重算。
     """
-    from cnequity.storage.valuation_repair import repair_valuation_basis
+    from cnequity.storage.repairs.valuation_basis import repair_valuation_basis
 
     _emit(repair_valuation_basis(_cfg(config_path), apply=apply))
 
@@ -65,7 +65,7 @@ def corporate_action_gaps(config_path: str, apply: bool):
     记录，若其条款能解释该台阶，就移到台阶日；其余按证券和年份向 Baostock 取分红，
     只收除权日正是台阶日、且条款能解释台阶的行。解释不了的保持缺口，不会凭空补。
     """
-    from cnequity.storage.corporate_action_gap_repair import repair_corporate_action_gaps
+    from cnequity.storage.repairs.corporate_action_gaps import repair_corporate_action_gaps
 
     _emit(repair_corporate_action_gaps(_cfg(config_path), apply=apply))
 
@@ -81,7 +81,7 @@ def orphan_symbols(config_path: str, apply: bool):
     因子和分红却留了下来；未采集行情的上市基金也在其列。它们只会被报成因子与公司行为矛盾。
     按数据集各发布一个新版本，旧版本保留，可按版本读取。
     """
-    from cnequity.storage.orphan_symbol_repair import repair_orphan_symbols
+    from cnequity.storage.repairs.orphan_symbols import repair_orphan_symbols
 
     _emit(repair_orphan_symbols(_cfg(config_path), apply=apply))
 
@@ -96,6 +96,6 @@ def stale_suspensions(config_path: str, apply: bool):
     这类行由缺失的日线推断而来；某次运行漏抓了行情时，缺口会被误记为停牌。
     行情补齐后，同一天有成交的日线即证明该行错误。独立来源的停牌记录不受影响。
     """
-    from cnequity.storage.orphan_symbol_repair import repair_stale_derived_suspensions
+    from cnequity.storage.repairs.orphan_symbols import repair_stale_derived_suspensions
 
     _emit(repair_stale_derived_suspensions(_cfg(config_path), apply=apply))

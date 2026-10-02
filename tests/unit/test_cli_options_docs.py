@@ -8,7 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
-    "sync_cli_options", ROOT / "scripts" / "dev" / "sync_cli_options.py"
+    "sync_docs", ROOT / "scripts" / "dev" / "sync_docs.py"
 )
 generator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(generator)
@@ -33,6 +33,6 @@ def test_callable_default_is_not_evaluated():
 
 
 def test_reference_matches_registered_commands():
-    assert generator.render() == (ROOT / "docs/reference/cli-options.md").read_text(
+    assert generator.render_cli_options() == (ROOT / "docs/reference/cli-options.md").read_text(
         encoding="utf-8"
     )

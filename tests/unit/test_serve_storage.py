@@ -12,8 +12,8 @@ from cnequity.cli.main import cli
 from cnequity.config import Config
 from cnequity.serve.app import create_app
 from cnequity.storage.lifecycle import LifecycleStore, digest
-from cnequity.storage.lifecycle_artifacts import ArtifactStore
-from cnequity.storage.lifecycle_experiments import ExperimentRetirement
+from cnequity.storage.lifecycle.artifacts import ArtifactStore
+from cnequity.storage.lifecycle.experiments import ExperimentRetirement
 from cnequity.storage.revisions import RevisionStore
 
 
@@ -292,7 +292,7 @@ def test_dashboard_cannot_be_framed_for_clickjacking(web):
 
 
 def test_partial_failure_needs_another_web_review_and_confirmation(web, monkeypatch):
-    import cnequity.storage.lifecycle_purge as purge
+    import cnequity.storage.lifecycle.purge as purge
 
     client, _, store, _ = web
     job = review(client)

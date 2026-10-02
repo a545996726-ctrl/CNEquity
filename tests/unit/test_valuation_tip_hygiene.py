@@ -312,7 +312,7 @@ def test_an_outage_fill_reads_datacenter_including_beijing(tmp_path, monkeypatch
     cfg = _outage_lake(tmp_path, symbols, _OUTAGE)
     monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
     )
     asked: list[tuple] = []
 
@@ -351,7 +351,7 @@ def test_an_incomplete_outage_fill_retains_valid_rows_and_gap(tmp_path, monkeypa
     cfg = _outage_lake(tmp_path, symbols, _OUTAGE)
     monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
     )
     # datacenter has not published the last session for one name yet.
     partial = _dc_frame(symbols, _OUTAGE).filter(
@@ -387,7 +387,7 @@ def test_the_ordinary_backfill_does_not_ask_baostock_for_beijing_names(tmp_path,
     cfg._backfill_end = date(2026, 9, 18)
     monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
     )
     asked: list[str] = []
 
@@ -493,7 +493,7 @@ def test_an_outage_fill_only_fills_sessions_the_lake_lacks(tmp_path, monkeypatch
         )
     monkeypatch.setattr(fundamentals, "load_symbols", lambda _cfg: symbols)
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols", lambda _cfg: {}
     )
     monkeypatch.setattr(
         "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",

@@ -25,8 +25,8 @@ from cnequity.config import Config
 from cnequity.domain.contracts import contract_fingerprint, dataset_contract
 from cnequity.domain.datasets import DATASETS
 from cnequity.file_lock import lake_mutation_lock
-from cnequity.provenance import runtime_lineage
 from cnequity.storage.atomic import write_json_atomic, write_parquet_atomic
+from cnequity.storage.provenance import runtime_lineage
 from cnequity.storage.revisions import resolve_committed_root
 from cnequity.storage.state import StateStore
 
@@ -1109,7 +1109,7 @@ class SnapshotStore:
         try:
             research_inputs = self._capture_research_inputs(temp, selected, records)
             from cnequity.storage.lifecycle import LifecycleStore
-            from cnequity.storage.lifecycle_snapshot import DEPENDENCIES_PATH, export_dependencies
+            from cnequity.storage.lifecycle.snapshot import DEPENDENCIES_PATH, export_dependencies
 
             lifecycle_dependencies = export_dependencies(LifecycleStore(self.config.meta_root))
             if lifecycle_dependencies is not None:
@@ -1539,7 +1539,7 @@ class SnapshotStore:
         dependency_path = "meta/lifecycle/snapshot-dependencies.json"
         if lifecycle is not None or dependency_path in seen:
             from cnequity.storage.lifecycle import LifecycleError
-            from cnequity.storage.lifecycle_snapshot import read_dependencies
+            from cnequity.storage.lifecycle.snapshot import read_dependencies
 
             if (
                 lifecycle

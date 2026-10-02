@@ -6,7 +6,7 @@ import pytest
 
 from cnequity.config import Config
 from cnequity.query import load
-from cnequity.storage.corporate_action_gap_repair import repair_corporate_action_gaps
+from cnequity.storage.repairs.corporate_action_gaps import repair_corporate_action_gaps
 from cnequity.storage.revisions import RevisionStore
 
 FETCHED = datetime(2026, 9, 29, tzinfo=timezone.utc)
@@ -268,7 +268,7 @@ def test_the_gate_blocks_moving_a_halt_dated_ex_date(lake, monkeypatch):
     # Revision 322: a correct ex-date inside a halt moved onto the resumption
     # session. Every factor check is unchanged by that move, so the planner is
     # forced into it here and only the publication gate stands in the way.
-    from cnequity.storage import corporate_action_gap_repair as repair
+    from cnequity.storage.repairs import corporate_action_gaps as repair
 
     part = lake.curated_root / "corporate_actions" / "ex_date=2024"
     frame = pl.read_parquet(part / "part-merged.parquet")

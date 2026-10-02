@@ -161,7 +161,7 @@ def test_publication_lock_blocks_purge(lake, monkeypatch):
 def test_partial_failure_resumes_without_expanding_scope(lake, monkeypatch):
     cfg, store, writer = lake
     plan = matured(store, monkeypatch)
-    import cnequity.storage.lifecycle_purge as purge
+    import cnequity.storage.lifecycle.purge as purge
 
     real = purge.shutil.rmtree
 
@@ -187,7 +187,7 @@ def test_partial_failure_resumes_without_expanding_scope(lake, monkeypatch):
 def test_new_hold_blocks_retry_after_partial_failure(lake, monkeypatch):
     cfg, store, _ = lake
     plan = matured(store, monkeypatch)
-    import cnequity.storage.lifecycle_purge as purge
+    import cnequity.storage.lifecycle.purge as purge
 
     with monkeypatch.context() as patch:
         patch.setattr(purge.shutil, "rmtree", lambda path: (_ for _ in ()).throw(OSError("stop")))
@@ -224,7 +224,7 @@ def test_crash_after_rename_is_resumable(lake, monkeypatch):
 def test_path_reuse_after_partial_deletion_is_rejected(lake, monkeypatch):
     cfg, store, _ = lake
     plan = matured(store, monkeypatch)
-    import cnequity.storage.lifecycle_purge as purge
+    import cnequity.storage.lifecycle.purge as purge
 
     with monkeypatch.context() as patch:
         patch.setattr(purge.shutil, "rmtree", lambda path: (_ for _ in ()).throw(OSError("stop")))

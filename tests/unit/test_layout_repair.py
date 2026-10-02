@@ -6,7 +6,7 @@ import pytest
 
 from cnequity.config import Config
 from cnequity.query import load
-from cnequity.storage.layout_repair import LayoutRepairError, repair_layout
+from cnequity.storage.repairs.layout import LayoutRepairError, repair_layout
 from cnequity.storage.revisions import RevisionStore
 
 

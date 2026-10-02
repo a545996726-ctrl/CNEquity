@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from cnequity.config.bootstrap import path_for_toml
-from cnequity.storage.repartition import RepartitionResult
+from cnequity.storage.repairs.repartition import RepartitionResult
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "migrations" / "repartition.py"
 
@@ -105,7 +105,7 @@ def test_a_dataset_and_all_together_is_refused(repartition, cfg_path, capsys):
 
 
 def test_a_repartition_error_is_reported_not_raised(repartition, cfg_path, monkeypatch, capsys):
-    from cnequity.storage.repartition import RepartitionError
+    from cnequity.storage.repairs.repartition import RepartitionError
 
     monkeypatch.setattr(repartition, "repartition_candidates", lambda cfg: ["index_bars"])
 

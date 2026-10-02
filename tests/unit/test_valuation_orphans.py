@@ -7,7 +7,7 @@ from datetime import date
 import polars as pl
 
 from cnequity.config import Config
-from cnequity.storage.valuation_orphans import purge_valuation_orphan_symbols
+from cnequity.storage.repairs.valuation_orphans import purge_valuation_orphan_symbols
 
 
 def test_purge_drops_symbols_absent_from_bars(tmp_path):

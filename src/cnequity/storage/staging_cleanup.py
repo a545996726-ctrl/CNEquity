@@ -10,7 +10,7 @@ from pathlib import Path
 from cnequity.config import Config
 from cnequity.file_lock import is_locked
 from cnequity.orchestrator.manifest import Manifest
-from cnequity.storage.lifecycle_resources import resource_holds
+from cnequity.storage.lifecycle.resources import resource_holds
 
 
 @dataclass

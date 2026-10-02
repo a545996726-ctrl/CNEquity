@@ -1,5 +1,5 @@
 from cnequity.config import Config
-from cnequity.provenance import config_fingerprint, runtime_lineage
+from cnequity.storage.provenance import config_fingerprint, runtime_lineage
 
 
 def test_config_fingerprint_is_stable_and_omits_secret_values(tmp_path):

@@ -18,8 +18,8 @@ from cnequity.storage.lifecycle import (
     digest,
     reference_fingerprint,
 )
-from cnequity.storage.lifecycle_artifacts import ArtifactStore, _absolute, _entries
-from cnequity.storage.lifecycle_purge import check_idle, unfinished
+from cnequity.storage.lifecycle.artifacts import ArtifactStore, _absolute, _entries
+from cnequity.storage.lifecycle.purge import check_idle, unfinished
 
 
 class ExperimentRetirement:

@@ -1383,7 +1383,7 @@ def test_derive_trading_status_and_orphans(cfg_path, monkeypatch):
     assert "compact" in summary
 
     monkeypatch.setattr(
-        "cnequity.storage.valuation_orphans.purge_valuation_orphan_symbols",
+        "cnequity.storage.repairs.valuation_orphans.purge_valuation_orphan_symbols",
         lambda cfg: {"purged_symbols": 2},
     )
     result = CliRunner().invoke(cli, ["derive", "valuation_orphans", "--config", cfg_path])

@@ -447,8 +447,8 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
     from cnequity.orchestrator.compact_gate import compact_allowed, publication_files
     from cnequity.orchestrator.manifest import Manifest
-    from cnequity.provenance import runtime_lineage
     from cnequity.storage.coverage import candidate_gaps, resolved_outstanding_keys
+    from cnequity.storage.provenance import runtime_lineage
     from cnequity.storage.revisions import RevisionStore
 
     manifest = Manifest(config.manifest_path)

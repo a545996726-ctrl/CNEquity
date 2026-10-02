@@ -147,7 +147,7 @@ def apply(config_path: str, plan_id: str, phase: str, maintenance_window: bool):
 @click.option("--case-id", required=True)
 def experiment_create(config_path: str, parent: Path, case_id: str):
     """创建有独立实例身份的空试验目录，并登记为 active。"""
-    from cnequity.storage.lifecycle_artifacts import ArtifactStore
+    from cnequity.storage.lifecycle.artifacts import ArtifactStore
 
     _emit(ArtifactStore(_store(config_path)).create_experiment(parent, case_id=case_id))
 
@@ -158,7 +158,7 @@ def experiment_create(config_path: str, parent: Path, case_id: str):
 @click.option("--destination", type=click.Path(path_type=Path), required=True)
 def archive(config_path: str, object_id: str, destination: Path):
     """复制登记试验并逐文件校验；封存副本，保留原目录及其保护。"""
-    from cnequity.storage.lifecycle_artifacts import ArtifactStore
+    from cnequity.storage.lifecycle.artifacts import ArtifactStore
 
     _emit(ArtifactStore(_store(config_path)).archive(object_id, destination))
 
@@ -168,7 +168,7 @@ def archive(config_path: str, object_id: str, destination: Path):
 @click.argument("object_id")
 def artifact_verify(config_path: str, object_id: str):
     """按封存清单校验归档工件的完整内容。"""
-    from cnequity.storage.lifecycle_artifacts import ArtifactStore
+    from cnequity.storage.lifecycle.artifacts import ArtifactStore
 
     _emit(ArtifactStore(_store(config_path)).verify(object_id))
 
@@ -179,7 +179,7 @@ def artifact_verify(config_path: str, object_id: str):
 @click.option("--artifact-id", help="存在多个封存版本时明确选择一个工件。")
 def resolve(config_path: str, old_path: Path, artifact_id: str | None):
     """校验并解析旧路径的归档位置；不改写报告，不创建符号链接。"""
-    from cnequity.storage.lifecycle_artifacts import ArtifactStore
+    from cnequity.storage.lifecycle.artifacts import ArtifactStore
 
     path = ArtifactStore(_store(config_path)).resolve(old_path, artifact_id=artifact_id)
     _emit({"old_path": str(old_path), "resolved_path": str(path)})
@@ -190,7 +190,7 @@ def resolve(config_path: str, old_path: Path, artifact_id: str | None):
 @click.option("--phase", type=click.Choice(["mark", "purge"]), default="mark", show_default=True)
 def experiment_plan(config_path: str, phase: str):
     """为无引用、非 active 且已有完整归档的试验原目录生成退出计划。"""
-    from cnequity.storage.lifecycle_experiments import ExperimentRetirement
+    from cnequity.storage.lifecycle.experiments import ExperimentRetirement
 
     _emit(ExperimentRetirement(_store(config_path)).plan(phase=phase))
 
@@ -201,7 +201,7 @@ def experiment_plan(config_path: str, phase: str):
 @click.option("--maintenance-window", is_flag=True, help="兼容选项；不能绕过网页删除确认。")
 def experiment_apply(config_path: str, plan_id: str, maintenance_window: bool):
     """原地标记冗余原目录；CLI 不允许物理删除，须到 serve 网页确认。"""
-    from cnequity.storage.lifecycle_experiments import ExperimentRetirement
+    from cnequity.storage.lifecycle.experiments import ExperimentRetirement
 
     cfg = _cfg(config_path)
     from cnequity.storage.lifecycle import _read
@@ -224,6 +224,6 @@ def experiment_apply(config_path: str, plan_id: str, maintenance_window: bool):
 @click.option("--artifact-id", required=True)
 def experiment_seal(config_path: str, object_id: str, artifact_id: str):
     """显式结束试验工作目录，并将封存状态绑定到已验证的归档。"""
-    from cnequity.storage.lifecycle_artifacts import ArtifactStore
+    from cnequity.storage.lifecycle.artifacts import ArtifactStore
 
     _emit(ArtifactStore(_store(config_path)).seal_experiment(object_id, artifact_id))
