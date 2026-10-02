@@ -136,6 +136,38 @@ def test_archive_corruption_blocks_marking(legacy):
     assert source.exists()
 
 
+def test_archive_does_not_read_the_writer_lock_it_holds(legacy, tmp_path, monkeypatch):
+    """The lock file sits inside the tree being sealed.
+
+    Windows byte-range locks are mandatory, so the handle archive is holding
+    makes a second read or copy of ``compact.lock`` raise ``PermissionError``.
+    That file is created by the archive itself and is not experiment content.
+    """
+    from cnequity.storage.lifecycle import artifacts as artifacts_mod
+
+    store, _, source, _, _ = legacy
+    (source / "meta").mkdir()
+    real_hash = artifacts_mod.sha256_file
+    real_copy = artifacts_mod.copy2_isolated
+
+    def guarded_hash(path):
+        if Path(path).name == "compact.lock":
+            raise PermissionError(13, "Permission denied")
+        return real_hash(path)
+
+    def guarded_copy(src, dst):
+        if Path(src).name == "compact.lock":
+            raise PermissionError(13, "Permission denied")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(artifacts_mod, "sha256_file", guarded_hash)
+    monkeypatch.setattr(artifacts_mod, "copy2_isolated", guarded_copy)
+    record = ArtifactStore(store).archive("experiment/test", tmp_path / "archives")
+    manifest = json.loads((Path(record["path"]) / "manifest.json").read_text())
+    assert "meta/locks/compact.lock" not in manifest["entries"]["files"]
+    assert (source / "meta" / "locks" / "compact.lock").exists()
+
+
 def test_legacy_experiment_running_manifest_blocks_purge(legacy, tmp_path):
     import sqlite3
     from contextlib import closing

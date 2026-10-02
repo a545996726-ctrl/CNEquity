@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cnequity.file_lock import lake_mutation_lock
+from cnequity.file_lock import MUTATION_LOCK_RELATIVE, lake_mutation_lock
 from cnequity.storage.atomic import write_json_atomic
 from cnequity.storage.file_copy import copy2_isolated
 from cnequity.storage.lifecycle import (
@@ -34,6 +34,21 @@ def _absolute(path: Path | str) -> Path:
     return path
 
 
+def _is_writer_lock(relative: str) -> bool:
+    """The mutation lock lives inside the tree it guards.
+
+    ``lake_mutation_lock(source / "meta")`` creates ``meta/locks/compact.lock``
+    and holds it for the whole hash and copy. Windows locks that byte range
+    against every other handle, so reading the file back raises
+    ``PermissionError``. The file is empty and is not experiment content.
+    """
+    parts = Path(relative).parts
+    lock = MUTATION_LOCK_RELATIVE.parts
+    if parts[-len(lock) :] != lock:
+        return False
+    return len(parts) == len(lock) or parts[-len(lock) - 1] == "meta"
+
+
 def _entries(root: Path, *, hashes: bool = True) -> dict:
     _absolute(root)
     if not root.is_dir():
@@ -49,6 +64,8 @@ def _entries(root: Path, *, hashes: bool = True) -> dict:
             path = parent / name
             info = path.lstat()
             relative = path.relative_to(root).as_posix()
+            if _is_writer_lock(relative):
+                continue
             if stat.S_ISDIR(info.st_mode):
                 directories.append(relative)
             elif stat.S_ISREG(info.st_mode):

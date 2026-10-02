@@ -302,6 +302,12 @@ def _hms(seconds: float) -> str:
     return f"{total}s"
 
 
+#: Relative to a lake ``meta`` directory. Archive walks that directory while
+#: holding the lock; the path is shared so the walk can skip the file it cannot
+#: re-open. On Windows the lock is mandatory, and a second handle's read fails.
+MUTATION_LOCK_RELATIVE = Path("locks") / "compact.lock"
+
+
 @contextlib.contextmanager
 def lake_mutation_lock(
     meta_root: Path,
@@ -316,7 +322,7 @@ def lake_mutation_lock(
     maintenance and derive code participate without importing the orchestrator
     package (which would introduce a dependency cycle).
     """
-    path = meta_root / "locks" / "compact.lock"
+    path = meta_root / MUTATION_LOCK_RELATIVE
     if _held_count(path):
         # ``run_lock(..., "compact")`` uses the same path.  Reuse that outer
         # process-local lock; other threads/processes still contend in the
