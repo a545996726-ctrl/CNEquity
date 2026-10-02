@@ -329,7 +329,7 @@
 | bse | HTTP | BJ 当期日线、证券名单与交易状态 | — | 当期快照不能当作历史；已有行补 amount 需逐行一致性核对 |
 | eastmoney | HTTP | 公司行为日更主源、资金面 | — | 跳过 + quality finding |
 | cninfo | HTTP | announcement_index | — | events:disclosures 按自然日采集；监管事件从已提交公告派生 |
-| baostock | TCP | 沪深历史 ST、估值、退市补数与证券身份补充 | — | 复用会话、串行限速；BJ 历史 ST 需独立来源 |
+| baostock | TCP | 沪深历史 ST、估值、退市补数与证券身份补充 | — | 复用会话；上海自然日最多 5 万次请求，同时只一条连接；黑名单按本年次数 × 6 小时冻结。BJ 历史 ST 需独立来源 |
 | pboc | HTTP | 社会融资规模增量（`macro_indicators`） | — | 主写入要求全量序列；单年失败会阻止本次写入，避免带断档推进水位 |
 | nbs | HTTP | **仅审计**：PMI 发布稿，对照 `macro_indicators` | — | 按源开关执行；公共模板启用，失败或禁用状态进入核验报告 |
 | exchange | HTTP | `margin_trading` **主源**；`trading_status` / `trading_calendar` / `dragon_tiger` / `block_trades` 备源；`[exchange_audit]` 价格对照 | — | 融资融券由会员单位报送汇总，中间无转售方；龙虎榜与大宗交易只在东财答不上时才问，且两所都不发布北交所（记在 `backup_gaps`）；审计类 finding 为建议性，不让 run 失败 |

@@ -75,11 +75,23 @@ bars = load("daily_bars", start="2024-01-01", adjust="hfq", strict_adj=True)
 
 `index_bars` 是指数点位，不是个股价格，不支持 `adjust=`；请直接使用原始指数水平。
 
+### 总收益复权（total_return）
+
+```python
+bars = load("daily_bars", start="2024-01-01", adjust="total_return", symbols=["510300.SH"])
+```
+
+`hfq` / `qfq` 的含义保持不变：股票的后复权因子已包含分红再投资，基金（ETF/LOF）的后复权因子来自新浪基金因子，只随份额拆分、合并变化，**不含现金分配**，是价格收益口径。
+
+`adjust="total_return"` 仅适用于 `daily_bars`：在后复权基础上，把基金每次现金分配按除息前一交易日收盘价再投资（因子乘以 `前收盘 / (前收盘 − 每份分配)`）；股票与 `hfq` 相同。每只基金在查询范围第一天的价格水平等于后复权，因此跨不同起点的查询请比较收益率而不是价格水平。需要的依赖（`corporate_actions`、`instruments`）会一并记入读取回执。
+
+按用途选择：看价格走势用未复权价；做拆分可比的价格比较用 `hfq`；算投资者实际收益或回测用 `total_return`。
+
 ### 存储约定
 
 - 湖内 `daily_bars` 存**未复权**价
 - `adj_factors` 在 `derived/`，仅存 `hfq`（`adjust_type="hfq"`）
-- DuckDB 视图 `daily_bars_adj` / `daily_bars_hfq` / `daily_bars_qfq` 与上述语义一致
+- DuckDB 视图 `daily_bars_adj` / `daily_bars_hfq` / `daily_bars_qfq` 与上述语义一致；`daily_bars_total_return(start, end)` 表宏对应 `adjust="total_return"`，输出 `tr_*` 与 `adj_close`
 
 ## Universe 过滤
 
@@ -194,6 +206,7 @@ cne query --sql "SELECT * FROM instruments LIMIT 5"
 | `daily_bars_hfq` | 后复权价列 |
 | `daily_bars_qfq` | 前复权价列 |
 | `daily_bars_adj` | 含 adj_* 与 adj_is_exact |
+| `daily_bars_total_return(start, end)` | 表宏：总收益复权价 `tr_*`（基金现金分配再投资，股票同后复权） |
 | `{dataset}` | 各 curated/derived 数据集 |
 
 数据库：`{data.root}/duckdb/cnequity.duckdb`（只读连接）。

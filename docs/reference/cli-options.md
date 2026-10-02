@@ -46,6 +46,7 @@
 | `--ex-dates` | `—` | 配合 --eastmoney-date-repair：逗号分隔的除权日 YYYY-MM-DD。 |
 | `--bse-tip-repair` | `False` | 仅 daily_bars：用北交所官网补已有交易日的 BJ 成交额，不重抓 Sina。 |
 | `--bj-amount-repair` | `False` | 仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。 |
+| `--tdx-amount-repair` | `False` | 仅 daily_bars：新浪补上的沪深北历史行与通达信一起核对，只在开高低收一致且成交量差小于一手时补成交额；通达信没有的代码保留新浪行。已存的价格和成交量一律不动。需要 --start/--end。 |
 | `--tdx-volume-repair` | `False` | 仅 daily_bars：重读 TDX，只改写已存 TDX 行的成交量（修 2026-09-17 前的解码错误）；价格须一致，64.5 元以下被放大的成交额一并改写；不新增行。需要 --symbols 和 --start/--end。 |
 | `--turnover-repair` | `False` | 仅 daily_bars：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；开高低收须在半分钱内一致，不一致或未提供的保留原值。需要 --start/--end。 |
 | `--fill-em-outage` | `False` | 仅 valuation_metrics：东财快照中断时，用东财 datacenter 估值报表补东财最后一个完整日之后、今天之前的 --start/--end 窗口；全市场取全才写入。 |
@@ -134,7 +135,7 @@
 | `--full` | `False` | 重写 adj_factors / industry_index / option_greeks 的全部分区（默认只补增量）。 |
 | `--start` | `—` | industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之后的。 |
 | `--end` | `—` | industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之前的。 |
-| `--apply` | `False` | bse_code_migration：真正重写分区（默认只报告）。 |
+| `--apply` | `False` | bse_code_migration：真正重写分区；adj_factor_source：写入逐证券来源覆盖并重算这些证券的因子（默认只报告）。 |
 
 ## `cne doctor`
 
@@ -193,6 +194,13 @@
 | `--dataset` | `—` | 按需抓取的数据集名 |
 | `--symbol` | `—` | 按需抓取的标的代码 |
 | `--refresh` | `False` | 抓取前先刷新按需缓存（需要同时给 --dataset 和 --symbol）。 |
+
+## `cne repair corporate-action-gaps`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--apply` | `False` | 向 Baostock 补取并发布新版本；默认只离线输出计划。 |
 
 ## `cne repair layout`
 

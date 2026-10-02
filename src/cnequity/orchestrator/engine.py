@@ -197,6 +197,7 @@ class JobEngine:
                 ),
                 "bse_tip_repair": bool(getattr(self.config, "_bse_tip_repair", False)),
                 "bj_amount_repair": bool(getattr(self.config, "_bj_amount_repair", False)),
+                "tdx_amount_repair": bool(getattr(self.config, "_tdx_amount_repair", False)),
                 "tdx_volume_repair": bool(getattr(self.config, "_tdx_volume_repair", False)),
                 "turnover_repair": bool(getattr(self.config, "_turnover_repair", False)),
             }
@@ -1209,6 +1210,7 @@ class JobEngine:
         )
         self.config._bse_tip_repair = bool(scope.get("bse_tip_repair", False))
         self.config._bj_amount_repair = bool(scope.get("bj_amount_repair", False))
+        self.config._tdx_amount_repair = bool(scope.get("tdx_amount_repair", False))
         self.config._tdx_volume_repair = bool(scope.get("tdx_volume_repair", False))
         self.config._turnover_repair = bool(scope.get("turnover_repair", False))
         timeout = self.manifest.advance_batch_timeouts(

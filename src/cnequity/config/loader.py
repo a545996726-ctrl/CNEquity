@@ -274,6 +274,7 @@ class Config:
     _corporate_actions_eastmoney_bj_repair: bool = False
     _bse_tip_repair: bool = False
     _bj_amount_repair: bool = False
+    _tdx_amount_repair: bool = False
     _tdx_volume_repair: bool = False
     _turnover_repair: bool = False
     _sector_bars_force: bool = False
@@ -1137,6 +1138,12 @@ def validate_config(cfg: Config) -> list[str]:
                     f"orchestrator source concurrency {field_name}[{source!r}] "
                     f"must be a positive integer; "
                     f"got {value!r}"
+                )
+                continue
+            if str(source).strip().lower() == "baostock" and value > 1:
+                errors.append(
+                    f"orchestrator source concurrency {field_name}[{source!r}] "
+                    "must be 1: BaoStock allows one connection at a time"
                 )
     # The TDX client is not fork-safe; ProcessPool on macOS is the OOM / BrokenProcessPool
     # footgun that wiped notes under load. Refuse the unsafe combo loudly.

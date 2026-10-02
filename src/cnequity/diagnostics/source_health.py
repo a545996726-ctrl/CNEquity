@@ -424,32 +424,43 @@ def _probe_ths_pages(config: Config) -> str:
 
 
 def _probe_baostock(config: Config) -> str:
-    from cnequity.adapters.baostock._session import _login, check_result, import_baostock
+    from cnequity.adapters.baostock._session import (
+        _finish_session,
+        _login,
+        check_result,
+        import_baostock,
+    )
+    from cnequity.adapters.baostock.access import hold_baostock_connection
+    from cnequity.domain.http_policy import SourceCoolingDown
 
     bs = import_baostock()
-    _login(bs, config=config)
-    try:
-        day = _recent_weekday()
-        with source_request(config, "baostock"):
-            rs = check_result(
-                bs.query_history_k_data_plus(
-                    "sh.600519",
-                    "date,close",
-                    start_date=day.isoformat(),
-                    end_date=day.isoformat(),
-                    frequency="d",
-                ),
-                config=config,
-            )
-        if rs.error_code != "0":
-            raise ProbeBlocked(f"error_code={rs.error_code} {rs.error_msg}")
-        rows = 0
-        while rs.next():
-            rs.get_row_data()
-            rows += 1
-    finally:
-        with source_request(config, "baostock"):
-            bs.logout()
+    blacklisted = False
+    with hold_baostock_connection(config):
+        _login(bs, config=config)
+        try:
+            day = _recent_weekday()
+            with source_request(config, "baostock"):
+                rs = check_result(
+                    bs.query_history_k_data_plus(
+                        "sh.600519",
+                        "date,close",
+                        start_date=day.isoformat(),
+                        end_date=day.isoformat(),
+                        frequency="d",
+                    ),
+                    config=config,
+                )
+            if rs.error_code != "0":
+                raise ProbeBlocked(f"error_code={rs.error_code} {rs.error_msg}")
+            rows = 0
+            while rs.next():
+                rs.get_row_data()
+                rows += 1
+        except SourceCoolingDown:
+            blacklisted = True
+            raise
+        finally:
+            _finish_session(bs, config=config, blacklisted=blacklisted)
     if not rows:
         raise ProbeEmpty(f"{day.isoformat()} 无行情返回")
     return f"{rows} 行"

@@ -115,3 +115,69 @@ def test_repair_replaces_only_rows_baostock_confirms(lake, monkeypatch):
     assert stored["600217.SH"]["source"] == "ths"  # disagreeing prices: kept
     assert stored["600218.SH"]["amount"] == 91000.0
     assert stored["161816.SZ"]["amount"] == 0.0
+
+
+def test_access_limit_keeps_fetched_rows_and_the_next_run_skips_them(lake, monkeypatch):
+    import cnequity.adapters.baostock.delisted_bars as delisted
+    from cnequity.domain.http_policy import SourceCoolingDown
+
+    calls: list[list[str]] = []
+
+    def fake_fetch(symbols, start, end, *, config=None):
+        calls.append(list(symbols))
+        if symbols == ["600215.SH"]:
+            return (
+                [
+                    {
+                        "symbol": "600215.SH",
+                        "trade_date": DAY,
+                        "open": 18.0,
+                        "high": 18.88,
+                        "low": 17.9,
+                        "close": 18.26,
+                        "volume": 1570400,
+                        "amount": 28904000.0,
+                    }
+                ],
+                [],
+            )
+        raise SourceCoolingDown("今日请求已达 50000 次上限")
+
+    monkeypatch.setattr(bars, "_TURNOVER_REPAIR_BATCH", 1)
+    monkeypatch.setattr(delisted, "fetch_delisted_bars", fake_fetch)
+    result = bars.repair_daily_bar_turnover(lake, DAY, DAY, "repair", None)
+    assert calls == [["600215.SH"], ["600216.SH"]]
+    assert result["rows_written"] > 0
+    assert result["status"] == "warning"
+    stopped = result["context_updates"]["audit_findings"][-1]
+    assert stopped["check"] == "daily_bars_turnover_repair_stopped"
+
+    step_compact(lake, DAY, "repair", {})
+    stored = {r["symbol"]: r for r in load("daily_bars", config=lake).iter_rows(named=True)}
+    assert stored["600215.SH"]["source"] == "baostock"
+    assert stored["600216.SH"]["amount"] == 0.0
+
+    again: list[list[str]] = []
+
+    def resume(symbols, start, end, *, config=None):
+        again.append(sorted(symbols))
+        return [], []
+
+    monkeypatch.setattr(delisted, "fetch_delisted_bars", resume)
+    bars.repair_daily_bar_turnover(lake, DAY, DAY, "repair-2", None)
+    asked = {symbol for chunk in again for symbol in chunk}
+    assert "600215.SH" not in asked
+    assert "600216.SH" in asked
+
+
+def test_a_failed_baostock_session_loses_one_batch_not_the_run(lake, monkeypatch):
+    import cnequity.adapters.baostock.delisted_bars as delisted
+
+    def dead(symbols, start, end, *, config=None):
+        raise RuntimeError("baostock login exceeded 30.0s deadline")
+
+    monkeypatch.setattr(delisted, "fetch_delisted_bars", dead)
+    result = bars.repair_daily_bar_turnover(lake, DAY, DAY, "repair", None)
+    assert result["status"] == "warning"
+    skipped = result["context_updates"]["audit_findings"][1]
+    assert skipped["check"] == "daily_bars_turnover_repair_skipped"

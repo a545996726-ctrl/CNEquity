@@ -521,7 +521,7 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
         end: date,
         symbol: str | None = None,
         as_of: date | None = None,
-        adjust: Annotated[str | None, Query(pattern="^(hfq|qfq)$")] = None,
+        adjust: Annotated[str | None, Query(pattern="^(hfq|qfq|total_return)$")] = None,
         pit_mode: Annotated[str | None, Query(pattern="^(strict|best_effort)$")] = None,
     ) -> ReadReceiptPage:
         """Read a bounded window with retained revision and row provenance."""
@@ -581,7 +581,7 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
         ] = None,
         symbol: Annotated[str | None, Query(description="e.g. 600519.SH")] = None,
         as_of: Annotated[date | None, Query(description="PIT cutoff on announce_date.")] = None,
-        adjust: Annotated[str | None, Query(pattern="^(hfq|qfq)$")] = None,
+        adjust: Annotated[str | None, Query(pattern="^(hfq|qfq|total_return)$")] = None,
         # Capped rather than unbounded: this endpoint is a viewer, and a full
         # market-day of a wide dataset is not something to hand back by accident.
         # Bulk extraction is `load()` in Python, not a paging URL.

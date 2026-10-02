@@ -60,18 +60,50 @@ def test_blacklisted_query_does_not_relogin_or_try_next_symbol(tmp_path):
         response = type("R", (), {"error_code": "10001011", "error_msg": "黑名单用户"})()
         check_result(response, config=cfg)
 
-    with pytest.raises(SourceCoolingDown):
-        fetch_per_symbol(
-            ["600000.SH", "600001.SH"],
-            date(2020, 1, 1),
-            date(2020, 1, 2),
-            refused,
-            bs=bs,
-            config=cfg,
-            sleep=lambda _: None,
-        )
+    rows, failed = fetch_per_symbol(
+        ["600000.SH", "600001.SH"],
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+        refused,
+        bs=bs,
+        config=cfg,
+        sleep=lambda _: None,
+    )
+    assert rows == []
+    assert failed == ["600000.SH", "600001.SH"]
     assert calls == ["600000.SH"]
     assert bs.logins == 1
+    assert bs.logged_out is False
+
+
+def test_refusal_keeps_rows_already_fetched(tmp_path):
+    from cnequity.adapters.baostock._session import check_result
+
+    bs = _NoQueryBaostock()
+    cfg = Config(data_root=tmp_path, source_intervals={"baostock": 0})
+    calls = []
+
+    def fetch(_bs, symbol, _start, _end):
+        calls.append(symbol)
+        if symbol == "600000.SH":
+            return [{"symbol": symbol, "close": 1.0}]
+        response = type("R", (), {"error_code": "10001011", "error_msg": "黑名单用户"})()
+        check_result(response, config=cfg)
+
+    rows, failed = fetch_per_symbol(
+        ["600000.SH", "600001.SH", "600002.SH"],
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+        fetch,
+        bs=bs,
+        config=cfg,
+        sleep=lambda _: None,
+    )
+    assert rows == [{"symbol": "600000.SH", "close": 1.0}]
+    assert failed == ["600001.SH", "600002.SH"]
+    assert calls == ["600000.SH", "600001.SH"]
+    assert bs.logins == 1
+    assert bs.logged_out is False
 
 
 def test_completes_normally_without_tripping_the_watchdog():
@@ -198,6 +230,8 @@ def test_login_deadline_is_not_swallowed_and_restores_socket_default(monkeypatch
     from cnequity.adapters.baostock import _session as sess
 
     monkeypatch.setattr(sess, "_LOGIN_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(sess, "_LOGIN_RETRIES", 2)
+    monkeypatch.setattr(sess, "_LOGIN_BACKOFF_SECONDS", (0.0, 0.0))
     monkeypatch.setattr(sess, "_force_close_baostock_socket", lambda: None)
 
     class SlowLogin(_NoQueryBaostock):
@@ -215,8 +249,63 @@ def test_login_deadline_is_not_swallowed_and_restores_socket_default(monkeypatch
     with pytest.raises(RuntimeError, match="login exceeded"):
         sess.fetch_per_symbol([], date(2020, 1, 1), date(2020, 1, 2), lambda *a: [], bs=bs)
     assert socket.getdefaulttimeout() == previous
-    assert bs.logins == 1
+    assert bs.logins == 2
     assert not bs.logged_out
+
+
+def test_force_close_drops_the_process_global_socket():
+    import baostock.common.context as bctx
+
+    from cnequity.adapters.baostock._session import _force_close_baostock_socket
+
+    class Sock:
+        def __init__(self):
+            self.shut = False
+            self.closed = False
+
+        def shutdown(self, _how):
+            self.shut = True
+
+        def close(self):
+            self.closed = True
+
+    sock = Sock()
+    previous = getattr(bctx, "default_socket", None)
+    bctx.default_socket = sock
+    try:
+        _force_close_baostock_socket()
+        assert sock.shut and sock.closed
+        assert bctx.default_socket is None
+    finally:
+        bctx.default_socket = previous
+
+
+def test_login_deadline_retries_onto_a_fresh_session(monkeypatch):
+    from cnequity.adapters.baostock import _session as sess
+
+    monkeypatch.setattr(sess, "_LOGIN_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(sess, "_LOGIN_BACKOFF_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr(sess, "_force_close_baostock_socket", lambda: None)
+
+    class Recovers(_NoQueryBaostock):
+        def login(self):
+            self.logins += 1
+            if self.logins == 1:
+                threading.Event().wait(1)
+            return type("R", (), {"error_code": "0", "error_msg": ""})()
+
+    bs = Recovers()
+    rows, failed = sess.fetch_per_symbol(
+        ["600000.SH"],
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+        lambda *_: [{"symbol": "600000.SH"}],
+        bs=bs,
+        sleep=lambda _: None,
+    )
+    assert bs.logins == 2
+    assert rows == [{"symbol": "600000.SH"}]
+    assert failed == []
 
 
 def test_logout_deadline_does_not_lose_completed_rows(monkeypatch):

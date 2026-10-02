@@ -55,6 +55,10 @@ def effective_source_policy(config, source: str, aliases: set[str] | None = None
         configured_cap = DEFAULT_SOURCE_CONCURRENCY["futures_exchange"]
     else:
         configured_cap = DEFAULT_SOURCE_CONCURRENCY.get(family, int(config.workers))
+    if family == "baostock":
+        from cnequity.adapters.baostock.access import MAX_CONCURRENT_CONNECTIONS
+
+        configured_cap = min(int(configured_cap), MAX_CONCURRENT_CONNECTIONS)
     day = _policy_day(time.time())
     concurrency = _read_json(
         config.rate_limit_root / f"concurrency-{_safe_source_name(family)}.json"
@@ -229,10 +233,13 @@ def build_source_limits(config) -> dict:
                 "repair_command": f"cne backfill {dataset} --outstanding",
             }
     guard = host_guard.status(config)
+    from cnequity.adapters.baostock.access import status as baostock_status
+
     return {
         "rate_limit_root": str(config.rate_limit_root),
         "sources": sources,
         "eastmoney": {name: guard[name] for name in ("vendor", "push2", "datacenter")},
+        "baostock": baostock_status(config),
         "latest_run_metrics": _latest_run_metrics(config),
         "outstanding": outstanding,
         "note": (

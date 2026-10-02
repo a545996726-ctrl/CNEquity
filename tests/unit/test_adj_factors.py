@@ -1591,3 +1591,27 @@ def test_rows_name_the_vendor_they_came_from(tmp_path):
         frame.drop("_vendor"), source=cfg.adj_factors_source, data_version="v1"
     ).with_columns(vendors.alias("source"))
     assert out["source"].to_list() == ["sina", "baostock"]
+
+
+def test_a_cache_written_before_the_latest_ex_date_is_refreshed(tmp_path):
+    import os
+
+    from cnequity.derive.adj_factors import _cache_path, _save_cache, _stale_cache_symbols
+
+    cfg = Config(data_root=tmp_path)
+    series = pl.DataFrame({"trade_date": [date(2026, 1, 5)], "factor": [1.0]})
+    written = {"600001.SH": date(2026, 7, 6), "600002.SH": date(2026, 7, 20)}
+    for symbol, day in written.items():
+        _save_cache(cfg, symbol, "hfq", series)
+        stamp = datetime(day.year, day.month, day.day, 12).timestamp()
+        os.utime(_cache_path(cfg, symbol, "hfq"), (stamp, stamp))
+    # A leftover qfq cache is never refreshed, however old.
+    _save_cache(cfg, "600003.SH", "qfq", series)
+    os.utime(_cache_path(cfg, "600003.SH", "qfq"), (0, 0))
+    _write_action(cfg, "600001.SH", date(2026, 7, 10), cash_dividend=0.5)
+    _write_action(cfg, "600002.SH", date(2026, 7, 10), cash_dividend=0.5)
+    _write_action(cfg, "600003.SH", date(2026, 7, 10), cash_dividend=0.5)
+    # An ex-date after the covered session is the normal event path's job.
+    _write_action(cfg, "600002.SH", date(2026, 10, 9), cash_dividend=0.5)
+
+    assert _stale_cache_symbols(cfg, date(2026, 9, 28)) == {"600001.SH"}

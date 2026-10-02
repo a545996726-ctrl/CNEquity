@@ -17,6 +17,7 @@ from cnequity.adapters.tdx_protocol.client import (
 )
 from cnequity.config import Config
 from cnequity.domain.frames import with_columns_unless_blank
+from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.market_time import BSE_FIRST_SESSION
 from cnequity.domain.schemas import with_provenance
 from cnequity.domain.symbols import (
@@ -1164,7 +1165,15 @@ def _backfill_trading_status_st_source(
         kwargs = {"config": config, "rest_after_batch": not is_last_batch}
         if source == "tushare":
             kwargs.pop("rest_after_batch")
-        df, failed = fetch_st_history(batch, start, end, **kwargs)
+        try:
+            df, failed = fetch_st_history(batch, start, end, **kwargs)
+        except SourceCoolingDown as exc:
+            logger.warning(
+                "ST backfill stopped: %s; completed symbols stay checkpointed",
+                exc,
+            )
+            unresolved.update(todo[offset:])
+            break
         if not df.is_empty():
             chunk = write_fetched(
                 config,

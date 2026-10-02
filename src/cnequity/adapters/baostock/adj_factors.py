@@ -145,3 +145,135 @@ def fetch_adj_factor_series_baostock(
         },
         schema={"trade_date": pl.Date, "factor": pl.Float64},
     )
+
+
+def fetch_adj_factor_series_baostock_many(
+    symbols: list[str],
+    start: date,
+    end: date,
+    *,
+    config=None,
+    bs=None,
+) -> tuple[pl.DataFrame, list[str]]:
+    """``(symbol, trade_date, factor)`` for many symbols in one paced sweep.
+
+    Same factor as :func:`fetch_adj_factor_series_baostock`, rescaled to 1.0
+    at each symbol's newest session in the window. One call walks every
+    symbol, so the driver's batch rests apply across them. Returns the frame
+    and the symbols that could not be answered.
+    """
+    captured: dict[str, tuple[dict[date, float], dict[date, float]]] = {}
+
+    def _fetch_one(bs_session, sym: str, window_start: date, window_end: date):
+        raw = _closes(bs_session, sym, window_start, window_end, _RAW_FLAG, config=config)
+        hfq = _closes(bs_session, sym, window_start, window_end, _HFQ_FLAG, config=config)
+        if not raw or not hfq:
+            return None
+        captured[sym] = (raw, hfq)
+        return [{"symbol": sym}]
+
+    served = [s for s in symbols if not s.upper().endswith(".BJ")]
+    _rows, failed = fetch_per_symbol(
+        served,
+        start,
+        end,
+        _fetch_one,
+        bs=bs,
+        label="baostock adj factors",
+        config=config,
+        request_managed=True,
+    )
+    failed = sorted({*failed, *(s for s in symbols if s not in served)})
+    frames: list[pl.DataFrame] = []
+    for sym, (raw, hfq) in captured.items():
+        shared = sorted(set(raw) & set(hfq))
+        if not shared:
+            failed.append(sym)
+            continue
+        implied = {day: hfq[day] / raw[day] for day in shared}
+        anchor = implied[shared[-1]]
+        if not math.isfinite(anchor) or anchor <= 0:
+            failed.append(sym)
+            continue
+        frames.append(
+            pl.DataFrame(
+                {
+                    "symbol": [sym] * len(shared),
+                    "trade_date": shared,
+                    "factor": [implied[day] / anchor for day in shared],
+                },
+                schema={"symbol": pl.Utf8, "trade_date": pl.Date, "factor": pl.Float64},
+            )
+        )
+    frame = (
+        pl.concat(frames)
+        if frames
+        else pl.DataFrame(schema={"symbol": pl.Utf8, "trade_date": pl.Date, "factor": pl.Float64})
+    )
+    return frame, sorted(set(failed))
+
+
+def _factor_events(bs, symbol: str, start: date, end: date, *, config) -> list[dict] | None:
+    """Back-adjusted factor rows, one per ex-date, or ``None`` on a query error."""
+    with source_request(config, SOURCE):
+        rs = check_result(
+            bs.query_adjust_factor(
+                code=to_baostock_symbol(symbol),
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+            ),
+            config=config,
+        )
+    if rs.error_code != "0":
+        return None
+    fields = list(rs.fields or [])
+    try:
+        at_date, at_factor = fields.index("dividOperateDate"), fields.index("backAdjustFactor")
+    except ValueError:
+        return None
+    out: list[dict] = []
+    while rs.next():
+        row = rs.get_row_data()
+        try:
+            factor = float(row[at_factor])
+            day = date.fromisoformat(row[at_date])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if math.isfinite(factor) and factor > 0:
+            out.append({"symbol": symbol, "trade_date": day, "factor": factor})
+    return out
+
+
+def fetch_adjust_factor_events_baostock_many(
+    symbols: list[str],
+    start: date,
+    end: date,
+    *,
+    config=None,
+    bs=None,
+) -> tuple[pl.DataFrame, list[str]]:
+    """``(symbol, trade_date, factor)`` rows from Baostock's own factor table.
+
+    One small query per symbol instead of two full daily histories: a row per
+    ex-date carrying the back-adjusted factor in force from that date. Measured
+    on 600519.SH, its 29 steps land on Sina's dates within 1.4e-4, except the
+    2006 share-reform step the two vendors treat differently. A symbol with no
+    rows cannot be told apart from an unanswered one and is returned as failed.
+    """
+    served = [s for s in symbols if not s.upper().endswith(".BJ")]
+    rows, failed = fetch_per_symbol(
+        served,
+        start,
+        end,
+        lambda session, sym, lo, hi: _factor_events(session, sym, lo, hi, config=config),
+        bs=bs,
+        label="baostock adjust factors",
+        config=config,
+        request_managed=True,
+    )
+    frame = pl.DataFrame(
+        rows, schema={"symbol": pl.Utf8, "trade_date": pl.Date, "factor": pl.Float64}
+    )
+    answered = set(frame.get_column("symbol").unique().to_list())
+    failed = sorted({*failed, *(s for s in symbols if s not in answered)})
+    return frame, failed

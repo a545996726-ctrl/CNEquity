@@ -238,10 +238,12 @@ reconciliation_lookback_days = 1
 enabled = true
 min_interval_seconds = 1.0
 
-# Free TCP API. Cumulative queries and concurrent sessions can trigger an IP
-# blacklist (error_code=10001011). The SDK's blacklist response enters a shared
-# cooldown; preserve one egress ledger across all lakes and do not rerun probes
-# while it is cooling down. Full-market historical work is intentionally slow.
+# Free TCP API. The client enforces the published limits in code: 50,000 API
+# calls per Asia/Shanghai day, one connection at a time, and a blacklist freeze
+# of (strikes this calendar year) × 6 hours after error_code=10001011. An empty
+# release time waits at least 5 minutes and does not log in again during the
+# freeze. batch_size / batch_rest_seconds only slow a long sweep; they cannot
+# raise those limits. Keep one egress ledger across lakes.
 [sources.baostock]
 enabled = true
 min_interval_seconds = 1.0

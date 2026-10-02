@@ -114,7 +114,9 @@ def test_delisted_universe_does_not_count_zero_volume_placeholder(tmp_path, monk
             return None
 
     monkeypatch.setattr("cnequity.adapters.baostock._session.import_baostock", lambda: _FakeBs())
-    monkeypatch.setattr("cnequity.adapters.baostock._session._login", lambda *_args: None)
+    monkeypatch.setattr(
+        "cnequity.adapters.baostock._session._login", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         "cnequity.adapters.baostock.delisted_bars.roster_on",
         lambda *_args, **_kwargs: {"600001.SH"},

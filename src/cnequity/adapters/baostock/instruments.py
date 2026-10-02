@@ -24,7 +24,14 @@ from datetime import date
 
 import polars as pl
 
-from cnequity.adapters.baostock._session import _login, _logout, check_result, import_baostock
+from cnequity.adapters.baostock._session import (
+    _finish_session,
+    _login,
+    check_result,
+    import_baostock,
+)
+from cnequity.adapters.baostock.access import hold_baostock_connection
+from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import (
     format_symbol,
@@ -99,49 +106,51 @@ def fetch_instrument_basics(*, bs=None, sleep=time.sleep, config=None) -> pl.Dat
     if bs is None:
         bs = import_baostock()
 
-    _login(bs, sleep=sleep, config=config)
-    try:
-        with source_request(config, "baostock"):
-            rs = check_result(bs.query_stock_basic(), config=config)
-        error_code = getattr(rs, "error_code", "0")
-        if error_code != "0":
-            raise RuntimeError(
-                f"baostock query_stock_basic failed: {error_code} "
-                f"{getattr(rs, 'error_msg', '')}".strip()
-            )
-        rows: list[dict] = []
-        skipped_market = 0
-        skipped_type = 0
-        while rs.next():
-            code, name, ipo_raw, out_raw, bs_type, status = (rs.get_row_data() + [""] * 6)[:6]
-            symbol = _symbol_from_baostock(code)
-            if symbol is None:
-                skipped_market += 1
-                continue
-            num, exchange = symbol.split(".")
-            asset_type = _asset_type(num, exchange, str(bs_type))
-            if asset_type is None:
-                skipped_type += 1
-                continue
-            delisted = str(status) == "0"
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "name": name or None,
-                    "exchange": exchange,
-                    "asset_type": asset_type,
-                    "list_date": _parse_date(ipo_raw),
-                    # Only trust outDate on rows baostock calls delisted; listed
-                    # names sometimes carry a filler date in that column.
-                    "delist_date": _parse_date(out_raw) if delisted else None,
-                    "prev_symbol": None,
-                }
-            )
-    finally:
+    rows: list[dict] = []
+    skipped_market = 0
+    skipped_type = 0
+    blacklisted = False
+    with hold_baostock_connection(config):
+        _login(bs, sleep=sleep, config=config)
         try:
-            _logout(bs, config=config)
-        except Exception:  # noqa: BLE001 — logout on a dead socket may raise
-            pass
+            with source_request(config, "baostock"):
+                rs = check_result(bs.query_stock_basic(), config=config)
+            error_code = getattr(rs, "error_code", "0")
+            if error_code != "0":
+                raise RuntimeError(
+                    f"baostock query_stock_basic failed: {error_code} "
+                    f"{getattr(rs, 'error_msg', '')}".strip()
+                )
+            while rs.next():
+                code, name, ipo_raw, out_raw, bs_type, status = (rs.get_row_data() + [""] * 6)[:6]
+                symbol = _symbol_from_baostock(code)
+                if symbol is None:
+                    skipped_market += 1
+                    continue
+                num, exchange = symbol.split(".")
+                asset_type = _asset_type(num, exchange, str(bs_type))
+                if asset_type is None:
+                    skipped_type += 1
+                    continue
+                delisted = str(status) == "0"
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "name": name or None,
+                        "exchange": exchange,
+                        "asset_type": asset_type,
+                        "list_date": _parse_date(ipo_raw),
+                        # Only trust outDate on rows baostock calls delisted; listed
+                        # names sometimes carry a filler date in that column.
+                        "delist_date": _parse_date(out_raw) if delisted else None,
+                        "prev_symbol": None,
+                    }
+                )
+        except SourceCoolingDown:
+            blacklisted = True
+            raise
+        finally:
+            _finish_session(bs, config=config, blacklisted=blacklisted)
 
     df = pl.DataFrame(rows, schema=_OUTPUT_SCHEMA) if rows else pl.DataFrame(schema=_OUTPUT_SCHEMA)
     logger.info(

@@ -104,14 +104,22 @@ class SourceRateLimiters:
         ):
             values.extend(int(mapping[name]) for name in names if name in mapping)
         if values:
-            return max(1, min(values))
-        if family == "tdx_protocol":
+            limit = max(1, min(values))
+        elif family == "tdx_protocol":
             # TDX's wire adapter uses the daily lane width, including on
             # macOS where the unrelated process-pool budget is one worker.
-            return self.config.tdx_daily_worker_count()
-        if family.startswith("futures_exchange_"):
-            return DEFAULT_SOURCE_CONCURRENCY["futures_exchange"]
-        return DEFAULT_SOURCE_CONCURRENCY.get(family, max(1, int(self.config.workers)))
+            limit = self.config.tdx_daily_worker_count()
+        elif family.startswith("futures_exchange_"):
+            limit = DEFAULT_SOURCE_CONCURRENCY["futures_exchange"]
+        else:
+            limit = DEFAULT_SOURCE_CONCURRENCY.get(family, max(1, int(self.config.workers)))
+        if family == "baostock":
+            # The vendor allows one connection. A config value above that is
+            # ignored here so a request cannot open a second session.
+            from cnequity.adapters.baostock.access import MAX_CONCURRENT_CONNECTIONS
+
+            limit = min(limit, MAX_CONCURRENT_CONNECTIONS)
+        return limit
 
     def wait(self, source: str) -> None:
         limiter = self._limiters.get(source)
@@ -208,6 +216,10 @@ class SourceRateLimiters:
                 self.wait(source)
                 check_source_cooldown(self.config.rate_limit_root, source)
                 with source_probe_slot(self.config.rate_limit_root, source):
+                    if family == "baostock":
+                        from cnequity.adapters.baostock.access import admit_request
+
+                        admit_request(self.config)
                     record_metered_attempt(self.config.rate_limit_root, source, family)
                     yield
         finally:

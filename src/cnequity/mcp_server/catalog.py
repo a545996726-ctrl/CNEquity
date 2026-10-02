@@ -108,10 +108,12 @@ TOOLS: list[dict] = [
                 "end": _END,
                 "adjust": {
                     "type": "string",
-                    "enum": ["qfq", "hfq"],
+                    "enum": ["qfq", "hfq", "total_return"],
                     "description": "hfq = back-adjusted, the correct choice for return series. "
-                    "qfq = forward-adjusted to today's price level. Omit only when "
-                    "you specifically want raw traded prices for a single day.",
+                    "qfq = forward-adjusted to today's price level. total_return "
+                    "(daily_bars only) = hfq with fund cash distributions reinvested; "
+                    "stocks read as hfq, whose factor already reinvests dividends. Omit "
+                    "only when you specifically want raw traded prices for a single day.",
                 },
                 "universe": {
                     "type": "string",

@@ -46,6 +46,8 @@ def _dependencies(dataset: str, options: Mapping[str, Any]) -> set[str]:
         dependencies.add("news_headlines")
     if dataset in ADJUSTABLE_DATASETS and options.get("adjust"):
         dependencies.add("adj_factors")
+    if options.get("adjust") == "total_return":
+        dependencies.update({"corporate_actions", "instruments"})
     if options.get("universe") or options.get("profile") or options.get("universe_profile"):
         dependencies.update({"instruments", "trading_status", "trading_calendar"})
     return dependencies

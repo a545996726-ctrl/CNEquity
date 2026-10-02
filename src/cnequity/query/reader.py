@@ -45,7 +45,7 @@ from cnequity.storage.read_context import ReadContext
 
 logger = logging.getLogger(__name__)
 
-AdjustType = Literal["qfq", "hfq"]
+AdjustType = Literal["qfq", "hfq", "total_return"]
 UniverseType = Literal["all_a", "all_a_sh_sz"]
 UniverseProfileLike = str | UniverseProfile
 RevisionRef = int | str
@@ -528,6 +528,74 @@ def _hfq_anchor_factors(
     )
 
 
+def _with_distribution_multiplier(
+    joined: pl.DataFrame,
+    config: Config,
+    start: date | None,
+    end: date | None,
+    *,
+    read_context: ReadContext | None,
+) -> pl.DataFrame:
+    """Fold fund cash distributions into ``factor`` for a total-return series.
+
+    A stock's hfq factor already reinvests dividends. The vendor's fund factor
+    moves on unit splits only, so for a fund each recorded cash distribution
+    is reinvested at the close before its ex-date: the factor is multiplied by
+    ``prev_close / (prev_close - cash)`` from that date on. The multiplier is 1
+    on each fund's first bar in scope, so its level there equals the hfq level,
+    the way ``qfq`` anchors on the last bar. hfq and qfq are unchanged.
+    """
+    funds = _read_dataset(config, "instruments", read_context=read_context)
+    if "asset_type" not in funds.columns:
+        return joined
+    fund_symbols = set(
+        funds.filter(pl.col("asset_type") == "etf").get_column("symbol").to_list()
+    ) & set(joined.get_column("symbol").unique().to_list())
+    if not fund_symbols:
+        return joined
+    try:
+        actions = _read_dataset(
+            config,
+            "corporate_actions",
+            start=start,
+            end=end,
+            symbols=sorted(fund_symbols),
+            read_context=read_context,
+        )
+    except ReaderError:
+        return joined
+    payouts = (
+        actions.filter((pl.col("action_type") == "cash_dividend") & (pl.col("cash_dividend") > 0))
+        .group_by("symbol", "ex_date")
+        .agg(pl.col("cash_dividend").max().alias("_cash"))
+    )
+    if payouts.is_empty():
+        return joined
+    ordered = joined.with_row_index("_row").sort("symbol", "trade_date")
+    with_steps = (
+        ordered.with_columns(pl.col("close").shift(1).over("symbol").alias("_prev_close"))
+        .join(
+            payouts,
+            left_on=["symbol", "trade_date"],
+            right_on=["symbol", "ex_date"],
+            how="left",
+        )
+        .with_columns(
+            pl.when(
+                pl.col("_cash").is_not_null()
+                & (pl.col("_prev_close") > pl.col("_cash"))
+                & pl.col("symbol").is_in(list(fund_symbols))
+            )
+            .then(pl.col("_prev_close") / (pl.col("_prev_close") - pl.col("_cash")))
+            .otherwise(1.0)
+            .alias("_step")
+        )
+        .with_columns(pl.col("_step").cum_prod().over("symbol").alias("_multiplier"))
+        .with_columns((pl.col("factor") * pl.col("_multiplier")).alias("factor"))
+    )
+    return with_steps.sort("_row").drop("_row", "_prev_close", "_cash", "_step", "_multiplier")
+
+
 def _apply_adjustment(
     bars: pl.DataFrame,
     config: Config,
@@ -574,10 +642,14 @@ def _apply_adjustment(
         factors = factors.with_columns(
             (pl.col("factor") / pl.col("hfq_anchor")).alias("factor")
         ).drop("hfq_anchor")
-    elif adjust != "hfq":
+    elif adjust not in ("hfq", "total_return"):
         raise ReaderError(f"unsupported adjust type {adjust!r}")
 
     joined = bars.join(factors, on=["symbol", "trade_date"], how="left")
+    if adjust == "total_return":
+        joined = _with_distribution_multiplier(
+            joined, config, start, end, read_context=read_context
+        )
     joined = joined.with_columns(pl.col("factor").is_not_null().alias("adj_is_exact"))
     inexact = joined.filter(~pl.col("adj_is_exact")).height
     if inexact:
@@ -666,6 +738,12 @@ def load(
         ``adj_open`` … ``adj_close`` plus ``adj_is_exact``. ``qfq`` is derived
         at query time as ``hfq_factor / hfq_anchor`` (anchor = latest bar date
         in scope); only ``hfq`` is persisted (ADR-0004).
+        ``total_return`` (``daily_bars`` only) — hfq plus fund cash
+        distributions reinvested at the close before each ex-date. A stock's
+        hfq already reinvests dividends, so stocks read the same as ``hfq``;
+        a fund's hfq adjusts unit splits only. Its level equals hfq on each
+        fund's first bar in scope, so compare returns, not levels, across
+        queries with different starts. hfq and qfq keep their meaning.
     universe:
         ``all_a`` — drop unlisted/delisted rows per day via ``instruments``, and
         drop ST/suspended rows when ``trading_status`` has data for that day.
@@ -754,6 +832,8 @@ def load(
         raise ReaderError(
             "adjustment applies to per-share prices only; index_bars levels are not adjustable"
         )
+    if adjust == "total_return" and dataset != "daily_bars":
+        raise ReaderError("adjust='total_return' applies to daily_bars only")
 
     start_d = _parse_date(start)
     end_d = _parse_date(end)
@@ -764,6 +844,9 @@ def load(
         dependencies.add("news_headlines")
     if adjust and dataset in ADJUSTABLE_DATASETS:
         dependencies.add("adj_factors")
+    if adjust == "total_return":
+        # Fund distributions and which securities are funds are read as well.
+        dependencies.update({"corporate_actions", "instruments"})
     if effective_universe:
         dependencies.update({"instruments", "trading_status", "trading_calendar"})
     selected_revisions = {

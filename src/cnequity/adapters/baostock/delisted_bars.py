@@ -29,8 +29,10 @@ import math
 from datetime import date
 
 from cnequity.adapters.baostock._session import check_result, fetch_per_symbol, import_baostock
+from cnequity.adapters.baostock.access import hold_baostock_connection
 from cnequity.adapters.baostock.wide_history import query_history
 from cnequity.adapters.numeric import finite_int64
+from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.rate_limit import source_request
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,27 @@ def to_lake_symbol(bs_code: str) -> str:
     return f"{code}.{'SH' if ex == 'sh' else 'SZ'}"
 
 
+def _roster_rows(bs, day: date, config) -> set[str]:
+    with source_request(config, "baostock"):
+        rs = check_result(bs.query_all_stock(day=day.isoformat()), config=config)
+    if getattr(rs, "error_code", "0") != "0":
+        message = getattr(rs, "error_msg", "") or "unknown error"
+        raise RuntimeError(
+            f"baostock historical roster query failed for {day}: {rs.error_code} ({message})"
+        )
+    out: set[str] = set()
+    while rs.next():
+        row = rs.get_row_data()
+        if not row:
+            continue
+        code = row[0]
+        if _is_stock(code):
+            out.add(to_lake_symbol(code))
+    if not out:
+        logger.warning("baostock roster for %s came back empty", day)
+    return out
+
+
 def roster_on(day: date, *, bs=None, login: bool = True, config=None) -> set[str]:
     """Stock codes that actually traded on *day*, in lake symbol form.
 
@@ -75,36 +98,21 @@ def roster_on(day: date, *, bs=None, login: bool = True, config=None) -> set[str
     stocks traded that day" and understate the gap to zero. Pass ``login=False``
     only when the caller already holds a session.
     """
-    from cnequity.adapters.baostock._session import _login, _logout
+    from cnequity.adapters.baostock._session import _finish_session, _login
 
     bs = bs or import_baostock()
-    if login:
+    if not login:
+        return _roster_rows(bs, day, config)
+    blacklisted = False
+    with hold_baostock_connection(config):
         _login(bs, config=config)
-    try:
-        with source_request(config, "baostock"):
-            rs = check_result(bs.query_all_stock(day=day.isoformat()), config=config)
-        if getattr(rs, "error_code", "0") != "0":
-            message = getattr(rs, "error_msg", "") or "unknown error"
-            raise RuntimeError(
-                f"baostock historical roster query failed for {day}: {rs.error_code} ({message})"
-            )
-        out: set[str] = set()
-        while rs.next():
-            row = rs.get_row_data()
-            if not row:
-                continue
-            code = row[0]
-            if _is_stock(code):
-                out.add(to_lake_symbol(code))
-        if not out:
-            logger.warning("baostock roster for %s came back empty", day)
-        return out
-    finally:
-        if login:
-            try:
-                _logout(bs, config=config)
-            except Exception as exc:  # noqa: BLE001 — retain the completed roster
-                logger.warning("baostock roster logout failed: %s", exc)
+        try:
+            return _roster_rows(bs, day, config)
+        except SourceCoolingDown:
+            blacklisted = True
+            raise
+        finally:
+            _finish_session(bs, config=config, blacklisted=blacklisted)
 
 
 def _fetch_one(bs, symbol: str, start: date, end: date, *, config=None) -> list[dict] | None:

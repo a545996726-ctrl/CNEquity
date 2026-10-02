@@ -95,7 +95,7 @@ cne config validate --config configs/cnequity.toml
 | `datacenter_daily_budget`（eastmoney） | 默认 0：只计数、不设上限（计数在 `CNE_RATE_LIMIT_ROOT/eastmoney_guard.json`，默认本湖 `meta/rate_limits/`）。按实测用量设上限 |
 | `daily_budget`（eastmoney） | 默认 0：只计数；设置后对同一出口的 push2 与 datacenter 请求实施共享日上限，避免分别未超额但厂商总请求过多。共享账本位于 `CNE_RATE_LIMIT_ROOT`。 |
 | `datacenter_min_interval_seconds` / `datacenter_max_concurrency`（eastmoney） | 默认 1.0 秒 / 2。datacenter 单独的限速通道；其他东财主机仍按 `min_interval_seconds` 和 `source_concurrency.eastmoney` |
-| `batch_size` / `batch_rest_seconds`（baostock） | 全市场回填批次冷却，防 IP 黑名单 |
+| `batch_size` / `batch_rest_seconds`（baostock） | 全市场回填的额外批次冷却。日请求上限 5 万次、单连接、黑名单冻结时长写在代码里，不能用配置调高 |
 | `verify`（ths_official） | 默认 **开**。只允许写 `meta/source_snapshots` 与 findings，从不碰 curated 行，所以有 key 就可以安全开着 |
 | `backfill`（ths_official） | 默认 **关**。它会改变湖里的内容，所以必须显式打开。持有凭证、启用源、允许它改数据是三个决定 |
 | `api_key`（ths_official） | 建议用环境变量 `HITHINK_FINANCE_API_KEY` 而非写进配置 |
@@ -111,7 +111,7 @@ cne config validate --config configs/cnequity.toml
 | exchange | 1.0 | 交易所融资融券、状态和对照等批量接口 |
 | sina | 0.3 | 复权因子；与 Sina 日线共享在途上限和拒绝冷却 |
 | sina_bars | 1.0 | BJ/退市日线 fallback；独立于复权因子限速，配合 HTTP 456 有限重试 |
-| baostock | 1.0 + batch 20/120s | 历史市值/ST；禁止多进程并行扫 |
+| baostock | 1.0 + batch 20/120s | 历史市值/ST。另有写死的上海自然日 5 万次上限和单连接；黑名单冻结为本年次数 × 6 小时 |
 
 ## `[adj_factors]`
 

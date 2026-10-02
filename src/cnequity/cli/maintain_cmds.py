@@ -174,7 +174,10 @@ def _published_derive(cfg, dataset: str):
     "--apply",
     "apply_changes",
     is_flag=True,
-    help="bse_code_migration：真正重写分区（默认只报告）。",
+    help=(
+        "bse_code_migration：真正重写分区；adj_factor_source：写入逐证券来源覆盖并重算这些证券的因子"
+        "（默认只报告）。"
+    ),
 )
 def derive(
     name: str,
@@ -191,6 +194,8 @@ def derive(
     （`derive_adj_factors`、`derive_industry_index`、`trading_status_derive`），
     所以在这里跑它们属于修复或补更早的窗口，不是正常一天的一部分。
     `sector_routing`、`sector_code_map` 和 `valuation_orphans` 没有任何调度会跑，只能手动执行。
+    `adj_factor_source` 用 Baostock 仲裁因子与公司行为的矛盾；证明新浪有误且 Baostock
+    与其余事件一致的证券，`--apply` 后整条因子改用 Baostock。
     `futures_continuous` 和 `option_greeks` 在 `derivatives` 组里日更。
     `futures_continuous` 每次全量重算；`option_greeks` 自动检测行情、合约、利率和模型依赖变化。
     衍生品回填后自动更新合约及派生；`--full` 可显式全部重算。
@@ -217,6 +222,26 @@ def derive(
                 err=True,
             )
             raise SystemExit(1)
+    elif name == "adj_factor_source":
+        from cnequity.derive.factor_arbitration import (
+            arbitrate_factor_sources,
+            record_source_overrides,
+        )
+
+        report = arbitrate_factor_sources(cfg)
+        if apply_changes and report.get("switch"):
+            switched = record_source_overrides(cfg, report)
+            with _published_derive(cfg, "adj_factors") as outcome:
+                result = compute_adj_factors(cfg, refresh_symbols=switched)
+                outcome["rows_written"] = result.rows
+                if result.failed:
+                    outcome["status"] = "degraded"
+            report["applied"] = True
+            report["rows_rewritten"] = result.rows
+        else:
+            report["applied"] = False
+        report.pop("switch_detail", None)
+        click.echo(json.dumps(report, indent=2, default=str, ensure_ascii=False))
     elif name == "industry_index":
         from cnequity.derive.industry_index import derive_industry_index
 

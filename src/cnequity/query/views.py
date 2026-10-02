@@ -353,5 +353,68 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
         )
         """
     )
+    # SQL twin of load(..., adjust='total_return', start=..., end=...): hfq
+    # with fund cash distributions reinvested at the close before each
+    # ex-date. Stocks read as hfq. Window-scoped like daily_bars_qfq, because
+    # each fund's level is anchored on its first bar in scope.
+    con.execute(
+        """
+        CREATE OR REPLACE MACRO daily_bars_total_return(start_date, end_date) AS TABLE (
+            WITH bars AS (
+                SELECT *
+                FROM daily_bars
+                WHERE (start_date IS NULL OR trade_date >= CAST(start_date AS DATE))
+                  AND (end_date IS NULL OR trade_date <= CAST(end_date AS DATE))
+            ),
+            funds AS (
+                SELECT DISTINCT symbol FROM instruments WHERE asset_type = 'etf'
+            ),
+            payouts AS (
+                SELECT symbol, ex_date, MAX(cash_dividend) AS cash
+                FROM corporate_actions
+                WHERE action_type = 'cash_dividend'
+                  AND cash_dividend > 0
+                  AND symbol IN (SELECT symbol FROM funds)
+                  AND (start_date IS NULL OR ex_date >= CAST(start_date AS DATE))
+                  AND (end_date IS NULL OR ex_date <= CAST(end_date AS DATE))
+                GROUP BY symbol, ex_date
+            ),
+            stepped AS (
+                SELECT
+                    b.*,
+                    h.factor AS _hfq,
+                    LAG(b.close) OVER (PARTITION BY b.symbol ORDER BY b.trade_date) AS _prev,
+                    p.cash AS _cash
+                FROM bars b
+                LEFT JOIN adj_factors h
+                  ON b.symbol = h.symbol AND b.trade_date = h.trade_date
+                 AND h.adjust_type = 'hfq'
+                LEFT JOIN payouts p
+                  ON b.symbol = p.symbol AND b.trade_date = p.ex_date
+            ),
+            multiplied AS (
+                SELECT
+                    *,
+                    EXP(SUM(LN(
+                        CASE WHEN _cash IS NOT NULL AND _prev > _cash
+                             THEN _prev / (_prev - _cash) ELSE 1.0 END
+                    )) OVER (
+                        PARTITION BY symbol ORDER BY trade_date
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    )) AS _mult
+                FROM stepped
+            )
+            SELECT
+                * EXCLUDE (_hfq, _prev, _cash, _mult),
+                _hfq IS NOT NULL AS adj_is_exact,
+                open  * COALESCE(_hfq, 1.0) * _mult AS tr_open,
+                high  * COALESCE(_hfq, 1.0) * _mult AS tr_high,
+                low   * COALESCE(_hfq, 1.0) * _mult AS tr_low,
+                close * COALESCE(_hfq, 1.0) * _mult AS tr_close,
+                close * COALESCE(_hfq, 1.0) * _mult AS adj_close
+            FROM multiplied
+        )
+        """
+    )
     con.close()
     return db_path

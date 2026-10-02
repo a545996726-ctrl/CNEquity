@@ -132,7 +132,7 @@ def test_sdk_blacklist_stops_future_queries_across_configs(tmp_path, monkeypatch
         return response
 
     bs.query_history_k_data_plus = refused
-    with pytest.raises(SourceCoolingDown, match="blacklist"):
+    with pytest.raises(SourceCoolingDown, match="黑名单"):
         query_history(
             bs,
             "sh.600000",

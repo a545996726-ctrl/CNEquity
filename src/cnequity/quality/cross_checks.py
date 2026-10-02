@@ -2019,6 +2019,87 @@ def _fund_symbols(config: Config) -> list[str]:
     return instruments.filter(pl.col("asset_type") == "etf").get_column("symbol").to_list()
 
 
+_CONTRADICTION_SCHEMA = {"symbol": pl.Utf8, "ex_date": pl.Date, "kind": pl.Utf8}
+
+
+def factor_action_contradictions(config: Config) -> tuple[pl.DataFrame, int]:
+    """Where the hfq factor and the recorded corporate actions disagree.
+
+    Returns ``(frame, fund_payouts)``: one row per (symbol, ex_date) with
+    ``kind`` either ``action_without_step`` (an action on an open session the
+    factor never steps on) or ``step_without_action`` (a factor step with no
+    recorded action), plus the count of fund cash distributions set aside.
+
+    Sina's fund factor is its ``s`` multiplier, which moves on unit splits and
+    never on a cash distribution (0 of 2,363 fund distributions on
+    2026-09-29). A fund payout with a still factor is that convention, not a
+    contradiction, so it is counted apart.
+    """
+    empty = pl.DataFrame(schema=_CONTRADICTION_SCHEMA)
+    factors_root = config.derived_root / "adj_factors"
+    actions_root = config.curated_root / "corporate_actions"
+    if not dataset_has_parquet(factors_root) or not dataset_has_parquet(actions_root):
+        return empty, 0
+    factors = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(factors_root, partition_col="trade_date"), "adj_factors"
+        )
+        .filter(pl.col("adjust_type") == "hfq")
+        .select("symbol", "trade_date", "factor")
+        .collect()
+        .sort(["symbol", "trade_date"])
+    )
+    if factors.is_empty():
+        return empty, 0
+    jumps = (
+        factors.with_columns(
+            (pl.col("factor") / pl.col("factor").shift(1).over("symbol") - 1).abs().alias("_chg")
+        )
+        .filter(pl.col("_chg") > 1e-6)
+        .select("symbol", pl.col("trade_date").alias("ex_date"))
+    )
+    if jumps.is_empty():
+        return empty, 0
+    floor = jumps.get_column("ex_date").min()
+    recorded = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(actions_root, partition_col="ex_date"), "corporate_actions"
+        )
+        .filter(pl.col("ex_date") >= floor)
+        .select("symbol", "ex_date", "action_type")
+        .collect()
+    )
+    funds = _fund_symbols(config)
+    cash_only = (
+        recorded.group_by("symbol", "ex_date")
+        .agg((pl.col("action_type") == "cash_dividend").all().alias("_cash_only"))
+        .filter(pl.col("_cash_only") & pl.col("symbol").is_in(funds))
+        .select("symbol", "ex_date")
+    )
+    actions = recorded.select("symbol", "ex_date").unique()
+    # Only compare where a comparison is meaningful: the symbol has a factor
+    # series at all, and the date is one the market was open on.
+    covered = factors.get_column("symbol").unique().to_list()
+    sessions = _open_sessions(config)
+    if sessions is not None:
+        actions = actions.filter(pl.col("ex_date").is_in(sessions))
+    actions = actions.filter(pl.col("symbol").is_in(covered))
+    silent = actions.join(jumps, on=["symbol", "ex_date"], how="anti")
+    fund_payouts = silent.join(cash_only, on=["symbol", "ex_date"], how="semi").height
+    silent = silent.join(cash_only, on=["symbol", "ex_date"], how="anti")
+    baseless = jumps.filter(pl.col("ex_date") >= floor).join(
+        actions, on=["symbol", "ex_date"], how="anti"
+    )
+    frame = pl.concat(
+        [
+            silent.with_columns(pl.lit("action_without_step").alias("kind")),
+            baseless.with_columns(pl.lit("step_without_action").alias("kind")),
+        ],
+        how="vertical_relaxed",
+    ).select(list(_CONTRADICTION_SCHEMA))
+    return frame.sort("symbol", "ex_date"), fund_payouts
+
+
 def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     """Ask a third source which side of an internal contradiction is wrong.
 
@@ -2051,71 +2132,15 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     peer = SnapshotStore(config.meta_root).read_latest("corporate_actions", source="ths_official")
     if peer.is_empty() or not {"symbol", "ex_date"} <= set(peer.columns):
         return []
-
-    factors_root = config.derived_root / "adj_factors"
-    actions_root = config.curated_root / "corporate_actions"
-    if not dataset_has_parquet(factors_root) or not dataset_has_parquet(actions_root):
-        return []
-
-    factors = (
-        dedupe_lazy_by_primary_key(
-            scan_parquet_root(factors_root, partition_col="trade_date"), "adj_factors"
-        )
-        .filter(pl.col("adjust_type") == "hfq")
-        .select("symbol", "trade_date", "factor")
-        .collect()
-        .sort(["symbol", "trade_date"])
+    contradictions, fund_payouts = factor_action_contradictions(config)
+    silent = contradictions.filter(pl.col("kind") == "action_without_step").select(
+        "symbol", "ex_date"
     )
-    if factors.is_empty():
-        return []
-    jumps = (
-        factors.with_columns(
-            (pl.col("factor") / pl.col("factor").shift(1).over("symbol") - 1).abs().alias("_chg")
-        )
-        .filter(pl.col("_chg") > 1e-6)
-        .select("symbol", pl.col("trade_date").alias("ex_date"))
+    baseless = contradictions.filter(pl.col("kind") == "step_without_action").select(
+        "symbol", "ex_date"
     )
-    if jumps.is_empty():
-        return []
-
-    floor = jumps.get_column("ex_date").min()
-    recorded = (
-        dedupe_lazy_by_primary_key(
-            scan_parquet_root(actions_root, partition_col="ex_date"), "corporate_actions"
-        )
-        .filter(pl.col("ex_date") >= floor)
-        .select("symbol", "ex_date", "action_type")
-        .collect()
-    )
-    # Sina's fund factor is its ``s`` multiplier, which moves on unit splits
-    # and never on a cash distribution (0 of 2,363 fund distributions on
-    # 2026-09-29). A fund payout with a still factor is that convention, not
-    # a contradiction; count it apart so the warning names real ones only.
-    funds = _fund_symbols(config)
-    cash_only = (
-        recorded.group_by("symbol", "ex_date")
-        .agg((pl.col("action_type") == "cash_dividend").all().alias("_cash_only"))
-        .filter(pl.col("_cash_only") & pl.col("symbol").is_in(funds))
-        .select("symbol", "ex_date")
-    )
-    actions = recorded.select("symbol", "ex_date").unique()
-    # Only compare where a comparison is meaningful: the symbol has a factor
-    # series at all, and the date is one the market was open on.
-    covered = factors.get_column("symbol").unique().to_list()
-    sessions = _open_sessions(config)
-    if sessions is not None:
-        actions = actions.filter(pl.col("ex_date").is_in(sessions))
-    actions = actions.filter(pl.col("symbol").is_in(covered))
-
     peer_dates = peer.select("symbol", "ex_date").unique()
     peer_symbols = peer.get_column("symbol").unique().to_list()
-
-    silent = actions.join(jumps, on=["symbol", "ex_date"], how="anti")
-    fund_payouts = silent.join(cash_only, on=["symbol", "ex_date"], how="semi").height
-    silent = silent.join(cash_only, on=["symbol", "ex_date"], how="anti")
-    baseless = jumps.filter(pl.col("ex_date") >= floor).join(
-        actions, on=["symbol", "ex_date"], how="anti"
-    )
 
     def _split(frame: pl.DataFrame) -> tuple[pl.DataFrame, int, int]:
         in_scope = frame.filter(pl.col("symbol").is_in(peer_symbols))

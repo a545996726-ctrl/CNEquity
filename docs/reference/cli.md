@@ -343,6 +343,7 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 | `--payment-date-repair` | 同上，发行人公告之后再用 Baostock `dividPayDate` 匹配余下事件；两者不能同时使用 |
 | `--outstanding` | 精确修复被容忍缺口记下的欠账键：作用域与窗口取自 ledger，而不是 `--symbols`/`--start`/`--end`。补上的键即刻销账，仍缺的继续欠着 |
 | `--bj-amount-repair` | 仅 `daily_bars`：从 TDX 补 Sina 从未发布的 BJ 成交额，已存的价格与成交量一律不动。需要 `--start`/`--end` |
+| `--tdx-amount-repair` | 仅 `daily_bars`：新浪补上的沪深北历史行与通达信一起核对，只在开高低收一致且成交量差小于一手时补成交额；通达信没有的代码保留新浪行。需要 `--start`/`--end` |
 | `--turnover-repair` | 仅 `daily_bars`：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；开高低收须在半分钱内一致，不一致或未提供的保留原值并计数。需要 `--start`/`--end` |
 | `--tdx-volume-repair` | 仅 `daily_bars`：重读 TDX，只改写已存 TDX 行的成交量（及 64.5 元以下被放大的成交额），修 2026-09-17 前的解码错误；价格须一致，不新增行，不经内部缺口门禁。需要 `--symbols` 和 `--start`/`--end` |
 | `--bse-tip-repair` | 仅 `daily_bars`：读取已有 session 的 OHLCV，仅向 BSE 请求成交额并严格核对；必须同时指定相同的 `--start/--end` 与 `--symbols` |
@@ -436,6 +437,7 @@ python scripts/delisted_ops.py coverage --start 2016-01-01 --universe all_a_sh_s
 | `sector_code_map` | BK* ↔ BOARD_CODE 身份映射（lake-only；推荐成分 join） |
 | `futures_continuous` | 期货主力/次主力连续合约，按 T-1 持仓换月、只向后换；由 futures_bars 全量重建（需 `[futures] enabled`） |
 | `option_greeks` | 期权隐含波动率与希腊字母（Black-76 / BAW），自动检测行情、合约、利率和模型依赖变化；`--full` 全量重算，`--start`/`--end` 限定窗口 |
+| `adj_factor_source` | 用 Baostock 仲裁复权因子与公司行为的矛盾（新浪漏步、新浪虚步、湖缺事件、事件存疑）；证明新浪有误（除权日前一交易日在 10 天内、不在 2005-04-29 至 2007-12-31 股改期间，两家台阶相差超过 0.45%，且原始股价的跳动更接近 Baostock）且 Baostock 与其余事件一致的沪深股票，`--apply` 后整条因子改用 Baostock，证据写入 `meta/quality/evidence/`。Baostock 结果按批缓存 7 天：中断后重跑只取尚未取到的证券，预览后的 `--apply` 直接复用预览取到的数据 |
 
 ```bash
 cne derive trading_status --start 2001-01-01 --end 2001-12-31
@@ -448,6 +450,7 @@ cne derive trading_status --start 2001-01-01 --end 2001-12-31
 | 子命令 | 说明 |
 |------|------|
 | `layout DATASET` | 把分区数据集根目录或错误键目录中的文件并入登记分区。同一主键的多份观察只在非空值完全一致时互补填空；有冲突的键按规范规则整行保留一份。重复键的全部原始观察写入 `_quarantine`。发布新版本时若检测到这类布局，会提示运行此命令 |
+| `corporate-action-gaps` | 补上新浪与 Baostock 因子都有台阶、湖里却没有记录的除权事件，依据最近一次 `cne derive adj_factor_source` 的证据。附近 10 天内日期错开的记录，若条款能解释台阶就移到台阶日；其余按证券和年份向 Baostock 取分红，只收除权日正是台阶日且条款能解释台阶的行。这是本组唯一会访问数据源的命令：计划仍离线，`--apply` 才请求 Baostock |
 | `valuation-basis` | 统一 `valuation_metrics` 口径：push2 动态市盈率移入 `pe_dynamic`；Baostock 流通市值由成交均价口径换算为收盘价口径，无法核对的保留原值并标为 `vwap_x_turn_implied_shares`；总市值按 `share_structure` 当日有效总股本重建，无记录的标为年末股本估算 |
 
 ```bash

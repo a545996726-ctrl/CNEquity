@@ -179,6 +179,14 @@ from cnequity.orchestrator.engine import JobEngine
     help="仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。",
 )
 @click.option(
+    "--tdx-amount-repair",
+    is_flag=True,
+    help=(
+        "仅 daily_bars：新浪补上的沪深北历史行与通达信一起核对，只在开高低收一致且成交量差小于一手时补成交额；"
+        "通达信没有的代码保留新浪行。已存的价格和成交量一律不动。需要 --start/--end。"
+    ),
+)
+@click.option(
     "--tdx-volume-repair",
     is_flag=True,
     help=(
@@ -231,6 +239,7 @@ def backfill(
     ex_dates_str: str | None,
     bse_tip_repair: bool,
     bj_amount_repair: bool,
+    tdx_amount_repair: bool,
     tdx_volume_repair: bool,
     turnover_repair: bool,
     fill_em_outage: bool,
@@ -265,6 +274,7 @@ def backfill(
             or ex_dates_str
             or bse_tip_repair
             or bj_amount_repair
+            or tdx_amount_repair
             or tdx_volume_repair
             or turnover_repair
             or fill_em_outage
@@ -339,6 +349,7 @@ def backfill(
             or ex_dates_str
             or bse_tip_repair
             or bj_amount_repair
+            or tdx_amount_repair
             or tdx_volume_repair
             or turnover_repair
             or fill_em_outage
@@ -477,6 +488,10 @@ def backfill(
         raise click.ClickException("--bse-tip-repair 只适用于 daily_bars")
     if bj_amount_repair and dataset != "daily_bars":
         raise click.ClickException("--bj-amount-repair 只适用于 daily_bars")
+    if tdx_amount_repair and dataset != "daily_bars":
+        raise click.ClickException("--tdx-amount-repair 只适用于 daily_bars")
+    if bj_amount_repair and tdx_amount_repair:
+        raise click.ClickException("--bj-amount-repair 与 --tdx-amount-repair 只能用一个")
     if baostock_repair:
         cfg._corporate_actions_baostock_repair = True
     if ths_repair:
@@ -505,6 +520,10 @@ def backfill(
         if start_d is None or end_d is None:
             raise click.ClickException("--bj-amount-repair 需要同时给 --start 和 --end")
         cfg._bj_amount_repair = True
+    if tdx_amount_repair:
+        if start_d is None or end_d is None:
+            raise click.ClickException("--tdx-amount-repair 需要同时给 --start 和 --end")
+        cfg._tdx_amount_repair = True
     if tdx_volume_repair:
         if dataset != "daily_bars":
             raise click.ClickException("--tdx-volume-repair 只适用于 daily_bars")
@@ -575,6 +594,7 @@ def backfill(
                 (eastmoney_date_repair, "eastmoney-date-repair"),
                 (bse_tip_repair, "bse-tip-repair"),
                 (bj_amount_repair, "bj-amount-repair"),
+                (tdx_amount_repair, "tdx-amount-repair"),
                 (tdx_volume_repair, "tdx-volume-repair"),
                 (turnover_repair, "turnover-repair"),
                 (fill_em_outage, "fill-em-outage"),

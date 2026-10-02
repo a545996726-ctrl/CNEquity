@@ -27,7 +27,6 @@ from cnequity.domain.rate_limit import (
     SINA_RATE_LIMIT_COOLDOWN_SECONDS,
     SINA_RATE_LIMIT_STATUS_CODES,
     SINA_RETRY_STATUS_CODES,
-    source_request,
 )
 from cnequity.domain.symbols import (
     filter_ingest_universe,
@@ -703,6 +702,7 @@ def _supplement_bj_amounts_from_tdx(
     *,
     start: date,
     end: date,
+    subject: str = "Beijing",
 ) -> tuple[pl.DataFrame, list[dict]]:
     """Fill Beijing turnover TDX serves and Sina never published.
 
@@ -751,7 +751,9 @@ def _supplement_bj_amounts_from_tdx(
                 "dataset": "daily_bars",
                 "severity": "info",
                 "check": "daily_bars_tdx_amount_unavailable",
-                "message": f"TDX served no Beijing history for {len(failed)} symbol(s) over {start}..{end}",
+                "message": (
+                    f"TDX served no {subject} history for {len(failed)} symbol(s) over {start}..{end}"
+                ),
                 "source": "tdx_protocol",
                 "source_limited": True,
             }
@@ -809,7 +811,7 @@ def _supplement_bj_amounts_from_tdx(
                 "severity": "info",
                 "check": "daily_bars_tdx_amount_supplement",
                 "message": (
-                    f"TDX supplied amount for {supplemented.height} Beijing row(s) over "
+                    f"TDX supplied amount for {supplemented.height} {subject} row(s) over "
                     f"{start}..{end} after exact OHLC matching"
                 ),
                 "source": "tdx_protocol",
@@ -824,7 +826,7 @@ def _supplement_bj_amounts_from_tdx(
                 "severity": "info",
                 "check": "daily_bars_tdx_amount_unserved",
                 "message": (
-                    f"TDX served no row for {unserved.height} Beijing key(s) over {start}..{end} "
+                    f"TDX served no row for {unserved.height} {subject} key(s) over {start}..{end} "
                     f"across {unserved.get_column('symbol').n_unique()} symbol(s); "
                     "those rows keep their null amount"
                 ),
@@ -840,7 +842,7 @@ def _supplement_bj_amounts_from_tdx(
                 "severity": "warning",
                 "check": "daily_bars_tdx_amount_mismatch",
                 "message": (
-                    f"TDX disagreed on price or volume for {rejected.height} Beijing row(s) over "
+                    f"TDX disagreed on price or volume for {rejected.height} {subject} row(s) over "
                     f"{start}..{end}; those rows keep their null amount"
                 ),
                 "source": "tdx_protocol",
@@ -848,6 +850,90 @@ def _supplement_bj_amounts_from_tdx(
             }
         )
     return updated, findings
+
+
+def _sina_history_amount_rows(frame: pl.DataFrame) -> pl.DataFrame:
+    """Sina daily bars on SH/SZ/BJ whose turnover was never published.
+
+    Delisted names land here because TDX serves nothing once a code has left
+    the market, and the daily gap-fill then keeps Sina's row. Asking TDX again
+    is still the right pass: a code it can still see gets an amount, and a
+    code it cannot stays on the stored row.
+    """
+    if frame.is_empty() or "source" not in frame.columns:
+        return frame.clear()
+    return frame.filter(
+        pl.col("amount").is_null()
+        & (pl.col("source") == "sina")
+        & pl.col("symbol").str.slice(-3).is_in([".SH", ".SZ", ".BJ"])
+    )
+
+
+def _repair_null_amounts_from_tdx(
+    config: Config,
+    start: date,
+    end: date,
+    run_id: str,
+    *,
+    symbols: list[str] | None,
+    select,
+    batch_prefix: str,
+    log_name: str,
+    subject: str,
+) -> dict:
+    """Walk *start*..*end* a year at a time and stage rows *select* keeps."""
+    from cnequity.query.parquet_scan import collect_parquet_root
+    from cnequity.steps.http_common import write_fetched
+
+    rows_read = rows_written = 0
+    findings: list[dict] = []
+    for index, (lo, hi) in enumerate(_yearly_slices(start, end)):
+        current = collect_parquet_root(
+            config.curated_root / "daily_bars",
+            partition_col="trade_date",
+            start=lo,
+            end=hi,
+            symbols=symbols,
+        )
+        if current.is_empty():
+            continue
+        candidate = select(dedupe_by_primary_key(current, "daily_bars"))
+        if candidate.is_empty():
+            continue
+        rows_read += candidate.height
+        updated, slice_findings = _supplement_bj_amounts_from_tdx(
+            config, candidate, start=lo, end=hi, subject=subject
+        )
+        findings.extend(slice_findings)
+        changed = updated.filter(
+            pl.col("amount").is_not_null() & (pl.col("source") == "tdx_protocol")
+        )
+        if changed.is_empty():
+            continue
+        out = write_fetched(
+            config,
+            run_id,
+            "daily_bars",
+            changed,
+            source="tdx_protocol",
+            batch_id=f"{batch_prefix}-{index:04d}",
+        )
+        rows_written += int(out.get("rows_written", 0))
+        logger.info(
+            "%s %s..%s: %d/%d row(s) supplied",
+            log_name,
+            lo,
+            hi,
+            changed.height,
+            candidate.height,
+        )
+
+    result: dict = {"rows_read": rows_read, "rows_written": rows_written}
+    if findings:
+        result["context_updates"] = {"audit_findings": findings}
+        if any(f.get("severity") == "warning" for f in findings):
+            result["status"] = "warning"
+    return result
 
 
 def repair_bj_amounts_from_tdx(
@@ -862,9 +948,6 @@ def repair_bj_amounts_from_tdx(
     Walks the window a year at a time: the whole board is half a million rows,
     and one staging write of that is neither necessary nor kind to memory.
     """
-    from cnequity.query.parquet_scan import collect_parquet_root
-    from cnequity.steps.http_common import write_fetched
-
     target = sorted(
         s
         for s in (
@@ -876,55 +959,43 @@ def repair_bj_amounts_from_tdx(
     )
     if not target:
         raise RuntimeError("BJ amount repair needs at least one Beijing symbol in scope")
+    return _repair_null_amounts_from_tdx(
+        config,
+        start,
+        end,
+        run_id,
+        symbols=target,
+        select=lambda frame: frame.filter(pl.col("amount").is_null()),
+        batch_prefix="bj-amount-repair",
+        log_name="BJ amount repair",
+        subject="Beijing",
+    )
 
-    rows_read = rows_written = 0
-    findings: list[dict] = []
-    for index, (lo, hi) in enumerate(_yearly_slices(start, end)):
-        current = collect_parquet_root(
-            config.curated_root / "daily_bars",
-            partition_col="trade_date",
-            start=lo,
-            end=hi,
-            symbols=target,
-        )
-        if current.is_empty():
-            continue
-        candidate = dedupe_by_primary_key(current, "daily_bars").filter(pl.col("amount").is_null())
-        if candidate.is_empty():
-            continue
-        rows_read += candidate.height
-        updated, slice_findings = _supplement_bj_amounts_from_tdx(
-            config, candidate, start=lo, end=hi
-        )
-        findings.extend(slice_findings)
-        changed = updated.filter(
-            pl.col("amount").is_not_null() & (pl.col("source") == "tdx_protocol")
-        )
-        if changed.is_empty():
-            continue
-        out = write_fetched(
-            config,
-            run_id,
-            "daily_bars",
-            changed,
-            source="tdx_protocol",
-            batch_id=f"bj-amount-repair-{index:04d}",
-        )
-        rows_written += int(out.get("rows_written", 0))
-        logger.info(
-            "BJ amount repair %s..%s: %d/%d row(s) supplied",
-            lo,
-            hi,
-            changed.height,
-            candidate.height,
-        )
 
-    result: dict = {"rows_read": rows_read, "rows_written": rows_written}
-    if findings:
-        result["context_updates"] = {"audit_findings": findings}
-        if any(f.get("severity") == "warning" for f in findings):
-            result["status"] = "warning"
-    return result
+def repair_sina_history_amounts_from_tdx(
+    config: Config,
+    start: date,
+    end: date,
+    run_id: str,
+    symbols: list[str] | None,
+) -> dict:
+    """Fill turnover on Sina-sourced SH/SZ/BJ history from TDX, when TDX has it.
+
+    The stored price and volume stay. A delisted code TDX no longer serves is
+    counted and left on its Sina row; that absence is not a failed bar.
+    """
+    scope = _resolve_daily_bar_scope(config, symbols) if symbols else None
+    return _repair_null_amounts_from_tdx(
+        config,
+        start,
+        end,
+        run_id,
+        symbols=scope,
+        select=_sina_history_amount_rows,
+        batch_prefix="tdx-amount-repair",
+        log_name="TDX amount repair",
+        subject="Sina history",
+    )
 
 
 _TDX_VOLUME_REPAIR_BATCH = 100
@@ -1174,6 +1245,7 @@ def repair_daily_bar_turnover(
     serve or that disagree keep their stored value and are counted.
     """
     from cnequity.adapters.baostock.delisted_bars import fetch_delisted_bars
+    from cnequity.domain.http_policy import SourceCoolingDown
     from cnequity.domain.units import turnover_defect_expr
     from cnequity.query.parquet_scan import collect_parquet_root
     from cnequity.steps.http_common import write_fetched
@@ -1226,11 +1298,29 @@ def repair_daily_bar_turnover(
     for row in spans.iter_rows(named=True):
         groups.setdefault((row["first"], row["last"]), []).append(row["symbol"])
     batch = 0
+    stopped: str | None = None
     for (first, last), names in groups.items():
         lo, hi = max(start, date(first, 1, 1)), min(end, date(last, 12, 31))
         for offset in range(0, len(names), _TURNOVER_REPAIR_BATCH):
             chunk = names[offset : offset + _TURNOVER_REPAIR_BATCH]
-            rows, chunk_failed = fetch_delisted_bars(chunk, lo, hi, config=config)
+            try:
+                rows, chunk_failed = fetch_delisted_bars(chunk, lo, hi, config=config)
+            except SourceCoolingDown as exc:
+                # Login refused before this chunk. Rows already staged stay;
+                # a rerun only asks for symbols that are still defective.
+                stopped = str(exc)
+                logger.warning(
+                    "turnover repair stopped: %s; a rerun continues from rows still defective",
+                    exc,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 — one dead session is one batch
+                # A login that times out loses this batch, not the batches
+                # already staged: they still publish, and a rerun only asks
+                # for rows that are still defective.
+                logger.warning("turnover repair: %d symbol(s) not served: %s", len(chunk), exc)
+                failed.update(chunk)
+                continue
             failed.update(chunk_failed)
             fresh = pl.DataFrame(
                 rows,
@@ -1266,6 +1356,8 @@ def repair_daily_bar_turnover(
                 counts["rows_replaced"],
                 counts["rows_checked"],
             )
+        if stopped:
+            break
 
     findings: list[dict] = [
         {
@@ -1294,6 +1386,21 @@ def repair_daily_bar_turnover(
                 "source": "baostock",
                 "rows_disagreeing": totals["rows_disagreeing"],
                 "failed_symbols": sorted(failed)[:50],
+            }
+        )
+    if stopped:
+        findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "warning",
+                "check": "daily_bars_turnover_repair_stopped",
+                "message": (
+                    "turnover repair stopped at a BaoStock access limit; "
+                    "staged replacements still publish, and the next run continues "
+                    "from rows that are still defective"
+                ),
+                "source": "baostock",
+                "error": stopped,
             }
         )
     result: dict = {
@@ -1522,6 +1629,11 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         start = incremental_window(config, "daily_bars", trade_date)
         end = trade_date
     _reject_unfinished_daily_bar_window(config, end)
+
+    if getattr(config, "_tdx_amount_repair", False):
+        return repair_sina_history_amounts_from_tdx(
+            config, start, end, run_id, getattr(config, "_backfill_symbols", None)
+        )
 
     if getattr(config, "_bj_amount_repair", False):
         return repair_bj_amounts_from_tdx(
@@ -5025,8 +5137,10 @@ def _delisted_universe(config: Config, start: date, end: date) -> list[str]:
     snapshot lost — the survivorship gap, 16.8% of the cross-section on
     2016-06-30 and still 6.0% on 2020-06-30.
     """
-    from cnequity.adapters.baostock._session import _login, import_baostock
+    from cnequity.adapters.baostock._session import _finish_session, _login, import_baostock
+    from cnequity.adapters.baostock.access import hold_baostock_connection
     from cnequity.adapters.baostock.delisted_bars import roster_on
+    from cnequity.domain.http_policy import SourceCoolingDown
     from cnequity.query.parquet_scan import scan_parquet_root
 
     bars_root = config.curated_root / "daily_bars"
@@ -5034,33 +5148,35 @@ def _delisted_universe(config: Config, start: date, end: date) -> list[str]:
     have = set(bars.select("symbol").unique().collect()["symbol"].to_list())
 
     bs = import_baostock()
-    # Keep compatibility with test/integration doubles that expose the
-    # historical one-argument _login hook; real login traffic is still held
-    # under the source lease when this path uses the built-in helper.
-    with source_request(config, "baostock"):
-        _login(bs)
     missing: set[str] = set()
-    try:
-        for year in range(start.year, end.year + 1):
-            for month in _ROSTER_SAMPLE_MONTHS:
-                day = date(year, month, 28)
-                if not (start <= day <= end):
-                    continue
-                roster = roster_on(day, bs=bs, login=False, config=config)
-                if not roster:
-                    continue
-                gap = roster - have
-                if gap:
-                    logger.info(
-                        "roster %s: %d stocks, %d absent from daily_bars",
-                        day,
-                        len(roster),
-                        len(gap),
-                    )
-                missing |= gap
-    finally:
-        with source_request(config, "baostock"):
-            bs.logout()
+    blacklisted = False
+    # One login covers every sample day. roster_on(login=False) reuses it, so
+    # the connection lease stays with this caller rather than each sample.
+    with hold_baostock_connection(config):
+        _login(bs, config=config)
+        try:
+            for year in range(start.year, end.year + 1):
+                for month in _ROSTER_SAMPLE_MONTHS:
+                    day = date(year, month, 28)
+                    if not (start <= day <= end):
+                        continue
+                    roster = roster_on(day, bs=bs, login=False, config=config)
+                    if not roster:
+                        continue
+                    gap = roster - have
+                    if gap:
+                        logger.info(
+                            "roster %s: %d stocks, %d absent from daily_bars",
+                            day,
+                            len(roster),
+                            len(gap),
+                        )
+                    missing |= gap
+        except SourceCoolingDown:
+            blacklisted = True
+            raise
+        finally:
+            _finish_session(bs, config=config, blacklisted=blacklisted)
     return sorted(missing)
 
 

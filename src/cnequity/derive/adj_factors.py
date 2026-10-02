@@ -298,6 +298,28 @@ def _cache_path(config: Config, symbol: str, adjust_type: str) -> Path:
     return cache_dir / f"{safe}_{adjust_type}.parquet"
 
 
+_OVERRIDE_MEMO: dict[Path, tuple[float, frozenset[str]]] = {}
+
+
+def _overridden_symbols(config: Config) -> frozenset[str]:
+    """Securities whose factor series arbitration moved to baostock.
+
+    Read once per state change rather than once per symbol of a derive.
+    """
+    from cnequity.derive.factor_arbitration import source_overrides
+
+    path = config.meta_root / "state" / "adj_factors.json"
+    try:
+        stamp = path.stat().st_mtime
+    except FileNotFoundError:
+        return frozenset()
+    memo = _OVERRIDE_MEMO.get(path)
+    if memo is None or memo[0] != stamp:
+        memo = (stamp, frozenset(source_overrides(config)))
+        _OVERRIDE_MEMO[path] = memo
+    return memo[1]
+
+
 def _load_cache(config: Config, symbol: str, adjust_type: str) -> pl.DataFrame | None:
     path = _cache_path(config, symbol, adjust_type)
     if not path.exists():
@@ -456,6 +478,52 @@ def _uncovered_symbols(config: Config) -> set[str]:
     return candidates
 
 
+def _stale_cache_symbols(config: Config, through: date) -> set[str]:
+    """Symbols whose Sina cache was written before their latest ex-date.
+
+    The event refresh only fires on the session an ex-date lands on. A missed
+    daily run, or an action recorded after its ex-date, leaves the cache
+    without that step, and nothing asks Sina again: the factor series simply
+    lacks the dividend. Compare each cache's write date with the latest
+    recorded ex-date up to *through*.
+    """
+    from datetime import datetime
+
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    root = config.curated_root / "corporate_actions"
+    cache_dir = config.meta_root / "adj_factors_cache"
+    if not dataset_has_parquet(root) or not cache_dir.is_dir():
+        return set()
+    written: dict[str, date] = {}
+    for entry in cache_dir.iterdir():
+        stem, _, adjust_type = entry.stem.rpartition("_")
+        # Only the stored type is refreshed; leftover qfq caches are not read.
+        if entry.suffix != ".parquet" or adjust_type != STORED_ADJUST_TYPE or "_" not in stem:
+            continue
+        code, _, exchange = stem.rpartition("_")
+        written[f"{code}.{exchange}"] = datetime.fromtimestamp(entry.stat().st_mtime).date()
+    if not written:
+        return set()
+    latest = (
+        dedupe_lazy_by_primary_key(scan_parquet_root(root), "corporate_actions")
+        .filter(pl.col("ex_date") <= through)
+        .group_by("symbol")
+        .agg(pl.col("ex_date").max())
+        .collect()
+    )
+    cached = pl.DataFrame(
+        {"symbol": list(written), "written": list(written.values())},
+        schema={"symbol": pl.Utf8, "written": pl.Date},
+    )
+    return set(
+        latest.join(cached, on="symbol")
+        .filter(pl.col("written") < pl.col("ex_date"))
+        .get_column("symbol")
+        .to_list()
+    )
+
+
 def _event_refresh_symbols(config: Config, trade_date: date) -> set[str]:
     """Symbols whose factor cache should be refreshed for this trading date."""
     return _corporate_action_symbols_on(config, trade_date) | _new_listing_symbols_on(
@@ -489,6 +557,21 @@ def _resolve_factors(
     rows stamped with the configured source when a row came from somewhere else
     would be exactly the provenance this lake refuses to write.
     """
+    if adjust_type == STORED_ADJUST_TYPE and symbol in _overridden_symbols(config):
+        # Arbitration showed Sina wrong for this security and baostock right:
+        # its whole series comes from baostock, with a cache of its own so an
+        # append continues at baostock's level rather than Sina's.
+        cached = _load_cache(config, symbol, f"{adjust_type}_{BACKUP_SOURCE}")
+        if not _needs_refresh(cached, force):
+            return cached, BACKUP_SOURCE
+        backup = _resolve_factors_via_backup(config, symbol, adjust_type, sym_bars)
+        if backup is not None:
+            _save_cache(config, symbol, f"{adjust_type}_{BACKUP_SOURCE}", backup)
+            return backup, BACKUP_SOURCE
+        if cached is not None and not cached.is_empty():
+            return cached, BACKUP_SOURCE
+        logger.warning("adj_factors: %s is switched to baostock but it did not answer", symbol)
+
     cached = _load_cache(config, symbol, adjust_type)
     if not _needs_refresh(cached, force):
         return cached, config.adj_factors_source
@@ -1226,6 +1309,19 @@ def _compute_adj_factors_locked(
         )
     if isinstance(latest_bar_date, date):
         refresh_set |= _event_refresh_symbols(config, latest_bar_date)
+        stale = sorted(
+            _stale_cache_symbols(config, latest_bar_date) - refresh_set - source_unavailable_symbols
+        )
+        if stale:
+            batch = stale[:UNCOVERED_REFRESH_LIMIT]
+            logger.info(
+                "adj_factors: %d symbol(s) have a factor cache older than their latest "
+                "ex-date; refreshing %d this run (e.g. %s)",
+                len(stale),
+                len(batch),
+                batch[:5],
+            )
+            refresh_set |= set(batch)
     if not full and watermark is not None:
         # Self-heal history the append-only path cannot see — see
         # `_uncovered_symbols`. Only meaningful when that path is in play:

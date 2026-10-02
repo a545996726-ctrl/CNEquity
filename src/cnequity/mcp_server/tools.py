@@ -342,8 +342,8 @@ def query_bars(
         raise ToolError(
             f"query_bars handles {', '.join(BAR_DATASETS)}; for {dataset!r} use query_dataset"
         )
-    if adjust not in (None, "qfq", "hfq"):
-        raise ToolError(f"adjust must be 'qfq', 'hfq' or omitted, got {adjust!r}")
+    if adjust not in (None, "qfq", "hfq", "total_return"):
+        raise ToolError(f"adjust must be 'qfq', 'hfq', 'total_return' or omitted, got {adjust!r}")
     if universe not in (None, "all_a", "all_a_sh_sz"):
         raise ToolError(f"universe must be 'all_a', 'all_a_sh_sz' or omitted, got {universe!r}")
 

@@ -52,3 +52,19 @@ def valuation_basis(config_path: str, apply: bool):
     from cnequity.storage.valuation_repair import repair_valuation_basis
 
     _emit(repair_valuation_basis(_cfg(config_path), apply=apply))
+
+
+@repair.command("corporate-action-gaps")
+@config_option
+@click.option("--apply", is_flag=True, help="向 Baostock 补取并发布新版本；默认只离线输出计划。")
+def corporate_action_gaps(config_path: str, apply: bool):
+    """补上新浪与 Baostock 因子都有台阶、湖里却没有记录的除权事件。
+
+    \b
+    依据最近一次 `cne derive adj_factor_source` 的证据。附近 10 天内已有、但日期错开的
+    记录，若其条款能解释该台阶，就移到台阶日；其余按证券和年份向 Baostock 取分红，
+    只收除权日正是台阶日、且条款能解释台阶的行。解释不了的保持缺口，不会凭空补。
+    """
+    from cnequity.storage.corporate_action_gap_repair import repair_corporate_action_gaps
+
+    _emit(repair_corporate_action_gaps(_cfg(config_path), apply=apply))
