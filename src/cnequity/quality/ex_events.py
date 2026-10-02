@@ -21,6 +21,7 @@ from datetime import date
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.action_sessions import effective_session
 from cnequity.query.parquet_scan import (
     dataset_has_parquet,
     dedupe_lazy_by_primary_key,
@@ -108,11 +109,24 @@ def unexplained_factor_steps(
     if not dataset_has_parquet(actions_root):
         return steps.sort(["ex_date", "symbol"])
     recorded = (
-        scan_parquet_root(actions_root, partition_col="ex_date", start=first, end=upto)
+        scan_parquet_root(
+            actions_root,
+            partition_col="ex_date",
+            start=anchor,
+            end=upto,
+            symbols=factors.get_column("symbol").unique().to_list(),
+        )
         .select("symbol", "ex_date")
         .unique()
         .collect()
     )
+    if not recorded.is_empty():
+        recorded = (
+            effective_session(recorded, factors.select("symbol", "trade_date"))
+            .filter(pl.col("effective_session").is_not_null())
+            .select("symbol", pl.col("effective_session").alias("ex_date"))
+            .unique()
+        )
     return (
         steps.join(recorded, on=["symbol", "ex_date"], how="anti").sort(["ex_date", "symbol"])
         if not recorded.is_empty()

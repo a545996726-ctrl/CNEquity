@@ -14,6 +14,7 @@ from cnequity.adapters.sina.adj_factors import (
     fetch_adj_factor_series,
 )
 from cnequity.config import Config
+from cnequity.domain.action_sessions import effective_session
 from cnequity.domain.canonical import dedupe_lazy_by_primary_key
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.schemas import with_provenance
@@ -757,6 +758,7 @@ _EMPTY_ACTION_TERMS = pl.DataFrame(
         "symbol": pl.Utf8,
         "ex_date": pl.Date,
         **{term: pl.Float64 for term in _ACTION_TERMS},
+        "_reference": pl.Float64,
     }
 )
 
@@ -877,6 +879,18 @@ def _action_terms(config: Config, symbols: list[str], start: date, end: date) ->
         if column not in actions.columns:
             actions = actions.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
     split_terms = _unit_split_terms(actions)
+    # A restructuring conversion publishes its own ex-rights reference price;
+    # that price, not the share formula, sets the step.
+    if "reference_price" not in actions.columns:
+        actions = actions.with_columns(pl.lit(None, dtype=pl.Float64).alias("reference_price"))
+    split_terms = split_terms.join(
+        actions.group_by("symbol", "ex_date").agg(
+            pl.col("reference_price").cast(pl.Float64).max().alias("_reference")
+        ),
+        on=["symbol", "ex_date"],
+        how="full",
+        coalesce=True,
+    )
     has_source = "source" in actions.columns
     terms = actions.select(
         "symbol",
@@ -991,9 +1005,31 @@ def _corporate_action_crosscheck_findings(config: Config, out: pl.DataFrame) -> 
     # divergence is still recorded — as a warning that names the missing feed.
     has_action_feed = dataset_has_parquet(config.curated_root / "corporate_actions")
 
+    # An ex-date in a trading halt takes effect on the next traded session,
+    # which is where the factor steps; compare the action there.
+    terms = _action_terms(config, symbols, start, end)
+    if not terms.is_empty():
+        terms = (
+            effective_session(terms, steps.select("symbol", "trade_date"))
+            .filter(pl.col("effective_session").is_not_null())
+            .drop("ex_date")
+            .rename({"effective_session": "ex_date"})
+        )
+        if terms.select("symbol", "ex_date").is_duplicated().any():
+            # Two actions inside one halt land on the same session; their
+            # terms add up there as they would on a single ex-date.
+            reference = terms.group_by("symbol", "ex_date").agg(pl.col("_reference").max())
+            terms = (
+                terms.group_by("symbol", "ex_date")
+                .agg(
+                    [pl.col(t).sum() for t in _ACTION_TERMS if t != "_split"]
+                    + [pl.col("_split").product()]
+                )
+                .join(reference, on=["symbol", "ex_date"], how="left")
+            )
     steps = (
         steps.join(
-            _action_terms(config, symbols, start, end),
+            terms,
             left_on=["symbol", "trade_date"],
             right_on=["symbol", "ex_date"],
             how="left",
@@ -1018,9 +1054,10 @@ def _corporate_action_crosscheck_findings(config: Config, out: pl.DataFrame) -> 
     diverged = (
         steps.filter(pl.col("_ref_price") > 0)
         .with_columns(
-            (pl.col("_share_mult") * pl.col("_prev_close") / pl.col("_ref_price")).alias(
-                "_expected"
-            )
+            pl.when(pl.col("_reference").is_not_null())
+            .then(pl.col("_prev_close") / pl.col("_reference"))
+            .otherwise(pl.col("_share_mult") * pl.col("_prev_close") / pl.col("_ref_price"))
+            .alias("_expected")
         )
         .filter(pl.col("_expected").is_finite() & (pl.col("_expected") > 0))
         .with_columns(

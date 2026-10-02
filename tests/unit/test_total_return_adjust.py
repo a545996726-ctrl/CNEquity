@@ -151,3 +151,23 @@ def test_sql_macro_matches_the_python_total_return(lake):
             "WHERE symbol = '510300.SH' ORDER BY trade_date"
         ).fetchall()
     assert [row[0] for row in rows] == pytest.approx(_closes(lake, "total_return", "510300.SH"))
+
+
+def test_halted_fund_payout_lands_on_resume_in_python_and_sql(lake, halted_ex_event):
+    import duckdb
+
+    from cnequity.query.views import ensure_duckdb_views
+
+    halt = halted_ex_event("510300.SH", DAYS[1], DAYS[2], DAYS[3])
+    bar_path = lake.curated_root / f"daily_bars/trade_date={halt['ex_date']}/part.parquet"
+    pl.read_parquet(bar_path).filter(pl.col("symbol") != halt["symbol"]).write_parquet(bar_path)
+
+    expected = [2.0, 2.0, 1.95 * 2.0 / 1.9]
+    assert _closes(lake, "total_return", halt["symbol"]) == pytest.approx(expected)
+    db = ensure_duckdb_views(lake)
+    with duckdb.connect(str(db), read_only=True) as con:
+        rows = con.execute(
+            "SELECT tr_close FROM daily_bars_total_return(NULL, NULL) "
+            "WHERE symbol = '510300.SH' ORDER BY trade_date"
+        ).fetchall()
+    assert [row[0] for row in rows] == pytest.approx(expected)

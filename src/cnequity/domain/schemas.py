@@ -389,6 +389,10 @@ CORPORATE_ACTIONS_SCHEMA = {
     "split_factor": pl.Float64,  # unit_split: units after / before; 1 is neutral
     "allotment_ratio": pl.Float64,  # per share (配股: offered shares per held share)
     "allotment_price": pl.Float64,  # per allotted share (yuan), NOT a ratio
+    # reorg_transfer only: the ex-rights reference price (yuan per share after
+    # the event) the issuer publishes for a restructuring conversion. Its
+    # price effect follows the court-approved formula, not 1 + transfer_ratio.
+    "reference_price": pl.Float64,
     "source": pl.Utf8,
     "data_version": pl.Utf8,
     "fetched_at": FETCHED_AT_DTYPE,
@@ -1275,9 +1279,23 @@ def validate_dataframe(
         df = normalize_legacy(df)
 
     if dataset == "corporate_actions":
-        for name, dtype in (("payment_date", pl.Date), ("payment_source", pl.Utf8)):
+        for name, dtype in (
+            ("payment_date", pl.Date),
+            ("payment_source", pl.Utf8),
+            ("reference_price", pl.Float64),
+        ):
             if name not in df.columns:
                 df = df.with_columns(pl.lit(None, dtype=dtype).alias(name))
+        if "action_type" in df.columns:
+            is_reorg = pl.col("action_type") == "reorg_transfer"
+            reference = pl.col("reference_price").cast(pl.Float64, strict=False)
+            bad_reference = (is_reorg & (reference.is_null() | ~(reference > 0))) | (
+                ~is_reorg & reference.is_not_null()
+            )
+            if df.filter(bad_reference).height:
+                raise SchemaValidationError(
+                    "reference_price is required on reorg_transfer rows and only allowed there"
+                )
         # Old rows predate explicit fund unit splits and retain neutral units.
         # A new split event must supply its ratio; never guess it from a bonus.
         is_split = (

@@ -26,6 +26,7 @@ from pathlib import Path
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.domain.action_sessions import effective_session
 from cnequity.domain.canonical import dedupe_by_primary_key, dedupe_lazy_by_primary_key
 from cnequity.domain.schemas import sanitize_dataset_rows, validate_dataframe, with_provenance
 from cnequity.file_lock import lake_mutation_lock
@@ -83,7 +84,9 @@ def _terms(actions: pl.DataFrame) -> pl.DataFrame:
         (pl.col("bonus_ratio").fill_null(0) + pl.col("transfer_ratio").fill_null(0))
         .sum()
         .alias("shares"),
-        (pl.col("action_type") == "allotment").any().alias("allotment"),
+        # Terms the share formula cannot price: an allotment's cash leg, and a
+        # restructuring conversion priced at its published reference price.
+        pl.col("action_type").is_in(["allotment", "reorg_transfer"]).any().alias("allotment"),
     )
 
 
@@ -107,8 +110,9 @@ def _prev_closes(config: Config, symbols: list[str]) -> pl.DataFrame:
     )
 
 
-def _sina_jump_dates(config: Config, symbols: list[str]) -> pl.DataFrame:
-    factors = (
+def _factor_sessions(config: Config, symbols: list[str]) -> pl.DataFrame:
+    """Sina hfq factor per traded session: the sessions a factor can step on."""
+    return (
         dedupe_lazy_by_primary_key(
             scan_parquet_root(config.derived_root / "adj_factors", partition_col="trade_date"),
             "adj_factors",
@@ -118,23 +122,34 @@ def _sina_jump_dates(config: Config, symbols: list[str]) -> pl.DataFrame:
         .collect()
         .sort("symbol", "trade_date")
     )
-    return factors.filter(
-        (pl.col("factor") / pl.col("factor").shift(1).over("symbol") - 1).abs() > 1e-6
-    ).select("symbol", pl.col("trade_date").alias("d0"))
+
+
+def _effective(frame: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
+    """Add ``effective``: the first traded session on or after each ``ex_date``.
+
+    An ex-date in a trading halt, or on a day the market was shut, takes
+    effect when the security next trades; that is where its factor steps.
+    """
+    return effective_session(frame, factors).rename({"effective_session": "effective"})
 
 
 def plan_moves(
-    missing: pl.DataFrame, actions: pl.DataFrame, closes: pl.DataFrame, jumps: pl.DataFrame
+    missing: pl.DataFrame, actions: pl.DataFrame, closes: pl.DataFrame, factors: pl.DataFrame
 ) -> pl.DataFrame:
     """``(symbol, d0, step_date)``: recorded dates to move onto a missing step.
 
-    The recorded date must be silent in Sina's factor, carry no allotment
-    (whose terms this check cannot price), and its terms must explain the
-    step. The nearest fitting date wins, and a date is moved at most once.
+    The recorded date must be a session the security traded without a Sina
+    factor step: a date in a halt is a genuine ex-date whose step lands on
+    resumption, not a misdated row. It must carry no allotment (whose terms
+    this check cannot price), and its terms must explain the step. The
+    nearest fitting date wins, and a date is moved at most once.
     """
     empty = pl.DataFrame(schema={"symbol": pl.Utf8, "d0": pl.Date, "step_date": pl.Date})
     if missing.is_empty() or actions.is_empty():
         return empty
+    quiet = factors.filter(
+        (pl.col("factor") / pl.col("factor").shift(1).over("symbol") - 1).abs().fill_null(0) <= 1e-6
+    ).select("symbol", pl.col("trade_date").alias("d0"))
     near = (
         missing.join(
             _terms(actions).rename({"ex_date": "d0"}),
@@ -142,7 +157,7 @@ def plan_moves(
         )
         .with_columns((pl.col("d0") - pl.col("step_date")).dt.total_days().alias("offset"))
         .filter(pl.col("offset").abs().is_between(1, _MAX_OFFSET_DAYS) & ~pl.col("allotment"))
-        .join(jumps, on=["symbol", "d0"], how="anti")
+        .join(quiet, on=["symbol", "d0"], how="semi")
         .join(closes, on=["symbol", "step_date"], how="left")
         .filter(
             _fits(
@@ -161,26 +176,113 @@ def plan_moves(
     )
 
 
-def pick_added(fetched: pl.DataFrame, unpaired: pl.DataFrame, closes: pl.DataFrame) -> pl.DataFrame:
-    """Baostock rows dated on a missing step whose terms explain that step."""
+def pick_added(
+    fetched: pl.DataFrame, unpaired: pl.DataFrame, closes: pl.DataFrame, factors: pl.DataFrame
+) -> pl.DataFrame:
+    """Baostock rows that take effect on a missing step and explain it.
+
+    Rows keep Baostock's own ex-date; they are matched to the step through
+    the first traded session on or after it.
+    """
     if fetched.is_empty() or unpaired.is_empty():
         return fetched.clear()
-    on_step = fetched.join(
-        unpaired.rename({"step_date": "ex_date"}), on=["symbol", "ex_date"], how="semi"
+    steps = unpaired.rename({"step_date": "effective"})
+    on_step = _effective(fetched, factors).join(
+        steps.select("symbol", "effective"), on=["symbol", "effective"], how="semi"
     )
     fitting = (
-        _terms(on_step)
-        .join(unpaired.rename({"step_date": "ex_date"}), on=["symbol", "ex_date"])
-        .join(closes.rename({"step_date": "ex_date"}), on=["symbol", "ex_date"], how="left")
+        on_step.group_by("symbol", "effective")
+        .agg(
+            pl.col("cash_dividend").fill_null(0).sum().alias("cash"),
+            (pl.col("bonus_ratio").fill_null(0) + pl.col("transfer_ratio").fill_null(0))
+            .sum()
+            .alias("shares"),
+        )
+        .join(steps, on=["symbol", "effective"])
+        .join(closes.rename({"step_date": "effective"}), on=["symbol", "effective"], how="left")
         .filter(
             _fits(
                 _implied_step(pl.col("cash"), pl.col("shares"), pl.col("prev_close")),
                 pl.col("step"),
             )
         )
-        .select("symbol", "ex_date")
+        .select("symbol", "effective")
     )
-    return on_step.join(fitting, on=["symbol", "ex_date"], how="semi")
+    return on_step.join(fitting, on=["symbol", "effective"], how="semi").drop("effective")
+
+
+def pick_reorg(
+    notices: dict[tuple[str, date], list[dict]],
+    unpaired: pl.DataFrame,
+    closes: pl.DataFrame,
+    factors: pl.DataFrame,
+) -> pl.DataFrame:
+    """``reorg_transfer`` rows whose notices explain a missing step.
+
+    The notices must agree on one ratio and one ex-date that takes effect on
+    the step's session, and exactly one stated reference price must give the
+    step as ``previous close / reference price``.
+    """
+    from cnequity.adapters.cninfo.reorg_notices import combine_notices
+
+    steps = {
+        (row["symbol"], row["step_date"]): row["step"] for row in unpaired.iter_rows(named=True)
+    }
+    prev = {
+        (row["symbol"], row["step_date"]): row["prev_close"] for row in closes.iter_rows(named=True)
+    }
+    rows = []
+    for (symbol, step_date), found in notices.items():
+        event = combine_notices(found)
+        step, close = steps.get((symbol, step_date)), prev.get((symbol, step_date))
+        if event is None or step is None or not close:
+            continue
+        lands = _effective(
+            pl.DataFrame({"symbol": [symbol], "ex_date": [event["ex_date"]]}), factors
+        ).get_column("effective")[0]
+        if lands != step_date:
+            continue
+        # A stated price is rounded to the cent; that alone moves the implied
+        # step by about (1 + step) * 0.005 / price. A second candidate further
+        # off than that (an early estimate) does not fit.
+        fitting = [
+            p
+            for p in event["reference_prices"]
+            if abs(close / p - 1 - step) <= max(_FIT_ABSOLUTE, (1 + step) * 0.006 / p)
+        ]
+        if len(fitting) != 1:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "ex_date": event["ex_date"],
+                "action_type": "reorg_transfer",
+                "cash_dividend": 0.0,
+                "bonus_ratio": 0.0,
+                "transfer_ratio": event["transfer_ratio"],
+                "allotment_ratio": None,
+                "allotment_price": None,
+                "reference_price": fitting[0],
+                "payment_date": None,
+                "payment_source": None,
+            }
+        )
+    return pl.DataFrame(
+        rows,
+        schema={
+            "symbol": pl.Utf8,
+            "ex_date": pl.Date,
+            "action_type": pl.Utf8,
+            "cash_dividend": pl.Float64,
+            "bonus_ratio": pl.Float64,
+            "transfer_ratio": pl.Float64,
+            "allotment_ratio": pl.Float64,
+            "allotment_price": pl.Float64,
+            "reference_price": pl.Float64,
+            "payment_date": pl.Date,
+            "payment_source": pl.Utf8,
+        },
+    )
 
 
 def _default_fetch(config: Config, run_id: str) -> Fetch:
@@ -205,6 +307,7 @@ def repair_corporate_action_gaps(
     apply: bool = False,
     evidence: Path | None = None,
     fetch: Fetch | None = None,
+    reorg_fetch: Callable[..., tuple[dict, list[dict]]] | None = None,
 ) -> dict:
     """Plan (default, offline) or fetch and publish the gap repair.
 
@@ -218,9 +321,23 @@ def repair_corporate_action_gaps(
         return plan["report"]
     run_id = f"corporate-action-gaps-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     fetched, failed = _fetch_gaps(plan["unpaired"], fetch or _default_fetch(config, run_id))
+    # What Baostock's dividends do not explain goes to the issuer's own notices.
+    picked = pick_added(fetched, plan["unpaired"], plan["closes"], plan["factors"])
+    remaining = plan["unpaired"]
+    if picked.height:
+        explained = _effective(picked, plan["factors"]).select(
+            "symbol", pl.col("effective").alias("step_date")
+        )
+        remaining = remaining.join(explained, on=["symbol", "step_date"], how="anti")
+    if reorg_fetch is None:
+        from cnequity.adapters.cninfo.reorg_notices import fetch_reorg_notices as reorg_fetch
+    notices, notice_diagnostics = reorg_fetch(
+        config, run_id, list(remaining.select("symbol", "step_date").iter_rows())
+    )
     with lake_mutation_lock(config.meta_root, blocking=True):
         fresh = _plan(config, evidence, ensure=True)
-        return _publish(config, fresh, fetched, failed, run_id=run_id, evidence=evidence)
+        fresh["report"]["notice_diagnostics"] = notice_diagnostics[:50]
+        return _publish(config, fresh, fetched, failed, notices, run_id=run_id, evidence=evidence)
 
 
 def _plan(config: Config, evidence: Path, *, ensure: bool) -> dict:
@@ -250,11 +367,12 @@ def _plan(config: Config, evidence: Path, *, ensure: bool) -> dict:
         _DATASET,
     )
     closes = _prev_closes(config, symbols)
+    factors = _factor_sessions(config, symbols)
     moves = plan_moves(
         missing,
         current.filter(pl.col("symbol").is_in(symbols)),
         closes,
-        _sina_jump_dates(config, symbols),
+        factors,
     )
     unpaired = missing.join(
         moves.select("symbol", "step_date"), on=["symbol", "step_date"], how="anti"
@@ -266,7 +384,7 @@ def _plan(config: Config, evidence: Path, *, ensure: bool) -> dict:
         .unique()
         .height,
     )
-    plan.update(current=current, closes=closes, moves=moves, unpaired=unpaired)
+    plan.update(current=current, closes=closes, factors=factors, moves=moves, unpaired=unpaired)
     return plan
 
 
@@ -297,13 +415,14 @@ def _publish(
     plan: dict,
     fetched: pl.DataFrame,
     failed: list[str],
+    notices: dict[tuple[str, date], list[dict]],
     *,
     run_id: str,
     evidence: Path,
 ) -> dict:
     report, store = plan["report"], plan["store"]
     current, moves = plan["current"], plan["moves"]
-    added = pick_added(fetched, plan["unpaired"], plan["closes"])
+    added = pick_added(fetched, plan["unpaired"], plan["closes"], plan["factors"])
     report.update(
         added_events=added.select("symbol", "ex_date").unique().height if added.height else 0,
         added_rows=added.height,
@@ -321,6 +440,11 @@ def _publish(
     )
     if not added.is_empty():
         added = with_provenance(added, source="baostock", data_version="v1")
+    reorg = pick_reorg(notices, plan["unpaired"], plan["closes"], plan["factors"])
+    report["reorg_transfers"] = reorg.height
+    if not reorg.is_empty():
+        reorg = with_provenance(reorg, source="cninfo", data_version="v1")
+        added = reorg if added.is_empty() else pl.concat([added, reorg], how="diagonal_relaxed")
     parts = [kept, moved] + ([added] if not added.is_empty() else [])
     repaired = dedupe_by_primary_key(
         validate_dataframe(pl.concat(parts, how="diagonal_relaxed"), _DATASET), _DATASET
@@ -348,6 +472,15 @@ def _publish(
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
 
     contract = dataset_contract(_DATASET)
+    from cnequity.quality.publication import check_repair_publication
+
+    affected_symbols = frozenset(
+        moves.get_column("symbol").to_list()
+        + (added.get_column("symbol").to_list() if not added.is_empty() else [])
+    )
+    publication = check_repair_publication(
+        config, _DATASET, run_id, changed, symbols=affected_symbols
+    )
     revision = store.commit(
         _DATASET,
         run_id=run_id,
@@ -359,6 +492,7 @@ def _publish(
             "evidence": str(evidence),
             "moves": moves.height,
             "added_rows": report["added_rows"],
+            "publication_audit": publication["report_path"],
         },
     )
     report.update(
@@ -366,5 +500,6 @@ def _publish(
         run_id=run_id,
         partitions_changed=len(changed),
         revision=None if revision is None else revision.revision,
+        publication_audit=publication["report_path"],
     )
     return report

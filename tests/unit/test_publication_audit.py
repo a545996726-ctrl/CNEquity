@@ -1,3 +1,4 @@
+import shutil
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -6,7 +7,7 @@ import polars as pl
 import pytest
 
 from cnequity.config import Config
-from cnequity.quality.publication import evaluate_publication
+from cnequity.quality.publication import check_repair_publication, evaluate_publication
 from cnequity.query.reader import load
 from cnequity.steps.finalize import step_compact
 from cnequity.storage.parquet import StagingWriter
@@ -148,6 +149,101 @@ def test_audit_failure_cannot_publish_in_block_mode(tmp_path, monkeypatch):
     )
     assert report["blocked"]
     assert report["new_errors"][0]["check"] == "candidate_audit_failed"
+
+
+def test_repair_refuses_a_new_factor_action_contradiction_even_with_gate_off(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "lake")
+    before, step = date(2024, 6, 27), date(2024, 6, 28)
+    for day, factor in ((before, 1.0), (step, 2.0)):
+        path = cfg.derived_root / f"adj_factors/trade_date={day}/part.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "trade_date": [day],
+                "adjust_type": ["hfq"],
+                "factor": [factor],
+                "source": ["sina"],
+                "data_version": ["v1"],
+                "fetched_at": ["2024-06-29T00:00:00Z"],
+            }
+        ).write_parquet(path)
+    action = cfg.curated_root / "corporate_actions/ex_date=2024/part.parquet"
+    action.parent.mkdir(parents=True, exist_ok=True)
+    original = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "ex_date": [step],
+            "action_type": ["bonus"],
+            "source": ["tdx_protocol"],
+            "data_version": ["v1"],
+            "fetched_at": ["2024-06-29T00:00:00Z"],
+        }
+    )
+    original.write_parquet(action)
+    revisions = RevisionStore(cfg.meta_root, cfg.curated_root)
+    revisions.commit(
+        "corporate_actions",
+        run_id="initial",
+        changed_files=[action],
+        schema_version=1,
+        contract_fingerprint="test",
+    )
+    old_id = revisions.latest("corporate_actions").revision_id
+    original.with_columns(pl.lit(before).alias("ex_date")).write_parquet(action)
+    monkeypatch.setattr("cnequity.quality.publication._errors", lambda *args: [])
+
+    with pytest.raises(RuntimeError, match="repair publication gate blocked"):
+        check_repair_publication(
+            cfg, "corporate_actions", "bad-repair", [action], symbols=frozenset({"600000.SH"})
+        )
+
+    assert revisions.latest("corporate_actions").revision_id == old_id
+    assert pl.read_parquet(action)["ex_date"].to_list() == [step]
+    assert list((cfg.data_root / "_quarantine").glob("corporate_actions-bad-repair-*"))
+
+    # An empty action candidate still exposes the factor step it would orphan.
+    from cnequity.quality.cross_checks import factor_action_contradictions
+
+    without_actions = Config(data_root=tmp_path / "without-actions")
+    shutil.copytree(cfg.derived_root / "adj_factors", without_actions.derived_root / "adj_factors")
+    contradictions, _ = factor_action_contradictions(
+        without_actions, symbols=frozenset({"600000.SH"})
+    )
+    assert contradictions.select("ex_date", "kind").to_dicts() == [
+        {"ex_date": step, "kind": "step_without_action"}
+    ]
+
+
+def test_scoped_repair_detects_action_on_a_flat_factor_series(tmp_path):
+    from cnequity.quality.cross_checks import factor_action_contradictions
+
+    cfg = Config(data_root=tmp_path / "lake")
+    days = [date(2024, 6, 27), date(2024, 6, 28)]
+    for day in days:
+        path = cfg.derived_root / f"adj_factors/trade_date={day}/part.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "trade_date": [day],
+                "adjust_type": ["hfq"],
+                "factor": [1.0],
+                "source": ["sina"],
+                "data_version": ["v1"],
+                "fetched_at": ["2024-06-29T00:00:00Z"],
+            }
+        ).write_parquet(path)
+    path = cfg.curated_root / "corporate_actions/ex_date=2024/part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {"symbol": ["600000.SH"], "ex_date": [days[1]], "action_type": ["bonus"]}
+    ).write_parquet(path)
+
+    contradictions, _ = factor_action_contradictions(cfg, symbols=frozenset({"600000.SH"}))
+    assert contradictions.select("ex_date", "kind").to_dicts() == [
+        {"ex_date": days[1], "kind": "action_without_step"}
+    ]
 
 
 def test_publication_blocks_only_the_candidate_that_causes_the_error(tmp_path, monkeypatch):

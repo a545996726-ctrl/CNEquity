@@ -111,6 +111,16 @@ def test_a_recorded_action_explains_the_step(tmp_path):
     assert unexplained_factor_steps(cfg, upto=SESSIONS[-1]).is_empty()
 
 
+def test_action_during_halt_explains_step_on_resumption(tmp_path, halted_ex_event):
+    halt = halted_ex_event("159327.SZ", SESSIONS[1], SESSIONS[2], SESSIONS[3])
+    cfg = _lake(
+        tmp_path,
+        factors={SESSIONS[0]: 1.0, SESSIONS[1]: 1.0, SESSIONS[3]: 3.0},
+        recorded=[halt["ex_date"]],
+    )
+    assert unexplained_factor_steps(cfg, upto=halt["resumed"]).is_empty()
+
+
 def test_nothing_older_than_the_window_is_re_asked(tmp_path):
     """A gap no source can fill must stop being a daily request forever."""
     cfg = _lake(

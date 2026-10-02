@@ -210,6 +210,13 @@
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
 | `--apply` | `False` | 写入并发布新版本；默认只输出计划。 |
 
+## `cne repair orphan-symbols`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--apply` | `False` | 核验后发布新版本；默认只输出计划。 |
+
 ## `cne repair valuation-basis`
 
 | 参数 | 默认值 | 说明 |

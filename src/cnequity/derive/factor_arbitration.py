@@ -100,29 +100,46 @@ def _cache_dir(config: Config) -> Path:
     return config.meta_root / "adj_factor_arbitration_cache"
 
 
-def _cached_batches(config: Config) -> tuple[list[pl.DataFrame], set[str]]:
-    """Batches fetched within ``_CACHE_MAX_AGE``, and the symbols they answered."""
+def _cached_batches(config: Config, end: date) -> tuple[list[pl.DataFrame], set[str]]:
+    """Latest complete answer per symbol, fresh and covering the requested window."""
     folder = _cache_dir(config)
     if not folder.is_dir():
         return [], set()
     oldest = datetime.now(timezone.utc) - _CACHE_MAX_AGE
     frames: list[pl.DataFrame] = []
     answered: set[str] = set()
-    for sidecar in sorted(folder.glob("*.json")):
+    candidates = []
+    for sidecar in folder.glob("*.json"):
         try:
             meta = json.loads(sidecar.read_text(encoding="utf-8"))
             fetched = datetime.fromisoformat(meta["fetched_at"])
+            start_date = date.fromisoformat(meta["start"])
+            end_date = date.fromisoformat(meta["end"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
         rows = sidecar.with_suffix(".parquet")
-        if meta.get("method") != _CACHE_METHOD or fetched < oldest or not rows.is_file():
+        if (
+            meta.get("method") != _CACHE_METHOD
+            or fetched.tzinfo is None
+            or fetched < oldest
+            or start_date > _FETCH_START
+            or end_date < end
+            or not rows.is_file()
+        ):
             continue
-        frames.append(pl.read_parquet(rows))
-        answered.update(meta.get("answered") or [])
+        candidates.append((fetched, str(rows), meta))
+    # Choose a whole snapshot per symbol. Concatenating old and new event
+    # tables duplicates dates and resurrects events removed by a correction.
+    for _, rows, meta in sorted(candidates, reverse=True):
+        names = set(meta.get("answered") or []) - answered
+        if not names:
+            continue
+        frames.append(pl.read_parquet(rows).filter(pl.col("symbol").is_in(names)))
+        answered.update(names)
     return frames, answered
 
 
-def _cache_batch(config: Config, frame: pl.DataFrame, answered: list[str]) -> None:
+def _cache_batch(config: Config, frame: pl.DataFrame, answered: list[str], end: date) -> None:
     folder = _cache_dir(config)
     folder.mkdir(parents=True, exist_ok=True)
     fetched = datetime.now(timezone.utc)
@@ -133,7 +150,13 @@ def _cache_batch(config: Config, frame: pl.DataFrame, answered: list[str]) -> No
     # The sidecar lands last, so a batch counts only once its rows are on disk.
     write_json_atomic(
         folder / f"{stem}.json",
-        {"method": _CACHE_METHOD, "fetched_at": fetched.isoformat(), "answered": answered},
+        {
+            "method": _CACHE_METHOD,
+            "fetched_at": fetched.isoformat(),
+            "answered": answered,
+            "start": _FETCH_START.isoformat(),
+            "end": end.isoformat(),
+        },
     )
 
 
@@ -150,7 +173,7 @@ def _baostock_factors(
     """
     frames: list[pl.DataFrame] = []
     failed: list[str] = []
-    cached, answered = _cached_batches(config)
+    cached, answered = _cached_batches(config, end)
     wanted = set(names)
     frames.extend(frame.filter(pl.col("symbol").is_in(wanted)) for frame in cached)
     todo = [name for name in names if name not in answered]
@@ -165,7 +188,10 @@ def _baostock_factors(
         frame, chunk_failed = fetch(chunk, _FETCH_START, end, config=config)
         chunk_failed = list(chunk_failed)
         unanswered = set(chunk_failed)
-        _cache_batch(config, frame, [name for name in chunk if name not in unanswered])
+        completed = [name for name in chunk if name not in unanswered]
+        # Partial rows from a failed request are not arbitration evidence.
+        frame = frame.filter(pl.col("symbol").is_in(completed))
+        _cache_batch(config, frame, completed, end)
         frames.append(frame)
         failed.extend(chunk_failed)
     empty = pl.DataFrame(schema={"symbol": pl.Utf8, "trade_date": pl.Date, "factor": pl.Float64})

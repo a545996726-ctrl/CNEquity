@@ -139,6 +139,11 @@ def _repair_locked(config: Config, dataset: str, *, apply: bool) -> dict:
         return report
 
     moved = pl.concat([_read(path, dataset, base) for path in misplaced], how="diagonal_relaxed")
+    affected_symbols = (
+        frozenset(moved.get_column("symbol").drop_nulls().to_list())
+        if dataset in {"corporate_actions", "adj_factors"} and "symbol" in moved.columns
+        else frozenset()
+    )
     if moved.get_column(partition_col).null_count():
         raise LayoutRepairError(f"{dataset}: misplaced rows without {partition_col}")
     moved = moved.with_columns(_partition_values(moved, partition_col, granularity).alias(_PART))
@@ -218,6 +223,11 @@ def _repair_locked(config: Config, dataset: str, *, apply: bool) -> dict:
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
 
     contract = dataset_contract(dataset)
+    from cnequity.quality.publication import check_repair_publication
+
+    publication = check_repair_publication(
+        config, dataset, run_id, changed, symbols=affected_symbols
+    )
     revision = store.commit(
         dataset,
         run_id=run_id,
@@ -229,6 +239,7 @@ def _repair_locked(config: Config, dataset: str, *, apply: bool) -> dict:
             "misplaced_files": report["misplaced_files"],
             "merge": {name: report[name] for name in (*totals, "partitions")},
             "evidence": report.get("evidence"),
+            "publication_audit": publication["report_path"],
         },
     )
     report.update(
@@ -236,5 +247,6 @@ def _repair_locked(config: Config, dataset: str, *, apply: bool) -> dict:
         run_id=run_id,
         revision=None if revision is None else revision.revision,
         revision_id=None if revision is None else revision.revision_id,
+        publication_audit=publication["report_path"],
     )
     return json.loads(json.dumps(report, default=str))

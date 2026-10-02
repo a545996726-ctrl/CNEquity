@@ -126,6 +126,14 @@ jobs:
       - name: Test
         run: pytest --cov=cnequity --cov-report=term-missing --cov-report=xml
 
+      - name: Test in random order
+        # A test that passes only after another one left shared state behind
+        # (a root logging handler, a registry entry) fails here, not months
+        # later when an unrelated change reorders collection. The seed is in
+        # the log, so `pytest -p randomly --randomly-seed=<seed>` reproduces it.
+        if: matrix.python-version == '3.12' && matrix.httpx == 'latest'
+        run: pytest tests/unit -q -p randomly
+
       - name: Upload coverage
         # Both 3.12 jobs would otherwise upload and double-count the same run.
         if: matrix.python-version == '3.12' && matrix.httpx == 'latest'

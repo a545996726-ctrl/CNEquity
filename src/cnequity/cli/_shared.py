@@ -179,6 +179,13 @@ def attach_log_file(cfg, command: str, *, quiet: bool = False) -> Path | None:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     handler.setLevel(logging.WARNING if quiet else logging.INFO)
     logging.getLogger().addHandler(handler)
+    # The CLI leaves a root logger someone else configured alone, and that
+    # root may sit at WARNING. Then no INFO record reaches this file, and the
+    # log a long job promised holds only its failure. Let the package's own
+    # records through at the file's level without reconfiguring the host.
+    package = logging.getLogger("cnequity")
+    if package.getEffectiveLevel() > handler.level:
+        package.setLevel(handler.level)
     if not quiet:
         # The heartbeat watches the root handlers; this is a new one.
         from cnequity.progress import start_heartbeat

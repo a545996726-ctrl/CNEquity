@@ -181,3 +181,17 @@ def test_a_failed_baostock_session_loses_one_batch_not_the_run(lake, monkeypatch
     assert result["status"] == "warning"
     skipped = result["context_updates"]["audit_findings"][1]
     assert skipped["check"] == "daily_bars_turnover_repair_skipped"
+
+
+def test_empty_successful_fetch_does_not_report_a_successful_repair(lake, monkeypatch):
+    import cnequity.adapters.baostock.delisted_bars as delisted
+
+    monkeypatch.setattr(delisted, "fetch_delisted_bars", lambda *args, **kwargs: ([], []))
+    result = bars.repair_daily_bar_turnover(lake, DAY, DAY, "repair-empty", None)
+    assert result["status"] == "warning"
+    assert result["rows_read"] == 3
+    assert result["rows_written"] == 0
+    skipped = result["context_updates"]["audit_findings"][1]
+    assert skipped["rows_unserved"] == 3
+    assert skipped["rows_disagreeing"] == 0
+    assert skipped["failed_symbols"] == []

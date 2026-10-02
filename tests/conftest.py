@@ -195,3 +195,31 @@ names = ["phase1_reference"]
         encoding="utf-8",
     )
     return load_config(cfg_path)
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state():
+    """Give every test the logging configuration the one before it found.
+
+    CLI commands call ``basicConfig(force=True)`` and attach file handlers to
+    the root logger. A test that did not undo that left a stderr handler
+    behind, so a later CLI test saw an expected error's traceback in its
+    output, but only when the two happened to run in that order.
+    """
+    import logging
+
+    root = logging.getLogger()
+    package = logging.getLogger("cnequity")
+    saved = (list(root.handlers), root.level, package.level, logging.root.manager.disable)
+    yield
+    for handler in root.handlers[:]:
+        if handler not in saved[0]:
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001 - a closed stream must not fail the suite
+                pass
+    root.handlers = saved[0]
+    root.setLevel(saved[1])
+    package.setLevel(saved[2])
+    logging.disable(saved[3])

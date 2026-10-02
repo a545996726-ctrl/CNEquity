@@ -534,13 +534,14 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 | payment_source | string | 可空；到账日证据：`issuer_notice:…`（发行人公告）或 `baostock:dividPayDate`；合并时证据等级优先于抓取新旧 |
 | symbol | string |  |
 | ex_date | date |  |
-| action_type | string | cash_dividend/bonus/transfer/allotment/unit_split |
+| action_type | string | cash_dividend/bonus/transfer/allotment/unit_split/reorg_transfer |
 | cash_dividend | float64 | **每股**（元，税前） |
 | bonus_ratio | float64 | **每股**（送股：每持有 1 股送出股数） |
 | transfer_ratio | float64 | **每股**（转股：每持有 1 股转增股数） |
 | split_factor | float64 | 份额拆分/合并：新份额 ÷ 原份额；中性值 1 |
 | allotment_ratio | float64 | **每股**（配股：每持有 1 股可配股数），可空 |
 | allotment_price | float64 | 配股价（元/股），**不是**比率，可空 |
+| reference_price | float64 | 仅 `reorg_transfer`：发行人公布的除权（息）参考价（元/股）；其他类型必须为空 |
 | source | string |  |
 | data_version | string |  |
 | fetched_at | timestamp |  |
@@ -561,6 +562,12 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 新拆分记录必须给出明确、有限、正且不等于 1 的比例。复权核验把拆分乘数纳入除权
 参考价计算；彼此冲突的拆分比例不能靠取最大值自动解决。拆分日期须为交易除权生效日，
 不能混用权益登记日或公告日期。此字段不代表金额，不应用“每 10 股除以 10”的换算。
+
+`reorg_transfer` 表达破产重整中的资本公积金转增：`transfer_ratio` 仍是每持有 1 股转增的股数，
+按上式核算持股；但转增股份多数分给债权人和重整投资人，除权价不按 `1 + transfer_ratio` 计算，
+而由发行人按交易所规则公布的除权（息）参考价决定。复权核验对这类记录使用
+`前收盘 ÷ reference_price` 作为当日台阶，不再套用送转公式。`reference_price` 缺失、非正，
+或出现在其他类型上，写入时即被拒绝。
 
 #### adj_factors
 

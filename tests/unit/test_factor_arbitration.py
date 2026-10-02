@@ -311,3 +311,25 @@ def test_vendors_a_hair_apart_do_not_prove_sina_wrong(tmp_path):
     report = arbitrate_factor_sources(cfg, fetch=_fake_baostock)
     assert report["verdicts"]["sina_missed_step"] == 1
     assert report["switch"] == []
+
+
+def test_an_action_inside_a_halt_pairs_with_the_step_on_resumption(tmp_path):
+    from cnequity.quality.cross_checks import factor_action_contradictions
+
+    cfg = _lake(tmp_path)
+    # 600002 trades no session from day 8 to 11; its action lands on day 9 and
+    # the factor steps on day 12, the first session back.
+    for index in range(8, 12):
+        day = DAYS[index]
+        part = cfg.derived_root / "adj_factors" / f"trade_date={day}"
+        frame = pl.read_parquet(part / "part-0.parquet")
+        frame.filter(pl.col("symbol") != "600002.SH").write_parquet(part / "part-0.parquet")
+    part = cfg.curated_root / "corporate_actions" / "ex_date=2024"
+    actions = pl.read_parquet(part / "part-0.parquet")
+    halted = actions.head(1).with_columns(
+        pl.lit("600002.SH").alias("symbol"), pl.lit(DAYS[9]).alias("ex_date")
+    )
+    pl.concat([actions, halted]).write_parquet(part / "part-0.parquet")
+
+    contradictions, _ = factor_action_contradictions(cfg)
+    assert "600002.SH" not in contradictions.get_column("symbol").to_list()

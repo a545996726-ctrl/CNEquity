@@ -1074,9 +1074,12 @@ def _write_action(cfg, symbol, ex_date, **terms):
         "transfer_ratio": [terms.pop("transfer_ratio", 0.0)],
         "allotment_ratio": [terms.pop("allotment_ratio", 0.0)],
         "allotment_price": [terms.pop("allotment_price", 0.0)],
+        "reference_price": [terms.pop("reference_price", None)],
     }
     assert not terms, terms
-    pl.DataFrame(row).write_parquet(part / f"{symbol}-{row['action_type'][0]}.parquet")
+    pl.DataFrame(row, schema_overrides={"reference_price": pl.Float64}).write_parquet(
+        part / f"{symbol}-{row['action_type'][0]}.parquet"
+    )
 
 
 def _factor_frame(symbol, days, factors):
@@ -1615,3 +1618,45 @@ def test_a_cache_written_before_the_latest_ex_date_is_refreshed(tmp_path):
     _write_action(cfg, "600002.SH", date(2026, 10, 9), cash_dividend=0.5)
 
     assert _stale_cache_symbols(cfg, date(2026, 9, 28)) == {"600001.SH"}
+
+
+def test_crosscheck_prices_a_restructuring_conversion_at_its_reference_price(crosscheck_config):
+    from cnequity.derive.adj_factors import _corporate_action_crosscheck_findings
+
+    # 10 conversion shares per 10 held, but the court-approved reference price
+    # is 4.0, not 5.0: the step is 10 / 4, which the share formula cannot give.
+    _write_bars(crosscheck_config, "600734.SH", _DAYS, 10.0)
+    _write_action(
+        crosscheck_config,
+        "600734.SH",
+        _DAYS[1],
+        action_type="reorg_transfer",
+        transfer_ratio=1.0,
+        reference_price=4.0,
+    )
+    step = 10.0 / 4.0
+    out = _factor_frame("600734.SH", _DAYS, [1.0, step, step])
+    assert _corporate_action_crosscheck_findings(crosscheck_config, out) == []
+
+    out = _factor_frame("600734.SH", _DAYS, [1.0, 2.0, 2.0])
+    (finding,) = _corporate_action_crosscheck_findings(crosscheck_config, out)
+    assert finding["expected_ratio"] == pytest.approx(step)
+
+
+def test_crosscheck_compares_a_halt_dated_action_on_resumption(crosscheck_config):
+    from cnequity.derive.adj_factors import _corporate_action_crosscheck_findings
+
+    # No session on the ex-date itself: the stock resumes the next day, which
+    # is where the factor steps.
+    traded = (_DAYS[0], _DAYS[2])
+    _write_bars(crosscheck_config, "600423.SH", traded, 10.0)
+    _write_action(
+        crosscheck_config,
+        "600423.SH",
+        _DAYS[1],
+        action_type="reorg_transfer",
+        transfer_ratio=1.0,
+        reference_price=4.0,
+    )
+    out = _factor_frame("600423.SH", traded, [1.0, 10.0 / 4.0])
+    assert _corporate_action_crosscheck_findings(crosscheck_config, out) == []

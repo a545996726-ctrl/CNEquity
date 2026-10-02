@@ -23,6 +23,7 @@ from cnequity.adapters.calendar.holidays_cn import CLOSED_DATES
 from cnequity.adapters.eastmoney.corporate_actions import EASTMONEY_BACKFILL_FLOOR
 from cnequity.adapters.exchange.st_lists import is_st_name
 from cnequity.config import Config
+from cnequity.domain.action_sessions import effective_session
 from cnequity.domain.symbols import parse_symbol
 from cnequity.domain.trading_status import risk_warning_expr
 from cnequity.quality.ex_events import EX_EVENT_LOOKBACK_SESSIONS, unexplained_factor_steps
@@ -2022,7 +2023,9 @@ def _fund_symbols(config: Config) -> list[str]:
 _CONTRADICTION_SCHEMA = {"symbol": pl.Utf8, "ex_date": pl.Date, "kind": pl.Utf8}
 
 
-def factor_action_contradictions(config: Config) -> tuple[pl.DataFrame, int]:
+def factor_action_contradictions(
+    config: Config, *, symbols: Collection[str] | None = None
+) -> tuple[pl.DataFrame, int]:
     """Where the hfq factor and the recorded corporate actions disagree.
 
     Returns ``(frame, fund_payouts)``: one row per (symbol, ex_date) with
@@ -2034,15 +2037,25 @@ def factor_action_contradictions(config: Config) -> tuple[pl.DataFrame, int]:
     never on a cash distribution (0 of 2,363 fund distributions on
     2026-09-29). A fund payout with a still factor is that convention, not a
     contradiction, so it is counted apart.
+
+    ``symbols`` narrows the repair gate's comparison. Both scoped and full
+    checks include flat factor series. A symbol's first observed session has
+    no preceding level to compare, so actions landing there are excluded.
     """
     empty = pl.DataFrame(schema=_CONTRADICTION_SCHEMA)
     factors_root = config.derived_root / "adj_factors"
     actions_root = config.curated_root / "corporate_actions"
-    if not dataset_has_parquet(factors_root) or not dataset_has_parquet(actions_root):
+    if not dataset_has_parquet(factors_root):
         return empty, 0
+    has_actions = dataset_has_parquet(actions_root)
     factors = (
         dedupe_lazy_by_primary_key(
-            scan_parquet_root(factors_root, partition_col="trade_date"), "adj_factors"
+            scan_parquet_root(
+                factors_root,
+                partition_col="trade_date",
+                symbols=sorted(symbols) if symbols is not None else None,
+            ),
+            "adj_factors",
         )
         .filter(pl.col("adjust_type") == "hfq")
         .select("symbol", "trade_date", "factor")
@@ -2058,16 +2071,39 @@ def factor_action_contradictions(config: Config) -> tuple[pl.DataFrame, int]:
         .filter(pl.col("_chg") > 1e-6)
         .select("symbol", pl.col("trade_date").alias("ex_date"))
     )
-    if jumps.is_empty():
-        return empty, 0
-    floor = jumps.get_column("ex_date").min()
     recorded = (
         dedupe_lazy_by_primary_key(
-            scan_parquet_root(actions_root, partition_col="ex_date"), "corporate_actions"
+            scan_parquet_root(
+                actions_root,
+                partition_col="ex_date",
+                symbols=sorted(symbols) if symbols is not None else None,
+            ),
+            "corporate_actions",
         )
-        .filter(pl.col("ex_date") >= floor)
         .select("symbol", "ex_date", "action_type")
         .collect()
+        if has_actions
+        else pl.DataFrame(schema={"symbol": pl.Utf8, "ex_date": pl.Date, "action_type": pl.Utf8})
+    )
+    # The factor can only step on a session the security trades. An action
+    # dated in a trading halt, or on a day the market was shut, takes effect
+    # on the next traded session, so compare it there: otherwise the halt
+    # shows up twice, as an action without a step and a step without one.
+    recorded = (
+        effective_session(recorded, factors.select("symbol", "trade_date"))
+        .filter(pl.col("effective_session").is_not_null())
+        .select("symbol", pl.col("effective_session").alias("ex_date"), "action_type")
+    )
+    # Eligibility comes from each security's observed levels, not the first
+    # jump anywhere in the lake. A flat series can miss an action, while its
+    # first level (including older actions carried onto it) proves no step.
+    first_sessions = factors.group_by("symbol").agg(
+        pl.col("trade_date").min().alias("_first_session")
+    )
+    recorded = (
+        recorded.join(first_sessions, on="symbol")
+        .filter(pl.col("ex_date") > pl.col("_first_session"))
+        .drop("_first_session")
     )
     funds = _fund_symbols(config)
     cash_only = (
@@ -2077,19 +2113,12 @@ def factor_action_contradictions(config: Config) -> tuple[pl.DataFrame, int]:
         .select("symbol", "ex_date")
     )
     actions = recorded.select("symbol", "ex_date").unique()
-    # Only compare where a comparison is meaningful: the symbol has a factor
-    # series at all, and the date is one the market was open on.
-    covered = factors.get_column("symbol").unique().to_list()
-    sessions = _open_sessions(config)
-    if sessions is not None:
-        actions = actions.filter(pl.col("ex_date").is_in(sessions))
-    actions = actions.filter(pl.col("symbol").is_in(covered))
+    # Only symbols with a factor series reach here: the as-of join above
+    # drops the rest, along with actions after a series' last session.
     silent = actions.join(jumps, on=["symbol", "ex_date"], how="anti")
     fund_payouts = silent.join(cash_only, on=["symbol", "ex_date"], how="semi").height
     silent = silent.join(cash_only, on=["symbol", "ex_date"], how="anti")
-    baseless = jumps.filter(pl.col("ex_date") >= floor).join(
-        actions, on=["symbol", "ex_date"], how="anti"
-    )
+    baseless = jumps.join(actions, on=["symbol", "ex_date"], how="anti")
     frame = pl.concat(
         [
             silent.with_columns(pl.lit("action_without_step").alias("kind")),
@@ -2141,14 +2170,50 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     )
     peer_dates = peer.select("symbol", "ex_date").unique()
     peer_symbols = peer.get_column("symbol").unique().to_list()
+    peer_coverage = peer.group_by("symbol").agg(
+        pl.col("fetched_at")
+        .max()
+        .dt.convert_time_zone("Asia/Shanghai")
+        .dt.date()
+        .alias("_captured_through")
+    )
+    # Internal contradictions use the first observed session after an ex-date.
+    # Apply the same mapping to the peer, while retaining its stated dates for
+    # exact-date repair commands. Several events can share one resumed session.
+    aligned_peer = peer_dates.with_columns(pl.col("ex_date").alias("_peer_ex_date"))
+    if not contradictions.is_empty():
+        sessions = (
+            scan_parquet_root(config.derived_root / "adj_factors", partition_col="trade_date")
+            .filter(
+                (pl.col("adjust_type") == "hfq")
+                & pl.col("symbol").is_in(contradictions.get_column("symbol").unique().to_list())
+            )
+            .select("symbol", "trade_date")
+            .unique()
+            .collect()
+        )
+        aligned_peer = (
+            effective_session(aligned_peer, sessions)
+            .filter(pl.col("effective_session").is_not_null())
+            .drop("ex_date")
+            .rename({"effective_session": "ex_date"})
+        )
+        peer_dates = aligned_peer.select("symbol", "ex_date").unique()
 
-    def _split(frame: pl.DataFrame) -> tuple[pl.DataFrame, int, int]:
+    def _split(frame: pl.DataFrame) -> tuple[pl.DataFrame, int, int, int]:
         in_scope = frame.filter(pl.col("symbol").is_in(peer_symbols))
         confirmed = in_scope.join(peer_dates, on=["symbol", "ex_date"], how="inner")
-        return confirmed, in_scope.height - confirmed.height, frame.height - in_scope.height
+        absent = in_scope.join(peer_dates, on=["symbol", "ex_date"], how="anti").join(
+            peer_coverage, on="symbol", how="left"
+        )
+        # A capture cannot deny an event on a later session. Positive event
+        # evidence can still confirm it, even if announced before its ex-date.
+        denied = absent.filter(pl.col("ex_date") <= pl.col("_captured_through")).height
+        uncovered = absent.height - denied
+        return confirmed, denied, frame.height - in_scope.height + uncovered, uncovered
 
-    silent_confirmed, silent_no, silent_out = _split(silent)
-    baseless_confirmed, baseless_no, baseless_out = _split(baseless)
+    silent_confirmed, silent_no, silent_out, silent_uncovered = _split(silent)
+    baseless_confirmed, baseless_no, baseless_out, baseless_uncovered = _split(baseless)
     silent_yes = silent_confirmed.height
     baseless_yes = baseless_confirmed.height
     total = silent.height + baseless.height
@@ -2176,14 +2241,14 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     # Counts alone name no next step. The one bucket with a command behind it
     # is "the peer has the event and we do not": for an ex-date older than the
     # EastMoney backfill floor, the report still serves it by exact date, which
-    # is the only route that reaches it. Later dates are ones the normal
-    # sources already walked, so a gap there means no configured source
-    # carries the event, not that a sweep was skipped.
+    # is the route that can reach it. This check has no receipt proving that
+    # normal backfills already visited every later date.
     reachable = sorted(
         {
             value.isoformat()
-            for value in baseless_confirmed.filter(pl.col("ex_date") < EASTMONEY_BACKFILL_FLOOR)
-            .get_column("ex_date")
+            for value in aligned_peer.join(baseless_confirmed, on=["symbol", "ex_date"], how="semi")
+            .filter(pl.col("_peer_ex_date") < EASTMONEY_BACKFILL_FLOOR)
+            .get_column("_peer_ex_date")
             .to_list()
         }
     )
@@ -2192,12 +2257,11 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
         shown = ",".join(reachable[:_SAMPLE])
         more = f" (+{len(reachable) - _SAMPLE} more)" if len(reachable) > _SAMPLE else ""
         remediation = (
-            f" {len(reachable)} of the missing actions fall before the EastMoney backfill "
+            f" Missing actions span {len(reachable)} distinct ex-date(s) before the EastMoney backfill "
             f"floor {EASTMONEY_BACKFILL_FLOOR.isoformat()}, which the sweep cannot reach; ask "
             "the report for them by exact date with `cne backfill corporate_actions "
             f"--eastmoney-date-repair --ex-dates {shown}`{more}. It answers one date at a time "
-            "and does not carry every older event, so a date it has nothing for stays open. "
-            "The later dates were already walked by the configured sources."
+            "and does not carry every older event, so a date it has nothing for stays open."
         )
     against_factors = silent_yes + baseless_no
     against_actions = silent_no + baseless_yes
@@ -2211,7 +2275,7 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
                 f"{total} factor/action contradiction(s); the peer settles "
                 f"{total - unarbitrated}: {against_factors} point at the factor series, "
                 f"{against_actions} at the recorded actions, {unarbitrated} unarbitrated "
-                "because the peer does not carry those securities"
+                "because the peer does not cover those securities or event dates"
                 # Findings print their message and nothing else, so a
                 # remediation nobody reads is a remediation nobody runs.
                 f"{remediation}"
@@ -2220,6 +2284,7 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
             "against_factor_series": against_factors,
             "against_recorded_actions": against_actions,
             "unarbitrated": unarbitrated,
+            "peer_snapshot_uncovered": silent_uncovered + baseless_uncovered,
             "factor_missed_a_step": silent_yes,
             "recorded_action_doubtful": silent_no,
             "missing_recorded_action": baseless_yes,
@@ -2283,16 +2348,6 @@ def unrecorded_ex_event_findings(
         severity="warning",
         noun="a factor step with no recorded action",
     )
-
-
-def _open_sessions(config: Config) -> list[date] | None:
-    root = config.curated_root / "trading_calendar"
-    if not dataset_has_parquet(root):
-        return None
-    frame = scan_parquet_root(root, partition_col="trade_date").collect()
-    if "is_trading" not in frame.columns:
-        return None
-    return frame.filter(pl.col("is_trading")).get_column("trade_date").unique().to_list()
 
 
 # One tick on a ten-yuan share is 10bps, so a tie-break threshold below that
@@ -2439,7 +2494,7 @@ def financial_statement_peer_findings(config: Config) -> list[dict]:
     peer = SnapshotStore(config.meta_root).read_latest(
         "financial_statement_items", source="ths_official"
     )
-    needed = {"symbol", "report_period", "item_code", "item_value"}
+    needed = {"symbol", "report_period", "statement_type", "item_code", "item_value"}
     if peer.is_empty() or not needed <= set(peer.columns):
         return []
 
@@ -2460,27 +2515,43 @@ def financial_statement_peer_findings(config: Config) -> list[dict]:
 
     # The primary key carries announce_date and every vintage is kept, so a
     # restated period holds several rows per item; compare the latest reading.
+    keys = ["symbol", "report_period", "statement_type", "item_code"]
     order = [c for c in ("announce_date", "observed_at", "fetched_at") if c in curated.columns]
     latest = (
-        curated.sort(["symbol", "report_period", "item_code", *order], nulls_last=False)
-        .group_by("symbol", "report_period", "item_code", maintain_order=True)
+        curated.sort([*keys, *order], nulls_last=False)
+        .group_by(keys, maintain_order=True)
         .agg(
             pl.col("item_value").last().alias("_curated"), pl.col("source").last().alias("_source")
         )
     )
-    peer_latest = peer.group_by("symbol", "report_period", "item_code").agg(
-        pl.col("item_value").last().alias("_peer")
+    peer_order = [c for c in ("announce_date", "observed_at", "fetched_at") if c in peer.columns]
+    peer_latest = (
+        peer.sort([*keys, *peer_order], nulls_last=False)
+        .group_by(keys, maintain_order=True)
+        .agg(pl.col("item_value").last().alias("_peer"))
     )
-    pair = (
-        latest.join(peer_latest, on=["symbol", "report_period", "item_code"], how="inner")
-        .drop_nulls(["_curated", "_peer"])
-        .filter(pl.col("_curated") != 0)
-    )
+    pair = latest.join(peer_latest, on=keys, how="inner").drop_nulls(["_curated", "_peer"])
     if pair.is_empty():
         return []
 
     scored = pair.with_columns(
-        ((pl.col("_peer") - pl.col("_curated")).abs() / pl.col("_curated").abs()).alias("_rel")
+        pl.when(pl.col("_curated") == 0)
+        .then(pl.when(pl.col("_peer") == 0).then(0.0).otherwise(float("inf")))
+        .otherwise((pl.col("_peer") - pl.col("_curated")).abs() / pl.col("_curated").abs())
+        .alias("_rel")
+    ).with_columns(
+        # The lake's revenue is EastMoney's TOTAL_OPERATE_INCOME (营业总收入);
+        # the peer's is operating_income (营业收入), which excludes the interest
+        # and fee income of finance subsidiaries. Total can never be the smaller
+        # of the two, so only a peer figure above the lake's is a disagreement.
+        pl.when(
+            (pl.col("item_code") == "revenue")
+            & (pl.col("statement_type") == "income")
+            & (pl.col("_peer") <= pl.col("_curated"))
+        )
+        .then(0.0)
+        .otherwise(pl.col("_rel"))
+        .alias("_rel")
     )
     by_code = (
         scored.group_by("item_code")

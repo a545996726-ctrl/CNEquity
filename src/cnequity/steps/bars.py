@@ -1373,7 +1373,7 @@ def repair_daily_bar_turnover(
             **totals,
         }
     ]
-    if totals["rows_disagreeing"] or failed:
+    if totals["rows_disagreeing"] or totals["rows_unserved"] or failed:
         findings.append(
             {
                 "dataset": "daily_bars",
@@ -1381,10 +1381,12 @@ def repair_daily_bar_turnover(
                 "check": "daily_bars_turnover_repair_skipped",
                 "message": (
                     f"turnover repair left {totals['rows_disagreeing']} row(s) whose prices "
-                    f"disagree with baostock and {len(failed)} symbol(s) it did not serve"
+                    f"disagree with baostock, {totals['rows_unserved']} row(s) without a usable "
+                    f"replacement, and {len(failed)} failed symbol request(s)"
                 ),
                 "source": "baostock",
                 "rows_disagreeing": totals["rows_disagreeing"],
+                "rows_unserved": totals["rows_unserved"],
                 "failed_symbols": sorted(failed)[:50],
             }
         )

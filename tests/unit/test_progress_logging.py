@@ -535,6 +535,8 @@ def test_fetching_commands_persist_job_logs(tmp_path, monkeypatch, command):
     root = logging.getLogger()
     prior_handlers = list(root.handlers)
     prior_level = root.level
+    package = logging.getLogger("cnequity")
+    prior_package_level = package.level
     try:
         result = CliRunner().invoke(cli, [*command.split(), *argv, "--config", str(cfg)])
         assert isinstance(result.exception, OfflineJobFailure), result.output
@@ -551,6 +553,42 @@ def test_fetching_commands_persist_job_logs(tmp_path, monkeypatch, command):
                 handler.close()
         root.handlers = prior_handlers
         root.setLevel(prior_level)
+        package.setLevel(prior_package_level)
+
+
+def test_a_job_log_keeps_info_under_a_host_root_at_warning(tmp_path, monkeypatch):
+    """A host that configured logging at WARNING still gets the job's progress."""
+    from cnequity.cli._shared import attach_log_file
+    from cnequity.config import Config
+
+    monkeypatch.delenv("CNE_LOG_DIR", raising=False)
+    root = logging.getLogger()
+    package = logging.getLogger("cnequity")
+    prior = (list(root.handlers), root.level, package.level)
+    host = logging.StreamHandler()
+    root.handlers = [host]
+    root.setLevel(logging.WARNING)
+    package.setLevel(logging.NOTSET)
+    try:
+        path = attach_log_file(Config(data_root=tmp_path), "offline", quiet=True)
+        logging.getLogger("cnequity.test_job").warning("kept")
+        attach_log_file(Config(data_root=tmp_path), "offline-info")
+        logging.getLogger("cnequity.test_job").info("progress line")
+        assert path is not None
+        written = "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "logs").glob("*.log"))
+        assert "progress line" in written
+        # The host's own root level is left as it was.
+        assert root.level == logging.WARNING
+    finally:
+        from cnequity.progress import stop_heartbeat
+
+        stop_heartbeat()
+        for handler in root.handlers[:]:
+            if handler is not host:
+                handler.close()
+        root.handlers = prior[0]
+        root.setLevel(prior[1])
+        package.setLevel(prior[2])
 
 
 def test_the_log_notice_never_contaminates_the_json_on_stdout(tmp_path, monkeypatch):

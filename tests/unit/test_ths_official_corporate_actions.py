@@ -102,7 +102,9 @@ def test_arbitration_is_silent_without_a_peer_snapshot(tmp_path):
     assert adj_factor_arbitration_findings(Config(data_root=tmp_path)) == []
 
 
-def _lake_with_one_confirmed_gap(tmp_path, ex_date: date):
+def _lake_with_one_confirmed_gap(
+    tmp_path, ex_date: date, *, peer_date=None, previous_date=None, captured_at=None
+):
     """A lake whose factor stepped on *ex_date* with no action, and a peer that has it."""
     from cnequity.config import Config
     from cnequity.storage.layout import init_data_layout
@@ -110,8 +112,8 @@ def _lake_with_one_confirmed_gap(tmp_path, ex_date: date):
 
     cfg = Config(data_root=tmp_path / "data")
     init_data_layout(cfg)
-    fetched = datetime(2026, 9, 19, tzinfo=timezone.utc)
-    before = ex_date - timedelta(days=1)
+    fetched = captured_at or datetime(2026, 9, 19, tzinfo=timezone.utc)
+    before = previous_date or ex_date - timedelta(days=1)
     factors = cfg.derived_root / "adj_factors"
     for day, factor in ((before, 1.0), (ex_date, 1.2)):
         part = factors / f"trade_date={day.isoformat()}"
@@ -152,7 +154,7 @@ def _lake_with_one_confirmed_gap(tmp_path, ex_date: date):
         pl.DataFrame(
             {
                 "symbol": ["600110.SH"],
-                "ex_date": [ex_date],
+                "ex_date": [peer_date or ex_date],
                 "action_type": ["cash_dividend"],
                 "cash_dividend": [0.1],
                 "bonus_ratio": [0.0],
@@ -185,6 +187,52 @@ def test_arbitration_names_the_repair_for_a_pre_floor_gap(tmp_path):
     assert finding["remediation"] in finding["message"], (
         "a hint nobody prints is a hint nobody runs"
     )
+
+
+def test_peer_event_during_halt_is_matched_on_resumption_but_repaired_by_stated_date(tmp_path):
+    from cnequity.quality.cross_checks import adj_factor_arbitration_findings
+
+    cfg = _lake_with_one_confirmed_gap(
+        tmp_path,
+        date(2004, 6, 14),
+        peer_date=date(2004, 6, 12),
+        previous_date=date(2004, 6, 11),
+    )
+    (finding,) = adj_factor_arbitration_findings(cfg)
+    assert finding["missing_recorded_action"] == 1
+    assert finding["factor_step_without_basis"] == 0
+    assert finding["missing_recorded_action_reachable_dates"] == ["2004-06-12"]
+    assert "--ex-dates 2004-06-12" in finding["remediation"]
+    assert "already walked" not in finding["message"]
+
+
+def test_old_snapshot_cannot_deny_a_later_event(tmp_path):
+    from cnequity.quality.cross_checks import adj_factor_arbitration_findings
+
+    cfg = _lake_with_one_confirmed_gap(
+        tmp_path,
+        date(2024, 6, 14),
+        peer_date=date(2024, 6, 13),
+        captured_at=datetime(2024, 6, 13, tzinfo=timezone.utc),
+    )
+    (finding,) = adj_factor_arbitration_findings(cfg)
+    assert finding["contradictions"] == 1
+    assert finding["factor_step_without_basis"] == 0
+    assert finding["unarbitrated"] == 1
+    assert finding["peer_snapshot_uncovered"] == 1
+
+
+def test_snapshot_can_confirm_an_event_announced_before_its_ex_date(tmp_path):
+    from cnequity.quality.cross_checks import adj_factor_arbitration_findings
+
+    cfg = _lake_with_one_confirmed_gap(
+        tmp_path,
+        date(2024, 6, 14),
+        captured_at=datetime(2024, 6, 13, tzinfo=timezone.utc),
+    )
+    (finding,) = adj_factor_arbitration_findings(cfg)
+    assert finding["missing_recorded_action"] == 1
+    assert finding["unarbitrated"] == 0
 
 
 def test_a_gap_after_the_floor_gets_no_command_because_the_sweep_already_walked_it(tmp_path):

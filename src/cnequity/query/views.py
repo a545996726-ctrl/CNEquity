@@ -379,6 +379,18 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
                   AND (end_date IS NULL OR ex_date <= CAST(end_date AS DATE))
                 GROUP BY symbol, ex_date
             ),
+            first_payout_sessions AS (
+                SELECT p.symbol, p.ex_date, p.cash,
+                       MIN(b.trade_date) AS effective_session
+                FROM payouts p
+                JOIN bars b ON b.symbol = p.symbol AND b.trade_date >= p.ex_date
+                GROUP BY p.symbol, p.ex_date, p.cash
+            ),
+            effective_payouts AS (
+                SELECT symbol, effective_session, SUM(cash) AS cash
+                FROM first_payout_sessions
+                GROUP BY symbol, effective_session
+            ),
             stepped AS (
                 SELECT
                     b.*,
@@ -389,8 +401,8 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
                 LEFT JOIN adj_factors h
                   ON b.symbol = h.symbol AND b.trade_date = h.trade_date
                  AND h.adjust_type = 'hfq'
-                LEFT JOIN payouts p
-                  ON b.symbol = p.symbol AND b.trade_date = p.ex_date
+                LEFT JOIN effective_payouts p
+                  ON b.symbol = p.symbol AND b.trade_date = p.effective_session
             ),
             multiplied AS (
                 SELECT

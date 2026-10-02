@@ -437,7 +437,7 @@ python scripts/delisted_ops.py coverage --start 2016-01-01 --universe all_a_sh_s
 | `sector_code_map` | BK* ↔ BOARD_CODE 身份映射（lake-only；推荐成分 join） |
 | `futures_continuous` | 期货主力/次主力连续合约，按 T-1 持仓换月、只向后换；由 futures_bars 全量重建（需 `[futures] enabled`） |
 | `option_greeks` | 期权隐含波动率与希腊字母（Black-76 / BAW），自动检测行情、合约、利率和模型依赖变化；`--full` 全量重算，`--start`/`--end` 限定窗口 |
-| `adj_factor_source` | 用 Baostock 仲裁复权因子与公司行为的矛盾（新浪漏步、新浪虚步、湖缺事件、事件存疑）；证明新浪有误（除权日前一交易日在 10 天内、不在 2005-04-29 至 2007-12-31 股改期间，两家台阶相差超过 0.45%，且原始股价的跳动更接近 Baostock）且 Baostock 与其余事件一致的沪深股票，`--apply` 后整条因子改用 Baostock，证据写入 `meta/quality/evidence/`。Baostock 结果按批缓存 7 天：中断后重跑只取尚未取到的证券，预览后的 `--apply` 直接复用预览取到的数据 |
+| `adj_factor_source` | 用 Baostock 仲裁复权因子与公司行为的矛盾（新浪漏步、新浪虚步、湖缺事件、事件存疑）；证明新浪有误（除权日前一交易日在 10 天内、不在 2005-04-29 至 2007-12-31 股改期间，两家台阶相差超过 0.45%，且原始股价的跳动更接近 Baostock）且 Baostock 与其余事件一致的沪深股票，`--apply` 后整条因子改用 Baostock，证据写入 `meta/quality/evidence/`。Baostock 结果按批缓存 7 天，仅复用覆盖本次查询起止日期的完整结果；每只证券选取最新完整快照，失败请求的残片不参与仲裁。相同窗口下，中断重跑只取尚未完成的证券，预览后的 `--apply` 可复用预览数据；查询截止日推进或旧缓存缺少覆盖日期时会重新取证 |
 
 ```bash
 cne derive trading_status --start 2001-01-01 --end 2001-12-31
@@ -445,12 +445,15 @@ cne derive trading_status --start 2001-01-01 --end 2001-12-31
 
 ## cne repair
 
-只处理湖里已有的数据，不访问数据源。默认输出计划；加 `--apply` 后以新版本发布，旧版本继续保留，可按版本读取。
+默认基于湖中已有数据输出计划；加 `--apply` 后以新版本发布，旧版本继续保留，可按版本读取。`corporate-action-gaps --apply` 会按缺口向数据源补取证据。
+
+`--apply` 发布前会比较已提交版本与候选版本的离线质量检查，并核对受影响证券的因子/公司行为矛盾。新增或恶化的问题会阻止发布，候选版本移入 `_quarantine`，报告写入 `meta/quality/publication/`。这项修复门禁不受 `[quality].publication_gate` 的普通日更发布设置影响。
 
 | 子命令 | 说明 |
 |------|------|
 | `layout DATASET` | 把分区数据集根目录或错误键目录中的文件并入登记分区。同一主键的多份观察只在非空值完全一致时互补填空；有冲突的键按规范规则整行保留一份。重复键的全部原始观察写入 `_quarantine`。发布新版本时若检测到这类布局，会提示运行此命令 |
-| `corporate-action-gaps` | 补上新浪与 Baostock 因子都有台阶、湖里却没有记录的除权事件，依据最近一次 `cne derive adj_factor_source` 的证据。附近 10 天内日期错开的记录，若条款能解释台阶就移到台阶日；其余按证券和年份向 Baostock 取分红，只收除权日正是台阶日且条款能解释台阶的行。这是本组唯一会访问数据源的命令：计划仍离线，`--apply` 才请求 Baostock |
+| `corporate-action-gaps` | 补上新浪与 Baostock 因子都有台阶、湖里却没有记录的除权事件，依据最近一次 `cne derive adj_factor_source` 的证据。附近 10 天内日期错开的记录，若条款能解释台阶就移到台阶日；其余按证券和年份向 Baostock 取分红，按生效交易日匹配，只收条款能解释台阶的行；Baostock 也解释不了的，再到巨潮查发行人的重整转增公告，公告写明的除权参考价能解释台阶才记为 `reorg_transfer`。这是本组唯一会访问数据源的命令：计划仍离线，`--apply` 才请求 Baostock 和巨潮 |
+| `orphan-symbols` | 删除 `daily_bars` 中从未出现的证券在 `adj_factors` 与 `corporate_actions` 里的行：早年作为净值序列误入的场外基金（519xxx）行情已清理，因子和分红却残留；未采集行情的上市基金也在其列。这些行没有可复权的价格，只会被报成因子与公司行为矛盾。按数据集各发布一个新版本 |
 | `valuation-basis` | 统一 `valuation_metrics` 口径：push2 动态市盈率移入 `pe_dynamic`；Baostock 流通市值由成交均价口径换算为收盘价口径，无法核对的保留原值并标为 `vwap_x_turn_implied_shares`；总市值按 `share_structure` 当日有效总股本重建，无记录的标为年末股本估算 |
 
 ```bash

@@ -13,6 +13,7 @@ import polars as pl
 
 from cnequity.config import Config, load_config
 from cnequity.derive.adj_factors import STORED_ADJUST_TYPE
+from cnequity.domain.action_sessions import effective_session
 from cnequity.domain.datasets import (
     DATASETS,
     curated_dataset_names,
@@ -572,12 +573,18 @@ def _with_distribution_multiplier(
     if payouts.is_empty():
         return joined
     ordered = joined.with_row_index("_row").sort("symbol", "trade_date")
+    payouts = (
+        effective_session(payouts, ordered.select("symbol", "trade_date"))
+        .filter(pl.col("effective_session").is_not_null())
+        .group_by("symbol", "effective_session")
+        .agg(pl.col("_cash").sum())
+    )
     with_steps = (
         ordered.with_columns(pl.col("close").shift(1).over("symbol").alias("_prev_close"))
         .join(
             payouts,
             left_on=["symbol", "trade_date"],
-            right_on=["symbol", "ex_date"],
+            right_on=["symbol", "effective_session"],
             how="left",
         )
         .with_columns(

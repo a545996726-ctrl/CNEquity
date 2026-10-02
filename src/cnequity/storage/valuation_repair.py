@@ -177,18 +177,26 @@ def _repair_locked(config: Config, *, apply: bool) -> dict:
 
     contract = dataset_contract(_DATASET)
     run_id = f"valuation-basis-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    from cnequity.quality.publication import check_repair_publication
+
+    publication = check_repair_publication(config, _DATASET, run_id, changed)
     revision = store.commit(
         _DATASET,
         run_id=run_id,
         changed_files=changed,
         schema_version=int(contract["schema_version"]),
         contract_fingerprint=contract_fingerprint(contract),
-        metadata={"reason": "valuation_basis_repair", "counts": report["counts"]},
+        metadata={
+            "reason": "valuation_basis_repair",
+            "counts": report["counts"],
+            "publication_audit": publication["report_path"],
+        },
     )
     report.update(
         applied=True,
         run_id=run_id,
         revision=None if revision is None else revision.revision,
         revision_id=None if revision is None else revision.revision_id,
+        publication_audit=publication["report_path"],
     )
     return report

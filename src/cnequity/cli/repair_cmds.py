@@ -16,7 +16,7 @@ def _emit(value: dict) -> None:
 
 @cli.group()
 def repair():
-    """离线修复已存数据：默认只预览，--apply 发布新版本并保留旧版本。"""
+    """修复已存数据：默认只预览，--apply 核验后发布并保留旧版本。"""
 
 
 @repair.command("layout")
@@ -68,3 +68,19 @@ def corporate_action_gaps(config_path: str, apply: bool):
     from cnequity.storage.corporate_action_gap_repair import repair_corporate_action_gaps
 
     _emit(repair_corporate_action_gaps(_cfg(config_path), apply=apply))
+
+
+@repair.command("orphan-symbols")
+@config_option
+@click.option("--apply", is_flag=True, help="核验后发布新版本；默认只输出计划。")
+def orphan_symbols(config_path: str, apply: bool):
+    """删除 daily_bars 里从未出现的证券在 adj_factors 与 corporate_actions 中的行。
+
+    \b
+    这类行没有可复权的价格：早年作为净值序列误入的场外基金（519xxx）行情已清理，
+    因子和分红却留了下来；未采集行情的上市基金也在其列。它们只会被报成因子与公司行为矛盾。
+    按数据集各发布一个新版本，旧版本保留，可按版本读取。
+    """
+    from cnequity.storage.orphan_symbol_repair import repair_orphan_symbols
+
+    _emit(repair_orphan_symbols(_cfg(config_path), apply=apply))

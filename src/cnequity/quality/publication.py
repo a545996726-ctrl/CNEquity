@@ -10,8 +10,10 @@ import tempfile
 from collections import Counter
 from contextlib import closing
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+
+import polars as pl
 
 from cnequity.config import Config
 from cnequity.domain.datasets import DATASETS
@@ -40,6 +42,95 @@ def _errors(
     )
     findings.extend(run_source_diffs(config, "publication-view", day))
     return [item for item in findings if item.get("severity") == "error"]
+
+
+def _factor_action_errors(config: Config, symbols: frozenset[str]) -> list[dict]:
+    """A complete per-security contradiction set for a repair candidate."""
+    if not symbols:
+        return []
+    from cnequity.quality.cross_checks import factor_action_contradictions
+
+    contradictions, _ = factor_action_contradictions(config, symbols=symbols)
+    rows = contradictions.to_dicts()
+    if not rows:
+        return []
+    return [
+        {
+            "dataset": "adj_factors",
+            "check": "repair_factor_action_contradictions",
+            "severity": "error",
+            "violations_complete": True,
+            "violations": {f"{row['symbol']}|{row['ex_date']}|{row['kind']}": 1 for row in rows},
+        }
+    ]
+
+
+def _repair_actions(view: Config, symbols: frozenset[str]) -> pl.DataFrame:
+    from cnequity.query.parquet_scan import dataset_has_parquet, scan_parquet_root
+
+    root = view.curated_root / "corporate_actions"
+    if not symbols or not dataset_has_parquet(root):
+        return pl.DataFrame(schema={"symbol": pl.Utf8, "ex_date": pl.Date, "action_type": pl.Utf8})
+    return (
+        scan_parquet_root(root, partition_col="ex_date", symbols=sorted(symbols))
+        .select("symbol", "ex_date", "action_type")
+        .unique()
+        .collect()
+    )
+
+
+def _halt_dated_removals(view: Config, before: pl.DataFrame, after: pl.DataFrame) -> list[dict]:
+    """Actions a repair removed from a date the market traded but the security did not.
+
+    Such a date is an ex-date inside a trading halt: genuine, with its factor
+    step on resumption. Moving it there leaves every factor check unchanged,
+    so only this invariant can catch it. A date the whole market was shut
+    (a Saturday in an old TDX record) is not protected.
+    """
+    from cnequity.query.parquet_scan import scan_parquet_root
+
+    removed = before.join(after, on=["symbol", "ex_date", "action_type"], how="anti")
+    if removed.is_empty():
+        return []
+    bars_root = view.curated_root / "daily_bars"
+    market_open = removed.filter(
+        pl.col("ex_date").map_elements(
+            lambda day: (bars_root / f"trade_date={day.isoformat()}").is_dir(),
+            return_dtype=pl.Boolean,
+        )
+    )
+    if market_open.is_empty():
+        return []
+    traded = (
+        scan_parquet_root(
+            bars_root,
+            partition_col="trade_date",
+            symbols=market_open.get_column("symbol").unique().to_list(),
+            traded_only=True,
+        )
+        .select("symbol", pl.col("trade_date").alias("ex_date"))
+        .unique()
+        .collect()
+    )
+    halted = market_open.join(traded, on=["symbol", "ex_date"], how="anti")
+    if halted.is_empty():
+        return []
+    return [
+        {
+            "dataset": "corporate_actions",
+            "check": "repair_removed_halt_dated_action",
+            "severity": "error",
+            "message": (
+                f"repair removes {halted.height} action(s) dated inside a trading halt; "
+                "a halt-dated ex-date is genuine and its step lands on resumption"
+            ),
+            "violations_complete": True,
+            "violations": {
+                f"{row['symbol']}|{row['ex_date']}|{row['action_type']}": 1
+                for row in halted.iter_rows(named=True)
+            },
+        }
+    ]
 
 
 # Where a finding is. Its identity survives a changed count, message or
@@ -198,6 +289,8 @@ def evaluate_publication(
     day: date,
     candidates: dict[str, Path],
     changed: dict[str, list[Path]] | None = None,
+    *,
+    repair_symbols: frozenset[str] = frozenset(),
 ) -> dict:
     """Audit the candidates against the committed lake; block new or worse errors.
 
@@ -214,6 +307,7 @@ def evaluate_publication(
         "datasets": sorted(candidates),
         "run_id": run_id,
         "trade_date": str(day),
+        "repair_symbols": sorted(repair_symbols),
         "audit_scope": {
             name: None if parts is None else sorted(parts) for name, parts in scope.items()
         },
@@ -254,6 +348,9 @@ def evaluate_publication(
                 ):
                     original.backup(copied)
             baseline = _errors(view, day, scope)
+            baseline.extend(_factor_action_errors(view, repair_symbols))
+            guard_actions = "corporate_actions" in candidates and bool(repair_symbols)
+            actions_before = _repair_actions(view, repair_symbols) if guard_actions else None
             for name, source in candidates.items():
                 layer = (
                     view.derived_root if DATASETS[name].layer == "derived" else view.curated_root
@@ -263,6 +360,13 @@ def evaluate_publication(
                     shutil.rmtree(target)
                 shutil.copytree(source, target, copy_function=_link_read_only)
             candidate_errors = _errors(view, day, scope)
+            candidate_errors.extend(_factor_action_errors(view, repair_symbols))
+            if actions_before is not None:
+                candidate_errors.extend(
+                    _halt_dated_removals(
+                        view, actions_before, _repair_actions(view, repair_symbols)
+                    )
+                )
             changes = classify_issues(baseline, candidate_errors)
             introduced = [*changes["introduced"], *changes["worsened"]]
             report.update(
@@ -322,4 +426,35 @@ def evaluate_publication(
     path = config.meta_root / "quality" / "publication" / f"{run_id}.json"
     write_json_atomic(path, report, indent=2, default=str)
     report["report_path"] = str(path)
+    return report
+
+
+def check_repair_publication(
+    config: Config,
+    dataset: str,
+    run_id: str,
+    changed_files: list[Path],
+    *,
+    symbols: frozenset[str] = frozenset(),
+) -> dict:
+    """Require a clean candidate comparison before an offline repair commits."""
+    from cnequity.storage.revisions import RevisionStore
+
+    layer = config.derived_root if DATASETS[dataset].layer == "derived" else config.curated_root
+    candidate = layer / dataset
+    report = evaluate_publication(
+        replace(config, publication_gate="block"),
+        run_id,
+        datetime.now(timezone.utc).date(),
+        {dataset: candidate},
+        {dataset: changed_files},
+        repair_symbols=symbols,
+    )
+    if report["blocked"]:
+        store = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
+        quarantine = store.quarantine_candidate(dataset, run_id=run_id, reason="repair_gate")
+        raise RuntimeError(
+            f"repair publication gate blocked {dataset}: {report.get('report_path')}"
+            + (f"; candidate: {quarantine}" if quarantine else "")
+        )
     return report

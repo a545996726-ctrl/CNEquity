@@ -260,3 +260,24 @@ def test_unit_split_does_not_double_count_a_stock_distribution():
     )
     with pytest.raises(SchemaValidationError, match="stock distribution"):
         validate_dataframe(frame, "corporate_actions")
+
+
+@pytest.mark.parametrize("reference", [None, 0.0, -1.0])
+def test_a_restructuring_conversion_needs_its_reference_price(reference):
+    frame = _fund_action(
+        action_type="reorg_transfer", cash_dividend=0.0, transfer_ratio=1.0
+    ).with_columns(pl.lit(reference, dtype=pl.Float64).alias("reference_price"))
+    with pytest.raises(SchemaValidationError, match="reference_price"):
+        validate_dataframe(frame, "corporate_actions")
+
+
+def test_a_reference_price_belongs_only_to_restructuring_conversions():
+    frame = _fund_action().with_columns(pl.lit(4.0).alias("reference_price"))
+    with pytest.raises(SchemaValidationError, match="reference_price"):
+        validate_dataframe(frame, "corporate_actions")
+    reorg = _fund_action(
+        action_type="reorg_transfer", cash_dividend=0.0, transfer_ratio=1.0
+    ).with_columns(pl.lit(4.0).alias("reference_price"))
+    assert validate_dataframe(reorg, "corporate_actions")["reference_price"][0] == 4.0
+    # Rows written before the column existed read it as null.
+    assert validate_dataframe(_fund_action(), "corporate_actions")["reference_price"][0] is None

@@ -146,6 +146,7 @@ _UNIT_CONTRACT_DEFAULTS: dict[str, UnitContract] = {
         "split_factor": "unit/unit",
         "allotment_ratio": "share/share",
         "allotment_price": "CNY/share",
+        "reference_price": "CNY/share",
     },
     "financial_statement_items": {"item_value": "source_native"},
     "share_structure": {
