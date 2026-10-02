@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from datetime import date, timedelta
 
 import polars as pl
@@ -29,6 +30,7 @@ from cnequity.quality.cross_checks import (
     daily_bars_close_crosscheck_findings,
     financial_statement_peer_findings,
     instrument_listing_order_findings,
+    share_structure_vendor_findings,
     st_label_crosscheck_findings,
     trading_calendar_horizon_findings,
     undeclared_source_findings,
@@ -53,6 +55,7 @@ from cnequity.quality.tick_checks import trade_ticks_findings
 from cnequity.quality.unit_checks import (
     daily_bars_amount_completeness_findings,
     daily_bars_implied_price_findings,
+    daily_bars_turnover_defect_findings,
     daily_bars_volume_unit_findings,
     valuation_ratio_unit_findings,
 )
@@ -250,12 +253,19 @@ def _collect_lake_findings(
     *,
     full: bool = False,
     offline: bool = False,
+    scope: Mapping[str, frozenset[str] | None] | None = None,
 ) -> list[dict]:
     """All quality findings for the current curated lake (run-independent).
 
     ``full`` is reserved for the explicit lake-health path. It makes the
     per-dataset structural/schema checks cover every historical Parquet file;
     ordinary run findings continue to inspect only the active partition.
+
+    ``scope`` limits the per-dataset structural checks to the named datasets,
+    each optionally to a set of partitions (``None`` = the whole dataset).
+    A publication candidate leaves every other dataset byte-identical, so
+    their structural findings could only cancel out. Cross-dataset checks
+    always run.
     """
     findings: list[dict] = []
     context = context or {}
@@ -294,6 +304,8 @@ def _collect_lake_findings(
     # health check read as a broken install. Judge what this lake holds.
     demo_lake = getattr(config, "lake_profile", None) in {"demo", "sample"}
     for ds, pcol in PARTITION_COLS.items():
+        if scope is not None and ds not in scope:
+            continue
         root = config.curated_root / ds
         if demo_lake and not root.exists():
             continue
@@ -303,7 +315,13 @@ def _collect_lake_findings(
         if not root.exists() and not is_dataset_enabled(ds, config):
             continue
         dataset_findings = audit_curated_dataset(
-            ds, pcol, root, trade_date, full=full, stale=ds in stale_datasets
+            ds,
+            pcol,
+            root,
+            trade_date,
+            full=full,
+            stale=ds in stale_datasets,
+            partitions=None if scope is None else scope[ds],
         )
         findings.extend(dataset_findings)
         if any(
@@ -443,37 +461,74 @@ def _collect_lake_findings(
             }
         )
 
+    def feeds(*inputs: str) -> bool:
+        """Whether a scoped audit must run a check that reads *inputs*.
+
+        With a scope, a check none of whose inputs is a candidate returns the
+        same findings before and after the publication, so running it twice
+        can only cancel out. Inputs are what each check reads from the lake.
+        """
+        return scope is None or any(name in scope for name in inputs)
+
     findings.extend(_index_bars_coverage_findings(config, trade_date))
-    findings.extend(daily_bars_calendar_findings(config, trade_date))
-    findings.extend(daily_bar_finality_findings(config, trade_date))
+    if feeds("daily_bars"):
+        findings.extend(daily_bars_calendar_findings(config, trade_date))
+    if feeds("daily_bars"):
+        findings.extend(daily_bar_finality_findings(config, trade_date))
     findings.extend(trading_calendar_horizon_findings(config, trade_date))
     findings.extend(daily_bars_volume_unit_findings(config, trade_date))
     findings.extend(daily_bars_amount_completeness_findings(config, trade_date))
-    findings.extend(_optional_intraday_findings(config, trade_date))
+    if feeds("daily_bars"):
+        findings.extend(daily_bars_turnover_defect_findings(config, trade_date, full=full))
+    if feeds(
+        "daily_bars",
+        "minute_bars",
+        "minute_bars_5m",
+        "trade_ticks",
+        "futures_bars",
+        "futures_contracts",
+        "option_bars",
+        "option_contracts",
+    ):
+        findings.extend(_optional_intraday_findings(config, trade_date))
     # Reaches an external vendor for ~12 quotes; gated on [sources.sina] so a
     # lake without it (and every unit test) stays offline.
     if not offline:
         findings.extend(
             daily_bars_close_crosscheck_findings(config, _last_trading_day(config, trade_date))
         )
-    findings.extend(valuation_bars_coverage_findings(config, trade_date))
-    findings.extend(
-        adj_factor_reconciliation_findings(
-            config,
-            trade_date,
-            lookback_days=None if full else ADJ_RECON_LOOKBACK_DAYS,
+    if feeds("valuation_metrics", "daily_bars"):
+        findings.extend(valuation_bars_coverage_findings(config, trade_date))
+    if feeds(
+        "adj_factors",
+        "corporate_actions",
+        "daily_bars",
+        "instruments",
+        "share_structure",
+        "trading_calendar",
+    ):
+        findings.extend(
+            adj_factor_reconciliation_findings(
+                config,
+                trade_date,
+                lookback_days=None if full else ADJ_RECON_LOOKBACK_DAYS,
+            )
         )
-    )
-    findings.extend(adj_factor_coverage_findings(config, trade_date))
-    findings.extend(universe_survivorship_findings(config, trade_date))
+    if feeds("adj_factors", "daily_bars", "instruments"):
+        findings.extend(adj_factor_coverage_findings(config, trade_date))
+    if feeds("daily_bars", "instruments", "delisting_events", "trading_status"):
+        findings.extend(universe_survivorship_findings(config, trade_date))
     findings.extend(instrument_listing_order_findings(config))
     findings.extend(untraded_instrument_findings(config, trade_date))
-    findings.extend(undeclared_source_findings(config))
+    findings.extend(undeclared_source_findings(config, None if scope is None else set(scope)))
     findings.extend(daily_bars_implied_price_findings(config, trade_date))
-    findings.extend(valuation_ratio_unit_findings(config, trade_date))
+    if feeds("valuation_metrics"):
+        findings.extend(valuation_ratio_unit_findings(config, trade_date))
     findings.extend(balance_sheet_identity_findings(config))
+    findings.extend(share_structure_vendor_findings(config, trade_date))
     findings.extend(degraded_job_findings(config))
-    findings.extend(adj_factor_arbitration_findings(config))
+    if feeds("adj_factors", "corporate_actions", "instruments", "trading_calendar"):
+        findings.extend(adj_factor_arbitration_findings(config))
     # After the price-based check, so the loud days it already named are not
     # reported a second time by the factor-based one.
     findings.extend(
@@ -487,7 +542,8 @@ def _collect_lake_findings(
             },
         )
     )
-    findings.extend(daily_bars_arbitration_findings(config))
+    if feeds("daily_bars"):
+        findings.extend(daily_bars_arbitration_findings(config))
     findings.extend(financial_statement_peer_findings(config))
     findings.extend(
         corporate_action_classification_findings(

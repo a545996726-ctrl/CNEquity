@@ -904,11 +904,18 @@ def _run_shareholder_step(
     if not config.sources.get("eastmoney", True):
         raise RuntimeError(f"{dataset}: eastmoney source disabled in config")
 
+    symbols = getattr(config, "_backfill_symbols", None) if dataset == "share_structure" else None
     if getattr(config, "_backfill", False):
         start = getattr(config, "_backfill_start", None) or HISTORY_START
         end = getattr(config, "_backfill_end", None) or trade_date
         windows = (
-            _quarter_windows(start, end) if dataset == "top_holders" else _year_windows(start, end)
+            # A few named securities hold tens of changes in their whole
+            # history: one window, not one request per year.
+            [(start, end)]
+            if symbols
+            else _quarter_windows(start, end)
+            if dataset == "top_holders"
+            else _year_windows(start, end)
         )
         by = CHANGE_DATE
     else:
@@ -925,6 +932,9 @@ def _run_shareholder_step(
     staged = StagingWriter(config.staging_root).list_run_files(dataset, run_id)
     for index, (win_start, win_end) in enumerate(windows, start=1):
         unit = f"{by}:{win_start.isoformat()}:{win_end.isoformat()}"
+        if symbols:
+            # A targeted window is not evidence about the whole market's.
+            unit += ":symbols=" + ",".join(sorted(symbols))
         if stopped:
             failures.append((unit, "earlier shareholder window failed"))
             report(index)
@@ -980,6 +990,8 @@ def _run_shareholder_step(
         progress = ShareholderProgress()
         kwargs = {"archive_context": capture} if capture is not None else {}
         kwargs["progress"] = progress
+        if symbols:
+            kwargs["symbols"] = symbols
         try:
             part = fetch_fn(win_start, win_end, by=by, config=config, **kwargs)
         except (EastMoneyDatacenterError, SourceCoolingDown) as exc:

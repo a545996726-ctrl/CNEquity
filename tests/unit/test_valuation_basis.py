@@ -204,3 +204,51 @@ def test_unknown_basis_label_is_rejected():
     frame = pl.DataFrame([_valuation(total_mv_basis="guess")])
     with pytest.raises(SchemaValidationError, match="unknown total_mv_basis"):
         validate_dataframe(frame, "valuation_metrics")
+
+
+def test_labelled_vwap_values_convert_once_a_consistent_bar_exists():
+    from cnequity.domain.valuation import repair_legacy_float_mv
+
+    frame = pl.DataFrame(
+        [
+            {
+                "source": "baostock",
+                "float_mv": 100.0,
+                "float_mv_basis": FLOAT_MV_VWAP_TURN_IMPLIED,
+                "close": 11.0,
+                "low": 9.0,
+                "high": 12.0,
+                "volume": 10.0,
+                "amount": 100.0,
+            },
+        ]
+    )
+    out = repair_legacy_float_mv(frame)
+    assert out["float_mv"].item() == pytest.approx(110.0)
+    assert out["float_mv_basis"].item() == FLOAT_MV_TURN_IMPLIED_REPAIRED
+
+
+def test_share_structure_totals_follow_corrected_share_history():
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "trade_date": DAY,
+                "close": 10.0,
+                "total_mv": 50.0,
+                "total_mv_basis": TOTAL_MV_SHARE_STRUCTURE,
+                "shares_as_of": date(2020, 1, 1),
+                "source": "baostock",
+            }
+        ]
+    )
+    shares = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "change_date": [date(2020, 1, 1), date(2024, 1, 1)],
+            "total_shares": [5.0, 8.0],
+        }
+    )
+    out = reconstruct_total_mv(frame, shares)
+    assert out["total_mv"].item() == 80.0
+    assert out["shares_as_of"].item() == date(2024, 1, 1)

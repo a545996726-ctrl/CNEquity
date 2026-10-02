@@ -275,6 +275,7 @@ class Config:
     _bse_tip_repair: bool = False
     _bj_amount_repair: bool = False
     _tdx_volume_repair: bool = False
+    _turnover_repair: bool = False
     _sector_bars_force: bool = False
     _rate_limiters: object | None = field(default=None, repr=False)
     # ``workers`` is the legacy/global scheduler budget.  Source-specific

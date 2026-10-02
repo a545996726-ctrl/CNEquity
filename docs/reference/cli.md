@@ -335,7 +335,7 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 | `--start` / `--end` | 窗口（日内数据集拒绝早于源端视野的 `--start`） |
 | `--profile delisted` | 仅 `daily_bars`：以已确认退市名录为 universe，`--start` 对应旧命令的 `--since`；`--plan` 离线。不能与普通修复或范围选项混用 |
 | `--shfe-annual-archive ZIP --archive-year YYYY --accept-partial-fields` | 仅 `futures_bars` / `option_bars`：显式离线导入上期所年度包，保留缺失字段标记，跳过已有日线主键；`--archive-url` / `--archive-downloaded-at` 可附原始来源证据。默认回填仍用完整日文件，细节见[衍生品指南](../recipes/derivatives.md#官方年度包已验证格式与使用限制) |
-| `--symbols` | 日内、`daily_bars`、`trading_status`、`corporate_actions` 的临时标的范围；其他数据集仍使用配置中的范围 |
+| `--symbols` | 日内、`daily_bars`、`trading_status`、`corporate_actions`、`share_structure` 的临时标的范围（`share_structure` 按证券一次取回全部股本变动，用于审计提示的股本滞后）；其他数据集仍使用配置中的范围 |
 | `--baostock-repair` | 仅 `corporate_actions`：显式补抓已退市 SH/SZ 标的的 Baostock 分红除权数据；建议与 `--symbols` 配合 |
 | `--ths-repair` | 仅 `corporate_actions`：显式补抓已退市 BJ 标的的同花顺历史分红除权数据；建议与 `--symbols` 配合 |
 | `--eastmoney-bj-repair` | 仅 `corporate_actions`：按北交所旧码→920 新码映射向 EastMoney 定向补抓历史分红除权数据；建议与 `--symbols` 配合 |
@@ -343,6 +343,7 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 | `--payment-date-repair` | 同上，发行人公告之后再用 Baostock `dividPayDate` 匹配余下事件；两者不能同时使用 |
 | `--outstanding` | 精确修复被容忍缺口记下的欠账键：作用域与窗口取自 ledger，而不是 `--symbols`/`--start`/`--end`。补上的键即刻销账，仍缺的继续欠着 |
 | `--bj-amount-repair` | 仅 `daily_bars`：从 TDX 补 Sina 从未发布的 BJ 成交额，已存的价格与成交量一律不动。需要 `--start`/`--end` |
+| `--turnover-repair` | 仅 `daily_bars`：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；开高低收须在半分钱内一致，不一致或未提供的保留原值并计数。需要 `--start`/`--end` |
 | `--tdx-volume-repair` | 仅 `daily_bars`：重读 TDX，只改写已存 TDX 行的成交量（及 64.5 元以下被放大的成交额），修 2026-09-17 前的解码错误；价格须一致，不新增行，不经内部缺口门禁。需要 `--symbols` 和 `--start`/`--end` |
 | `--bse-tip-repair` | 仅 `daily_bars`：读取已有 session 的 OHLCV，仅向 BSE 请求成交额并严格核对；必须同时指定相同的 `--start/--end` 与 `--symbols` |
 
@@ -940,4 +941,4 @@ cne snapshot verify research-baseline
 publication_gate = "block"  # off（默认）、shadow、block
 ```
 
-这是发布前候选门禁：离线对比已提交湖与整批候选的全量审计结果。`block` 拒绝新增 error 或审计异常，候选隔离、指针和水位保留；`shadow` 只记录，适合先测量误报及扫描成本。报告位于 `meta/quality/publication/`。它与发布后的 `audit_gate` 分开配置；配置含义见 [产品边界](../architecture/overview.md)。
+这是发布前候选门禁：离线对比已提交湖与整批候选的全量审计结果。`block` 拒绝新增或恶化的 error（按检查项、数据集和范围识别同一问题）或审计异常，候选隔离、指针和水位保留；`shadow` 只记录，适合先测量误报及扫描成本。报告位于 `meta/quality/publication/`。它与发布后的 `audit_gate` 分开配置；配置含义见 [产品边界](../architecture/overview.md)。

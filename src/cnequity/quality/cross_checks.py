@@ -14,6 +14,7 @@ Single-dataset integrity is in ``dataset_checks``. Here:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import date, timedelta
 
 import polars as pl
@@ -1728,6 +1729,120 @@ BALANCE_IDENTITY_TOLERANCE = 1e-4
 MODERN_STATEMENT_YEAR = 2011
 
 
+# Vendor-implied share counts may differ from share_structure by more than
+# this before a change is presumed missing. Convertible-bond conversions move
+# the count by fractions of a percent between disclosures.
+SHARE_COUNT_TOLERANCE = 0.01
+SHARE_COUNT_LOOKBACK_DAYS = 30
+
+
+def share_structure_vendor_findings(config: Config, trade_date: date) -> list[dict]:
+    """Securities whose latest share count lags the vendor's market cap.
+
+    ``total_mv`` rebuilt for history multiplies the close by the share count
+    ``share_structure`` says was in effect. On a day the vendor also reports
+    its total market cap, ``vendor total / close`` is the count the vendor
+    used; a gap beyond 1% means a share change the lake has not captured yet,
+    e.g. a placement listed after the last share_structure run.
+    """
+    roots = {
+        name: config.curated_root / name
+        for name in ("valuation_metrics", "daily_bars", "share_structure")
+    }
+    if not all(dataset_has_parquet(root) for root in roots.values()):
+        return []
+    start = trade_date - timedelta(days=SHARE_COUNT_LOOKBACK_DAYS)
+    valuation_lf = dedupe_lazy_by_primary_key(
+        scan_parquet_root(
+            roots["valuation_metrics"], partition_col="trade_date", start=start, end=trade_date
+        ),
+        "valuation_metrics",
+    )
+    if "total_mv_basis" not in valuation_lf.collect_schema().names():
+        return []
+    vendor = (
+        valuation_lf.filter(
+            (pl.col("total_mv_basis") == "vendor_reported") & (pl.col("total_mv") > 0)
+        )
+        .select("symbol", "trade_date", "total_mv")
+        .collect()
+    )
+    if vendor.is_empty():
+        return []
+    bars = (
+        dedupe_lazy_by_primary_key(
+            scan_parquet_root(
+                roots["daily_bars"], partition_col="trade_date", start=start, end=trade_date
+            ),
+            "daily_bars",
+        )
+        .filter(pl.col("close") > 0)
+        .select("symbol", "trade_date", "close")
+        .collect()
+    )
+    latest = (
+        vendor.join(bars, on=["symbol", "trade_date"])
+        .sort("trade_date")
+        .group_by("symbol", maintain_order=True)
+        .last()
+        .sort("symbol", "trade_date")
+    )
+    shares_lf = scan_parquet_root(roots["share_structure"], partition_col="change_date")
+    order = [c for c in ("announce_date", "observed_at") if c in shares_lf.collect_schema().names()]
+    shares = (
+        shares_lf.filter(pl.col("total_shares") > 0)
+        .select("symbol", "change_date", "total_shares", *order)
+        .collect()
+        .sort(["symbol", "change_date", *order])
+        .group_by("symbol", "change_date", maintain_order=True)
+        .last()
+        .select("symbol", pl.col("change_date").cast(pl.Date), "total_shares")
+        .sort("symbol", "change_date")
+    )
+    compared = latest.join_asof(
+        shares,
+        left_on="trade_date",
+        right_on="change_date",
+        by="symbol",
+        strategy="backward",
+        check_sortedness=False,
+    ).with_columns(
+        (pl.col("total_mv") / pl.col("close")).alias("vendor_shares"),
+    )
+    lagging = compared.filter(
+        pl.col("total_shares").is_null()
+        | ((pl.col("vendor_shares") / pl.col("total_shares") - 1).abs() > SHARE_COUNT_TOLERANCE)
+    ).sort("symbol")
+    if lagging.is_empty():
+        return []
+    mismatches = {
+        row["symbol"]: {
+            "trade_date": row["trade_date"].isoformat(),
+            "vendor_shares": round(row["vendor_shares"]),
+            "lake_shares": None if row["total_shares"] is None else round(row["total_shares"]),
+            "lake_change_date": None
+            if row["change_date"] is None
+            else row["change_date"].isoformat(),
+        }
+        for row in lagging.iter_rows(named=True)
+    }
+    names = ",".join(list(mismatches)[:20])
+    return [
+        {
+            "dataset": "share_structure",
+            "severity": "warning",
+            "check": "share_structure_vendor_mismatch",
+            "message": (
+                f"{len(mismatches)} security(ies) carry a share count more than "
+                f"{SHARE_COUNT_TOLERANCE:.0%} off the vendor's latest market cap; refresh with "
+                f"`cne backfill share_structure --symbols {names} --start 1990-01-01`"
+            ),
+            "rows": len(mismatches),
+            "mismatches": mismatches,
+        }
+    ]
+
+
 def balance_sheet_identity_findings(config: Config) -> list[dict]:
     """Assets = liabilities + equity, per (symbol, report_period).
 
@@ -1750,16 +1865,18 @@ def balance_sheet_identity_findings(config: Config) -> list[dict]:
             (pl.col("statement_type") == "balance")
             & pl.col("item_code").is_in(["total_assets", "total_liabilities", "total_equity"])
         )
-        .select("symbol", "report_period", "item_code", "item_value", "source")
         .collect()
     )
     if frame.is_empty():
         return []
 
-    # The primary key carries announce_date, so a restated period holds several
-    # rows per item; compare the latest reading of each.
+    # The primary key carries announce_date and every observed vintage is
+    # kept, so a restated period holds several rows per item; compare the
+    # latest reading of each, in disclosure then observation order.
+    order = [c for c in ("announce_date", "observed_at", "fetched_at") if c in frame.columns]
     latest = (
-        frame.group_by("symbol", "report_period", "item_code")
+        frame.sort(["symbol", "report_period", "item_code", *order], nulls_last=False)
+        .group_by("symbol", "report_period", "item_code", maintain_order=True)
         .agg(pl.col("item_value").last().alias("value"), pl.col("source").last().alias("source"))
         .pivot(on="item_code", index=["symbol", "report_period"], values="value")
     )
@@ -1796,6 +1913,28 @@ def balance_sheet_identity_findings(config: Config) -> list[dict]:
     breached = breached.with_columns(
         pl.col("report_period").str.slice(0, 4).cast(pl.Int32, strict=False).alias("_year")
     )
+    # Periods that end before the listing come from the prospectus, which
+    # often carries a partial balance sheet. That is the filing as published,
+    # not a defect a refetch can repair; count it apart from listed periods.
+    pre_listing = pl.DataFrame(schema=breached.schema)
+    instruments = config.curated_root / "instruments"
+    if dataset_has_parquet(instruments):
+        listed = (
+            scan_parquet_root(instruments, hive=False)
+            .select("symbol", "list_date")
+            .drop_nulls()
+            .unique(subset=["symbol"], keep="last")
+            .collect()
+        )
+        quarter = pl.col("report_period").str.slice(5, 1).cast(pl.Int32, strict=False)
+        period_end = pl.date(
+            pl.col("_year"), quarter * 3, pl.when(quarter.is_in([1, 4])).then(31).otherwise(30)
+        )
+        flagged = breached.join(listed, on="symbol", how="left").with_columns(
+            (period_end < pl.col("list_date")).fill_null(False).alias("_pre_listing")
+        )
+        pre_listing = flagged.filter(pl.col("_pre_listing")).drop("list_date", "_pre_listing")
+        breached = flagged.filter(~pl.col("_pre_listing")).drop("list_date", "_pre_listing")
     modern = breached.filter(pl.col("_year") >= MODERN_STATEMENT_YEAR)
     historical = breached.filter(
         pl.col("_year").is_null() | (pl.col("_year") < MODERN_STATEMENT_YEAR)
@@ -1824,6 +1963,12 @@ def balance_sheet_identity_findings(config: Config) -> list[dict]:
                 "checked": checked.height,
                 "since_year": MODERN_STATEMENT_YEAR,
                 "sample": _sample(modern),
+                # Every breached period, so a refetch can name exactly these;
+                # the modern set is small by construction.
+                "periods": sorted(
+                    f"{row['symbol']}:{row['report_period']}"
+                    for row in modern.select("symbol", "report_period").to_dicts()
+                ),
             }
         )
     if not historical.is_empty():
@@ -1846,7 +1991,32 @@ def balance_sheet_identity_findings(config: Config) -> list[dict]:
                 "sample": _sample(historical),
             }
         )
+    if not pre_listing.is_empty():
+        findings.append(
+            {
+                "dataset": "financial_statement_items",
+                "severity": "info",
+                "check": "balance_sheet_identity_pre_listing",
+                "message": (
+                    f"{pre_listing.height} balance-sheet period(s) ending before the listing "
+                    "break assets = liabilities + equity; prospectus statements are often "
+                    "partial, so they are counted rather than chased"
+                ),
+                "rows": pre_listing.height,
+                "checked": checked.height,
+                "source_limited": True,
+                "sample": _sample(pre_listing),
+            }
+        )
     return findings
+
+
+def _fund_symbols(config: Config) -> list[str]:
+    """Symbols the instrument catalog classes as funds (ETF/LOF)."""
+    instruments = _instruments_frame(config)
+    if instruments is None or "asset_type" not in instruments.columns:
+        return []
+    return instruments.filter(pl.col("asset_type") == "etf").get_column("symbol").to_list()
 
 
 def adj_factor_arbitration_findings(config: Config) -> list[dict]:
@@ -1909,15 +2079,26 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
         return []
 
     floor = jumps.get_column("ex_date").min()
-    actions = (
+    recorded = (
         dedupe_lazy_by_primary_key(
             scan_parquet_root(actions_root, partition_col="ex_date"), "corporate_actions"
         )
         .filter(pl.col("ex_date") >= floor)
-        .select("symbol", "ex_date")
-        .unique()
+        .select("symbol", "ex_date", "action_type")
         .collect()
     )
+    # Sina's fund factor is its ``s`` multiplier, which moves on unit splits
+    # and never on a cash distribution (0 of 2,363 fund distributions on
+    # 2026-09-29). A fund payout with a still factor is that convention, not
+    # a contradiction; count it apart so the warning names real ones only.
+    funds = _fund_symbols(config)
+    cash_only = (
+        recorded.group_by("symbol", "ex_date")
+        .agg((pl.col("action_type") == "cash_dividend").all().alias("_cash_only"))
+        .filter(pl.col("_cash_only") & pl.col("symbol").is_in(funds))
+        .select("symbol", "ex_date")
+    )
+    actions = recorded.select("symbol", "ex_date").unique()
     # Only compare where a comparison is meaningful: the symbol has a factor
     # series at all, and the date is one the market was open on.
     covered = factors.get_column("symbol").unique().to_list()
@@ -1930,6 +2111,8 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     peer_symbols = peer.get_column("symbol").unique().to_list()
 
     silent = actions.join(jumps, on=["symbol", "ex_date"], how="anti")
+    fund_payouts = silent.join(cash_only, on=["symbol", "ex_date"], how="semi").height
+    silent = silent.join(cash_only, on=["symbol", "ex_date"], how="anti")
     baseless = jumps.filter(pl.col("ex_date") >= floor).join(
         actions, on=["symbol", "ex_date"], how="anti"
     )
@@ -1944,8 +2127,26 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     silent_yes = silent_confirmed.height
     baseless_yes = baseless_confirmed.height
     total = silent.height + baseless.height
+    convention = (
+        [
+            {
+                "dataset": "adj_factors",
+                "severity": "info",
+                "check": "adj_factor_fund_payout_unadjusted",
+                "message": (
+                    f"{fund_payouts} fund cash distribution(s) leave the factor still: the "
+                    "vendor's fund factor adjusts unit splits only, so fund hfq prices are "
+                    "price returns, not total returns"
+                ),
+                "rows": fund_payouts,
+                "source_limited": True,
+            }
+        ]
+        if fund_payouts
+        else []
+    )
     if not total:
-        return []
+        return convention
 
     # Counts alone name no next step. The one bucket with a command behind it
     # is "the peer has the event and we do not": for an ex-date older than the
@@ -1976,7 +2177,7 @@ def adj_factor_arbitration_findings(config: Config) -> list[dict]:
     against_factors = silent_yes + baseless_no
     against_actions = silent_no + baseless_yes
     unarbitrated = silent_out + baseless_out
-    return [
+    return convention + [
         {
             "dataset": "adj_factors",
             "severity": "info" if not (against_factors or against_actions) else "warning",
@@ -2227,16 +2428,20 @@ def financial_statement_peer_findings(config: Config) -> list[dict]:
             "financial_statement_items",
         )
         .filter(pl.col("report_period").is_in(periods))
-        .select("symbol", "report_period", "item_code", "item_value", "source")
         .collect()
     )
     if curated.is_empty():
         return []
 
-    # The primary key carries announce_date, so a restated period holds several
-    # rows per item; compare the latest reading of each.
-    latest = curated.group_by("symbol", "report_period", "item_code").agg(
-        pl.col("item_value").last().alias("_curated"), pl.col("source").last().alias("_source")
+    # The primary key carries announce_date and every vintage is kept, so a
+    # restated period holds several rows per item; compare the latest reading.
+    order = [c for c in ("announce_date", "observed_at", "fetched_at") if c in curated.columns]
+    latest = (
+        curated.sort(["symbol", "report_period", "item_code", *order], nulls_last=False)
+        .group_by("symbol", "report_period", "item_code", maintain_order=True)
+        .agg(
+            pl.col("item_value").last().alias("_curated"), pl.col("source").last().alias("_source")
+        )
     )
     peer_latest = peer.group_by("symbol", "report_period", "item_code").agg(
         pl.col("item_value").last().alias("_peer")
@@ -2338,8 +2543,8 @@ def untraded_instrument_findings(config: Config, trade_date: date) -> list[dict]
             "check": "untraded_instruments",
             "message": (
                 f"{untraded.height} symbol(s) carry {int(untraded.get_column('rows').sum())} "
-                "bar(s) with no volume and no turnover in the last year — a NAV series "
-                "rather than a quoted price"
+                "bar(s) with no volume and no turnover in the last year; a price nobody "
+                "traded at (a NAV series or a long suspension) must not be used as a quote"
             ),
             "symbols": untraded.height,
             "rows": int(untraded.get_column("rows").sum()),
@@ -2362,8 +2567,13 @@ def _policy_base(source: str, registered: set[str]) -> str | None:
     return None
 
 
-def undeclared_source_findings(config: Config) -> list[dict]:
+def undeclared_source_findings(
+    config: Config, datasets: Collection[str] | None = None
+) -> list[dict]:
     """Sources in the data that the compliance registry cannot speak for.
+
+    ``datasets`` limits the scan (a publication candidate's datasets); every
+    other dataset's labels are unchanged by that publication.
 
     ``policies_for_dataset`` answers "which terms apply to this data" from the
     ``DatasetSpec`` routing fields — primary, backup, backfill. Anything that
@@ -2399,6 +2609,8 @@ def undeclared_source_findings(config: Config) -> list[dict]:
     unregistered: dict[str, list[str]] = {}
     unrouted: dict[str, list[str]] = {}
     for name, spec in sorted(DATASETS.items()):
+        if datasets is not None and name not in datasets:
+            continue
         root = (config.derived_root if spec.layer == "derived" else config.curated_root) / name
         if not dataset_has_parquet(root):
             continue

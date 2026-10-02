@@ -1,0 +1,117 @@
+from datetime import date, datetime, timezone
+
+import polars as pl
+import pytest
+
+from cnequity.config import Config
+from cnequity.domain.units import turnover_defect_expr
+from cnequity.quality.unit_checks import daily_bars_turnover_defect_findings
+from cnequity.query import load
+from cnequity.steps import bars
+from cnequity.steps.finalize import step_compact
+from cnequity.storage.revisions import RevisionStore
+
+DAY = date(2001, 1, 3)
+FETCHED = datetime(2026, 7, 23, tzinfo=timezone.utc)
+
+
+def _row(symbol, *, volume, amount, close=18.26, source="ths", high=18.88, low=17.9):
+    return {
+        "symbol": symbol,
+        "trade_date": DAY,
+        "open": 18.0,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+        "amount": amount,
+        "source": source,
+        "data_version": "v2",
+        "fetched_at": FETCHED,
+    }
+
+
+def test_turnover_defects_are_classified_without_flagging_block_trades():
+    frame = pl.DataFrame(
+        [
+            _row("A", volume=100, amount=None),
+            _row("B", volume=100, amount=0.0),
+            _row("C", volume=15704, amount=28904000.0),  # volume in 手
+            _row("D", volume=100, amount=1950.0),  # 3% above high: block trade, fine
+            _row("E", volume=0, amount=0.0),  # suspension
+        ],
+        schema_overrides={"amount": pl.Float64},
+    )
+    defects = frame.select(turnover_defect_expr()).to_series().to_list()
+    assert defects == ["missing_amount", "zero_amount", "unit_mismatch", None, None]
+
+
+@pytest.fixture
+def lake(tmp_path):
+    cfg = Config(data_root=tmp_path)
+    path = cfg.curated_root / f"daily_bars/trade_date={DAY}/part-merged.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            _row("600215.SH", volume=15704, amount=28904000.0),  # unit fault
+            _row("600216.SH", volume=5000, amount=0.0),  # zero turnover
+            _row("600217.SH", volume=5000, amount=0.0),  # baostock prices disagree
+            _row("600218.SH", volume=5000, amount=91000.0),  # healthy, untouched
+            _row("161816.SZ", volume=5000, amount=0.0),  # a fund: baostock cannot serve
+        ],
+        schema_overrides={"amount": pl.Float64},
+    ).write_parquet(path)
+    RevisionStore(cfg.meta_root, cfg.curated_root).commit(
+        "daily_bars",
+        run_id="seed",
+        changed_files=[path],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    return cfg
+
+
+def test_repair_replaces_only_rows_baostock_confirms(lake, monkeypatch):
+    requested = []
+
+    def fake_fetch(symbols, start, end, *, config=None):
+        requested.append(sorted(symbols))
+        rows = []
+        for symbol in symbols:
+            close = 18.99 if symbol == "600217.SH" else 18.26
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": DAY,
+                    "open": 18.0,
+                    "high": 18.88,
+                    "low": 17.9,
+                    "close": close,
+                    "volume": 1570400,
+                    "amount": 28904000.0,
+                }
+            )
+        return rows, []
+
+    import cnequity.adapters.baostock.delisted_bars as delisted
+
+    monkeypatch.setattr(delisted, "fetch_delisted_bars", fake_fetch)
+    before = daily_bars_turnover_defect_findings(lake, DAY, full=True)
+    assert {f["check"] for f in before} == {"daily_bars_zero_amount", "daily_bars_turnover_unit"}
+
+    result = bars.repair_daily_bar_turnover(lake, DAY, DAY, "repair", None)
+    assert requested == [["600215.SH", "600216.SH", "600217.SH"]]
+    summary = result["context_updates"]["audit_findings"][0]
+    assert summary["rows_replaced"] == 2
+    assert summary["rows_disagreeing"] == 1
+    # The fund is outside the repair: baostock serves stocks only.
+    assert summary["defects"] == {"unit_mismatch": 1, "zero_amount": 2}
+
+    step_compact(lake, DAY, "repair", {})
+    stored = {r["symbol"]: r for r in load("daily_bars", config=lake).iter_rows(named=True)}
+    assert stored["600215.SH"]["volume"] == 1570400
+    assert stored["600215.SH"]["source"] == "baostock"
+    assert stored["600216.SH"]["amount"] == pytest.approx(28904000.0)
+    assert stored["600217.SH"]["source"] == "ths"  # disagreeing prices: kept
+    assert stored["600218.SH"]["amount"] == 91000.0
+    assert stored["161816.SZ"]["amount"] == 0.0

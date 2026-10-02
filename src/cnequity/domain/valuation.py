@@ -82,10 +82,12 @@ def reconstruct_total_mv(frame: pl.DataFrame, shares: pl.DataFrame) -> pl.DataFr
         .select("__row", "change_date", "total_shares")
     )
     out = order.join(matched, on="__row", how="left").sort("__row")
+    # A value already rebuilt from share_structure is recomputed as well: it
+    # is a pure function of close and shares, and share history gets corrected.
     eligible = (
         (
             (pl.col("total_mv_basis").is_null() & pl.col("total_mv").is_null())
-            | (pl.col("total_mv_basis") == TOTAL_MV_YEAR_END_ESTIMATE)
+            | pl.col("total_mv_basis").is_in([TOTAL_MV_YEAR_END_ESTIMATE, TOTAL_MV_SHARE_STRUCTURE])
         )
         & (pl.col("close") > 0)
         & pl.col("total_shares").is_not_null()
@@ -127,9 +129,14 @@ def repair_legacy_float_mv(frame: pl.DataFrame) -> pl.DataFrame:
         & (vwap >= pl.col("low") * (1 - _VWAP_RANGE_SLACK))
         & (vwap <= pl.col("high") * (1 + _VWAP_RANGE_SLACK))
     ).fill_null(False)
+    # A value still labelled VWAP-based is still VWAP-valued: convert it as
+    # soon as a consistent bar exists (e.g. after a turnover repair).
     legacy = (
         (pl.col("source") == "baostock")
-        & pl.col("float_mv_basis").is_null()
+        & (
+            pl.col("float_mv_basis").is_null()
+            | (pl.col("float_mv_basis") == FLOAT_MV_VWAP_TURN_IMPLIED)
+        )
         & pl.col("float_mv").is_not_null()
     )
     return frame.with_columns(

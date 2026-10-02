@@ -59,6 +59,12 @@ def _parse_stock_kline(payload: dict[str, Any], symbol: str) -> list[dict]:
             continue
         stamp = parts[0]
         try:
+            volume = finite_int64(_finite_float(parts[5]), minimum=0)
+            amount = _finite_float(parts[6])
+            # Pre-2004 year files carry 0 for turnover they do not have: a
+            # traded bar with zero turnover is unknown, not free.
+            if volume and amount is not None and amount <= 0:
+                amount = None
             rows.append(
                 {
                     "symbol": symbol,
@@ -67,8 +73,8 @@ def _parse_stock_kline(payload: dict[str, Any], symbol: str) -> list[dict]:
                     "high": _finite_float(parts[2]),
                     "low": _finite_float(parts[3]),
                     "close": _finite_float(parts[4]),
-                    "volume": finite_int64(_finite_float(parts[5]), minimum=0),
-                    "amount": _finite_float(parts[6]),
+                    "volume": volume,
+                    "amount": amount,
                 }
             )
         except ValueError:

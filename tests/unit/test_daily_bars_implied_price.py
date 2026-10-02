@@ -199,3 +199,33 @@ def test_a_block_trade_does_not_excuse_a_shanghai_row(tmp_path):
 
     (finding,) = daily_bars_implied_price_findings(cfg, DAY)
     assert finding["rows"] == 1
+
+
+def test_a_beijing_day_past_block_trade_coverage_is_awaiting_not_broken(tmp_path):
+    from datetime import timedelta
+
+    cfg = _lake(
+        tmp_path,
+        [_bar("920701.BJ", volume=1552253, amount=31_057_000.0, low=20.85, high=21.64)],
+        {"920701.BJ": "stock"},
+    )
+    part = (
+        cfg.curated_root
+        / "block_trades"
+        / f"trade_date={(DAY - timedelta(days=40)).strftime('%Y-%m')}"
+    )
+    part.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["920001.BJ"],
+            "trade_date": [DAY - timedelta(days=40)],
+            "volume": [1.0],
+            "amount": [1.0],
+            "source": ["exchange"],
+            "data_version": ["v1"],
+            "fetched_at": [datetime(2026, 1, 1, tzinfo=timezone.utc)],
+        }
+    ).write_parquet(part / "part.parquet")
+    (finding,) = daily_bars_implied_price_findings(cfg, DAY)
+    assert finding["check"] == "daily_bars_implied_price_awaiting_blocks"
+    assert finding["severity"] == "info"

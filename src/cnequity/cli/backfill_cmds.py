@@ -107,7 +107,7 @@ from cnequity.orchestrator.engine import JobEngine
     default=None,
     help=(
         "限定范围的标的列表，逗号分隔：用于 intraday、trading_status、corporate_actions "
-        "的限定回填，以及 financial_statement_items、daily_bars 的限定修复。trading_status "
+        "的限定回填，以及 financial_statement_items、daily_bars、share_structure 的限定修复。trading_status "
         "的 checkpoint 与覆盖证据会记下确切范围；daily_bars 会把这个显式范围写进 backfill 元数据。"
     ),
 )
@@ -187,6 +187,14 @@ from cnequity.orchestrator.engine import JobEngine
     ),
 )
 @click.option(
+    "--turnover-repair",
+    is_flag=True,
+    help=(
+        "仅 daily_bars：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；"
+        "开高低收须在半分钱内一致，不一致或未提供的保留原值。需要 --start/--end。"
+    ),
+)
+@click.option(
     "--fill-em-outage",
     is_flag=True,
     help=(
@@ -224,6 +232,7 @@ def backfill(
     bse_tip_repair: bool,
     bj_amount_repair: bool,
     tdx_volume_repair: bool,
+    turnover_repair: bool,
     fill_em_outage: bool,
 ):
     """回填一个数据集。
@@ -257,6 +266,7 @@ def backfill(
             or bse_tip_repair
             or bj_amount_repair
             or tdx_volume_repair
+            or turnover_repair
             or fill_em_outage
             or shfe_annual_archive
             or archive_year
@@ -330,6 +340,7 @@ def backfill(
             or bse_tip_repair
             or bj_amount_repair
             or tdx_volume_repair
+            or turnover_repair
             or fill_em_outage
         ):
             raise click.ClickException("年度包导入只接受 --start/--end/--plan 和归档参数")
@@ -500,6 +511,12 @@ def backfill(
         if not symbols_str or start_d is None or end_d is None:
             raise click.ClickException("--tdx-volume-repair 需要 --symbols 和 --start/--end")
         cfg._tdx_volume_repair = True
+    if turnover_repair:
+        if dataset != "daily_bars":
+            raise click.ClickException("--turnover-repair 只适用于 daily_bars")
+        if start_d is None or end_d is None:
+            raise click.ClickException("--turnover-repair 需要同时给 --start 和 --end")
+        cfg._turnover_repair = True
     if fill_em_outage:
         if dataset != "valuation_metrics":
             raise click.ClickException("--fill-em-outage 只适用于 valuation_metrics")
@@ -534,6 +551,7 @@ def backfill(
             "trading_status",
             "corporate_actions",
             "financial_statement_items",
+            "share_structure",
         ):
             cfg._backfill_symbols = symbols
         else:
@@ -558,6 +576,7 @@ def backfill(
                 (bse_tip_repair, "bse-tip-repair"),
                 (bj_amount_repair, "bj-amount-repair"),
                 (tdx_volume_repair, "tdx-volume-repair"),
+                (turnover_repair, "turnover-repair"),
                 (fill_em_outage, "fill-em-outage"),
                 (force, "force"),
                 (retry_failed, "retry-failed"),

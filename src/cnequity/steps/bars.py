@@ -1110,6 +1110,202 @@ def repair_tdx_volumes(
     return result
 
 
+# Baostock and the stored row must describe the same session: unadjusted
+# prices to within half a cent.
+_TURNOVER_REPAIR_PRICE_TOLERANCE = 0.006
+# Symbols per baostock call and per staged batch of the turnover repair.
+_TURNOVER_REPAIR_BATCH = 100
+
+
+def _baostock_stock(symbol: str) -> bool:
+    """SH/SZ stocks, the only daily bars baostock serves."""
+    code, _, exchange = symbol.partition(".")
+    if exchange == "SH":
+        return code.startswith(("60", "688"))
+    if exchange == "SZ":
+        return code.startswith(("00", "30"))
+    return False
+
+
+def _turnover_replacements(
+    stored: pl.DataFrame, fresh: pl.DataFrame
+) -> tuple[pl.DataFrame, dict[str, int]]:
+    """Baostock rows that may replace stored rows with unusable turnover.
+
+    A replacement is the whole baostock row, never a spliced field, and only
+    when its prices match the stored row and its own turnover is usable.
+    """
+    from cnequity.domain.units import turnover_defect_expr
+
+    prices = ("open", "high", "low", "close")
+    candidates = fresh.filter(turnover_defect_expr().is_null() & (pl.col("volume") > 0))
+    joined = stored.select("symbol", "trade_date", *prices).join(
+        candidates.select("symbol", "trade_date", *[pl.col(c).alias(f"_new_{c}") for c in prices]),
+        on=["symbol", "trade_date"],
+        how="left",
+    )
+    served = pl.col("_new_close").is_not_null()
+    same = pl.all_horizontal(
+        (pl.col(c) - pl.col(f"_new_{c}")).abs() <= _TURNOVER_REPAIR_PRICE_TOLERANCE for c in prices
+    )
+    accepted = joined.filter(served & same).select("symbol", "trade_date")
+    counts = {
+        "rows_checked": stored.height,
+        "rows_unserved": joined.filter(~served).height,
+        "rows_disagreeing": joined.filter(served & ~same).height,
+        "rows_replaced": accepted.height,
+    }
+    return fresh.join(accepted, on=["symbol", "trade_date"], how="semi"), counts
+
+
+def repair_daily_bar_turnover(
+    config: Config,
+    start: date,
+    end: date,
+    run_id: str,
+    symbols: list[str] | None,
+) -> dict:
+    """Replace stored stock bars whose turnover is missing, zero or mis-unit.
+
+    同花顺's pre-2004 year files store 0 for turnover they lack, some of them
+    count volume in 手, and Sina never publishes turnover. Baostock serves the
+    same unadjusted sessions with both fields in the lake's units; its row
+    replaces the stored one only when their prices agree. Rows it cannot
+    serve or that disagree keep their stored value and are counted.
+    """
+    from cnequity.adapters.baostock.delisted_bars import fetch_delisted_bars
+    from cnequity.domain.units import turnover_defect_expr
+    from cnequity.query.parquet_scan import collect_parquet_root
+    from cnequity.steps.http_common import write_fetched
+
+    scope = _resolve_daily_bar_scope(config, symbols) if symbols else None
+    totals: dict[str, int] = dict.fromkeys(
+        ("rows_checked", "rows_unserved", "rows_disagreeing", "rows_replaced"), 0
+    )
+    failed: set[str] = set()
+    rows_written = 0
+    # Find every defect first, then ask baostock once per stock for the years
+    # it needs: its pacing rests after every 20 symbols of a call, so walking
+    # year by year would pay that rest again for each year of each stock.
+    parts: list[pl.DataFrame] = []
+    for lo, hi in _yearly_slices(start, end):
+        current = collect_parquet_root(
+            config.curated_root / "daily_bars",
+            partition_col="trade_date",
+            start=lo,
+            end=hi,
+            symbols=scope,
+        )
+        if current.is_empty():
+            continue
+        defective = (
+            dedupe_by_primary_key(current, "daily_bars")
+            .with_columns(turnover_defect_expr().alias("_defect"))
+            .filter(pl.col("_defect").is_not_null())
+        )
+        defective = defective.filter(
+            pl.col("symbol").map_elements(_baostock_stock, return_dtype=pl.Boolean)
+        )
+        if not defective.is_empty():
+            parts.append(defective)
+    stored = pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
+    by_defect: dict[str, int] = (
+        dict(stored.group_by("_defect").len().iter_rows()) if not stored.is_empty() else {}
+    )
+    spans = (
+        stored.group_by("symbol")
+        .agg(
+            pl.col("trade_date").min().dt.year().alias("first"),
+            pl.col("trade_date").max().dt.year().alias("last"),
+        )
+        .sort("first", "last", "symbol")
+        if not stored.is_empty()
+        else pl.DataFrame()
+    )
+    groups: dict[tuple[int, int], list[str]] = {}
+    for row in spans.iter_rows(named=True):
+        groups.setdefault((row["first"], row["last"]), []).append(row["symbol"])
+    batch = 0
+    for (first, last), names in groups.items():
+        lo, hi = max(start, date(first, 1, 1)), min(end, date(last, 12, 31))
+        for offset in range(0, len(names), _TURNOVER_REPAIR_BATCH):
+            chunk = names[offset : offset + _TURNOVER_REPAIR_BATCH]
+            rows, chunk_failed = fetch_delisted_bars(chunk, lo, hi, config=config)
+            failed.update(chunk_failed)
+            fresh = pl.DataFrame(
+                rows,
+                schema={
+                    "symbol": pl.Utf8,
+                    "trade_date": pl.Date,
+                    **dict.fromkeys(("open", "high", "low", "close"), pl.Float64),
+                    "volume": pl.Int64,
+                    "amount": pl.Float64,
+                },
+            )
+            target = stored.filter(pl.col("symbol").is_in(chunk)).drop("_defect")
+            replacement, counts = _turnover_replacements(target, fresh)
+            for key, value in counts.items():
+                totals[key] += value
+            batch += 1
+            if replacement.is_empty():
+                continue
+            out = write_fetched(
+                config,
+                run_id,
+                "daily_bars",
+                replacement,
+                source="baostock",
+                batch_id=f"turnover-repair-{batch:04d}",
+            )
+            rows_written += int(out.get("rows_written", 0))
+            logger.info(
+                "turnover repair %s..%s, %d symbol(s): %d of %d row(s) replaced",
+                lo,
+                hi,
+                len(chunk),
+                counts["rows_replaced"],
+                counts["rows_checked"],
+            )
+
+    findings: list[dict] = [
+        {
+            "dataset": "daily_bars",
+            "severity": "info",
+            "check": "daily_bars_turnover_repair",
+            "message": (
+                f"turnover repair over {start}..{end}: replaced {totals['rows_replaced']} of "
+                f"{totals['rows_checked']} stock row(s) with unusable turnover"
+            ),
+            "source": "baostock",
+            "defects": by_defect,
+            **totals,
+        }
+    ]
+    if totals["rows_disagreeing"] or failed:
+        findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "warning",
+                "check": "daily_bars_turnover_repair_skipped",
+                "message": (
+                    f"turnover repair left {totals['rows_disagreeing']} row(s) whose prices "
+                    f"disagree with baostock and {len(failed)} symbol(s) it did not serve"
+                ),
+                "source": "baostock",
+                "rows_disagreeing": totals["rows_disagreeing"],
+                "failed_symbols": sorted(failed)[:50],
+            }
+        )
+    result: dict = {
+        "rows_read": totals["rows_checked"],
+        "rows_written": rows_written,
+        "context_updates": {"audit_findings": findings},
+    }
+    if len(findings) > 1:
+        result["status"] = "warning"
+    return result
+
+
 def _yearly_slices(start: date, end: date) -> list[tuple[date, date]]:
     slices: list[tuple[date, date]] = []
     year = start.year
@@ -1334,6 +1530,11 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
 
     if getattr(config, "_tdx_volume_repair", False):
         return repair_tdx_volumes(
+            config, start, end, run_id, getattr(config, "_backfill_symbols", None)
+        )
+
+    if getattr(config, "_turnover_repair", False):
+        return repair_daily_bar_turnover(
             config, start, end, run_id, getattr(config, "_backfill_symbols", None)
         )
 

@@ -622,8 +622,14 @@ def audit_curated_dataset(
     *,
     full: bool = False,
     stale: bool = False,
+    partitions: frozenset[str] | None = None,
 ) -> list[dict]:
     """Audit the current partition, or every historical file when ``full``.
+
+    ``partitions`` narrows a full audit to those top-level partition
+    directories (a publication candidate's changed partitions). Primary-key
+    uniqueness still reads every file unless the partition column is part of
+    the key, because an unchanged partition can hold the same key.
 
     ``stale`` says the dataset is already known to be behind. A partition that
     shrank because nothing has been fetched into it is not the defect
@@ -673,8 +679,21 @@ def audit_curated_dataset(
     previous_value: str | None = None
     audit_lf: pl.LazyFrame
 
+    pk_files: list[Path] | None = None
     if full:
         audit_files = sorted(root.rglob("*.parquet"))
+        if partitions is not None:
+            if partition_col is None or partition_col not in PRIMARY_KEYS.get(dataset, []):
+                pk_files = audit_files
+            audit_files = [
+                path
+                for path in audit_files
+                if len(path.relative_to(root).parts) > 1
+                and path.relative_to(root).parts[0] in partitions
+            ]
+            if not audit_files:
+                # Every requested partition was removed: nothing left to scan.
+                return findings
         # Historical files can straddle a nullable-column schema evolution.
         # The per-file contract scan below still validates each file; the
         # aggregate lazy checks only need a stable union for PK/null counts.
@@ -830,7 +849,11 @@ def audit_curated_dataset(
     violations: dict[str, int] = {}
     if full and audit_files is not None:
         dupes = _partitioned_pk_duplicate_count(
-            audit_files, dataset, partition_col, root, violations=violations
+            pk_files if pk_files is not None else audit_files,
+            dataset,
+            partition_col,
+            root,
+            violations=violations,
         )
     else:
         dupes = _lazy_pk_duplicate_count(audit_lf, dataset)

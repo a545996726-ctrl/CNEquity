@@ -257,8 +257,9 @@ def fetch_share_structure(
     config: Config | None = None,
     archive_context: ShareholderCapture | None = None,
     progress: ShareholderProgress | None = None,
+    symbols: list[str] | None = None,
 ) -> pl.DataFrame:
-    """股本结构变动 in a date window.
+    """股本结构变动 in a date window, optionally for named securities only.
 
     Unlike the other two reports, ``RPT_F10_EH_EQUITY.END_DATE`` is the date the
     share count *changed*, not a report period: 600519 has 16 rows in its entire
@@ -274,6 +275,11 @@ def fetch_share_structure(
     be announced today.
     """
     column = "END_DATE" if by == CHANGE_DATE else "NOTICE_DATE"
+    filter_expr = _range_filter(column, start, end)
+    if symbols:
+        # A targeted refresh after the audit names a stale share count.
+        quoted = ",".join(f'"{symbol}"' for symbol in sorted(set(symbols)))
+        filter_expr += f"(SECUCODE in ({quoted}))"
     owns = client is None
     if client is None:
         client = EastMoneyClient(config=config)
@@ -282,7 +288,7 @@ def fetch_share_structure(
             client,
             _EQUITY_REPORT,
             _EQUITY_COLUMNS,
-            _range_filter(column, start, end),
+            filter_expr,
             config=config,
             archive_context=archive_context,
             progress=progress,

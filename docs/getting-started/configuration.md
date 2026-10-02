@@ -421,6 +421,6 @@ cnequity.toml
 
 ## 发布前与发布后的审计
 
-`[quality].publication_gate` 支持 `off`（默认）、`shadow`、`block`。它在普通 compact 发布前对整批候选作离线全量审计，比较已提交基线；block 模式拒绝新增 error，审计异常也拒绝。派生发布使用相同门禁。已有错误会保留在报告中，不会永久阻止改善数据的修正。
+`[quality].publication_gate` 支持 `off`（默认）、`shadow`、`block`。它在普通 compact 发布前对整批候选作离线全量审计，比较已提交基线；block 模式拒绝新增或恶化的 error，审计异常也拒绝。问题按“检查项 + 数据集 + 范围（分区、字段、来源、日期等）”识别，行数、键数等度量变多才算恶化；文案或样本变化、问题减少都不算新增。报告的 `issue_changes` 分列新增、恶化、改善、未变和已消除。结构检查只读候选数据集的变更分区；跨数据集检查只在其输入含候选数据集时运行，其余检查结果前后相同，不重复计算。派生发布使用相同门禁。
 
 `[quality].audit_gate` 仍决定发布后运行状态，两者互不替代。全历史扫描有 I/O 成本，可先 shadow 后 block。详见 [产品边界](../architecture/overview.md)。

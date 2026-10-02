@@ -45,9 +45,16 @@ minute-to-daily volume reconciliation has to compare 股 to 股.
 
 from __future__ import annotations
 
-__all__ = ["SHARES_PER_LOT", "lots_to_shares"]
+import polars as pl
+
+__all__ = ["SHARES_PER_LOT", "lots_to_shares", "turnover_defect_expr"]
 
 SHARES_PER_LOT = 100
+
+# A traded bar's average price, amount / volume, off the day's range by this
+# factor is a unit fault (手 against 股 is 100×), not block or after-hours
+# trades priced a few percent away from the auction.
+_UNIT_FAULT_FACTOR = 2.0
 
 
 def lots_to_shares(volume_lots: float | int | None) -> int:
@@ -59,3 +66,31 @@ def lots_to_shares(volume_lots: float | int | None) -> int:
     if volume_lots is None:
         return 0
     return int(volume_lots) * SHARES_PER_LOT
+
+
+def turnover_defect_expr() -> pl.Expr:
+    """Why a daily bar's turnover cannot be used, or null when it can.
+
+    ``missing_amount`` — the source published no turnover for a traded bar.
+    ``zero_amount`` — a traded bar with zero turnover: a missing value stored
+    as 0 (同花顺 pre-2004 year files). ``unit_mismatch`` — the average price
+    is off the day's range by more than 2×, so volume and amount are not on
+    the same unit. A suspension (volume 0, amount 0) is not a defect.
+    """
+    traded = pl.col("volume") > 0
+    average = pl.col("amount") / pl.col("volume")
+    return (
+        pl.when(traded & pl.col("amount").is_null())
+        .then(pl.lit("missing_amount"))
+        .when(traded & (pl.col("amount") <= 0))
+        .then(pl.lit("zero_amount"))
+        .when(
+            traded
+            & (
+                (average > pl.col("high") * _UNIT_FAULT_FACTOR)
+                | (average < pl.col("low") / _UNIT_FAULT_FACTOR)
+            )
+        )
+        .then(pl.lit("unit_mismatch"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8))
+    )

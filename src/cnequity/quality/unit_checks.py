@@ -208,6 +208,20 @@ def _net_of_beijing_block_trades(
     return broken.join(explained, on=["symbol", "trade_date"], how="anti")
 
 
+def _block_trade_coverage_end(config: Config) -> date | None:
+    """The last session ``block_trades`` holds, or None without the dataset."""
+    root = config.curated_root / "block_trades"
+    if not dataset_has_parquet(root):
+        return None
+    last = (
+        scan_parquet_root(root, partition_col="trade_date")
+        .select(pl.col("trade_date").max())
+        .collect()
+        .item()
+    )
+    return last if isinstance(last, date) else None
+
+
 def daily_bars_implied_price_findings(
     config: Config,
     trade_date: date,
@@ -268,6 +282,39 @@ def daily_bars_implied_price_findings(
         .collect(engine="streaming")
     )
     broken = _net_of_beijing_block_trades(config, broken, start, trade_date)
+    # A Beijing day after the last captured block-trade session cannot be
+    # netted yet: its breach is unverified, not a row that disagrees with itself.
+    covered_until = _block_trade_coverage_end(config)
+    awaiting = (
+        broken.filter(
+            pl.col("symbol").str.ends_with(".BJ") & (pl.col("trade_date") > covered_until)
+        )
+        if covered_until is not None
+        else broken.clear()
+    )
+    if not awaiting.is_empty():
+        broken = broken.join(
+            awaiting.select("symbol", "trade_date"), on=["symbol", "trade_date"], how="anti"
+        )
+        findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "info",
+                "check": "daily_bars_implied_price_awaiting_blocks",
+                "message": (
+                    f"{awaiting.height} Beijing day(s) fall outside their own low..high, but "
+                    "Beijing volume and turnover include block trades and block_trades is not "
+                    f"captured past {covered_until.isoformat()}; "
+                    "re-checked once those sessions' block trades land"
+                ),
+                "rows": awaiting.height,
+                "covered_until": covered_until.isoformat(),
+                "sample": [
+                    {"symbol": item["symbol"], "trade_date": item["trade_date"].isoformat()}
+                    for item in awaiting.head(IMPLIED_PRICE_SAMPLE).iter_rows(named=True)
+                ],
+            }
+        )
     if broken.is_empty():
         return findings
 
@@ -400,6 +447,77 @@ def daily_bars_amount_completeness_findings(
                 "window_start": start.isoformat(),
                 "window_end": trade_date.isoformat(),
                 "source_limited": source == "sina",
+            }
+        )
+    return findings
+
+
+# Turnover defects this check owns; a null amount is the completeness check's.
+_TURNOVER_DEFECT_CHECKS = {
+    "zero_amount": "daily_bars_zero_amount",
+    "unit_mismatch": "daily_bars_turnover_unit",
+}
+
+
+def daily_bars_turnover_defect_findings(
+    config: Config,
+    trade_date: date,
+    *,
+    full: bool = False,
+    lookback_days: int = UNIT_CHECK_LOOKBACK_DAYS,
+) -> list[dict]:
+    """Traded bars whose turnover is stored as 0 or on another unit than volume.
+
+    Row-level where ``daily_bars_volume_unit`` is a per-source median: a few
+    thousand 同花顺 pre-2004 rows with 0 turnover, or volume in 手, cannot move
+    a median over millions of rows. ``cne backfill daily_bars
+    --turnover-repair`` replaces such stock rows from baostock.
+    """
+    from cnequity.domain.units import turnover_defect_expr
+
+    root = config.curated_root / "daily_bars"
+    if not dataset_has_parquet(root):
+        return []
+    start = None if full else trade_date - timedelta(days=lookback_days)
+    lf = dedupe_lazy_by_primary_key(
+        scan_parquet_root(root, partition_col="trade_date", start=start, end=trade_date),
+        "daily_bars",
+    )
+    if not {"amount", "volume", "high", "low", "source"}.issubset(lf.collect_schema().names()):
+        return []
+    defects = (
+        lf.with_columns(turnover_defect_expr().alias("defect"))
+        .filter(pl.col("defect").is_in(list(_TURNOVER_DEFECT_CHECKS)))
+        .group_by("defect", "source")
+        .agg(
+            pl.len().alias("rows"),
+            pl.col("symbol").n_unique().alias("symbols"),
+            pl.col("trade_date").min().alias("first"),
+            pl.col("trade_date").max().alias("last"),
+        )
+        .collect(engine="streaming")
+    )
+    findings: list[dict] = []
+    for row in defects.sort("defect", "source").iter_rows(named=True):
+        findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "warning",
+                "check": _TURNOVER_DEFECT_CHECKS[row["defect"]],
+                "message": (
+                    f"source={row['source']}: {row['rows']} traded row(s) across "
+                    f"{row['symbols']} symbol(s) have "
+                    + (
+                        "zero turnover"
+                        if row["defect"] == "zero_amount"
+                        else "turnover and volume on different units"
+                    )
+                    + f" ({row['first']}..{row['last']}); stock rows can be replaced with "
+                    "`cne backfill daily_bars --turnover-repair`"
+                ),
+                "source": row["source"],
+                "rows": int(row["rows"]),
+                "symbols": int(row["symbols"]),
             }
         )
     return findings

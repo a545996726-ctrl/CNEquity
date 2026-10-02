@@ -143,7 +143,7 @@ def _publish_derived_revision(
     revisions = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
     with lake_mutation_lock(config.meta_root, blocking=True):
         publication = evaluate_publication(
-            config, f"{run_id}-{dataset}", trade_date, {dataset: root}
+            config, f"{run_id}-{dataset}", trade_date, {dataset: root}, {dataset: changed}
         )
         if publication["blocked"]:
             revisions.quarantine_candidate(dataset, run_id=run_id, reason="publication_gate")
@@ -538,7 +538,11 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     from cnequity.quality.publication import evaluate_publication
 
     publication = evaluate_publication(
-        config, run_id, trade_date, {item[0]: config.curated_root / item[0] for item in pending}
+        config,
+        run_id,
+        trade_date,
+        {item[0]: config.curated_root / item[0] for item in pending},
+        {item[0]: item[3] for item in pending},
     )
     blocked_datasets = set(publication.get("blocked_datasets") or [])
     if publication["blocked"]:

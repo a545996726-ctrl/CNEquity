@@ -410,3 +410,12 @@ def test_filtered_shareholder_page_carries_exact_wire_capture(tmp_path):
         config, "share_structure", "run-1", source="eastmoney", request_scope=scope
     )
     assert evidence.record_keys
+
+
+def test_share_structure_can_be_refreshed_for_named_securities(monkeypatch):
+    seen: dict[str, str] = {}
+    _patch(monkeypatch, {sh._EQUITY_REPORT: []}, seen)
+    sh.fetch_share_structure(
+        WIN_START, WIN_END, client=_Client(), symbols=["603014.SH", "600601.SH"]
+    )
+    assert seen[sh._EQUITY_REPORT].endswith('(SECUCODE in ("600601.SH","603014.SH"))')

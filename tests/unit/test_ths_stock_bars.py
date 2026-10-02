@@ -363,3 +363,11 @@ def test_index_symbol_without_a_code_raises():
 
     with pytest.raises(KeyError, match="no 同花顺 index code"):
         fetch_index_bars_history("000852.SH", date(2010, 1, 1), date(2010, 12, 31))
+
+
+def test_zero_turnover_on_a_traded_bar_is_unknown_not_zero():
+    payload = {"data": "20010102,10.0,10.5,9.8,10.2,15704,0;20010103,10.0,10.0,10.0,10.0,0,0"}
+    rows = _parse_stock_kline(payload, "600215.SH")
+    assert rows[0]["amount"] is None
+    # A suspension keeps the lake's volume-0 / amount-0 convention.
+    assert rows[1]["amount"] == 0

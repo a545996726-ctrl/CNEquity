@@ -38,7 +38,7 @@ def test_manifest_backup_closes_connections(tmp_path, monkeypatch, backup_fails)
         connections.append(connection)
         return connection
 
-    def errors(view, day):
+    def errors(view, day, scope=None):
         copied = connect(view.manifest_path)
         try:
             assert copied.execute("SELECT value FROM receipt").fetchone() == (42,)
@@ -97,7 +97,7 @@ def test_candidate_audit_precedes_pointer_switch(tmp_path, monkeypatch, mode, ex
     old_id = revisions.latest("daily_bars").revision_id
     calls = []
 
-    def errors(view, day):
+    def errors(view, day, scope=None):
         # Both audits happen before the original lake has been published.
         assert revisions.latest("daily_bars").revision_id == old_id
         close = load("daily_bars", config=view)["close"][0]
@@ -114,7 +114,8 @@ def test_candidate_audit_precedes_pointer_switch(tmp_path, monkeypatch, mode, ex
         "daily_bars", "candidate", "one", _bar(20.0, "2024-06-28T01:00:00Z")
     )
     result = step_compact(cfg, date(2024, 6, 28), "candidate", {})
-    assert calls == ([10.0, 20.0, 10.0] if mode == "block" else [10.0, 20.0])
+    # One candidate: the finding is attributed to it without a third audit.
+    assert calls == [10.0, 20.0]
     assert load("daily_bars", config=cfg)["close"].to_list() == [expected]
     assert Path(result["publication_audit"]).exists()
     if mode == "block":
@@ -173,7 +174,7 @@ def test_publication_blocks_only_the_candidate_that_causes_the_error(tmp_path, m
         ),
     )
 
-    def errors(view, day):
+    def errors(view, day, scope=None):
         bars = view.curated_root / "daily_bars"
         files = list(bars.rglob("*.parquet")) if bars.exists() else []
         if files and pl.read_parquet(files[0])["close"].item() == 20.0:
@@ -186,3 +187,85 @@ def test_publication_blocks_only_the_candidate_that_causes_the_error(tmp_path, m
     assert not list((cfg.curated_root / "daily_bars").rglob("*.parquet"))
     assert load("fund_flow", config=cfg).height == 1
     assert result["context_updates"]["compact_skipped_datasets"][0]["dataset"] == "daily_bars"
+
+
+@pytest.mark.parametrize("new,blocked", [({"A": 1}, False), ({"C": 1}, True), ({"A": 3}, True)])
+def test_partial_repair_requires_per_key_non_regression(tmp_path, monkeypatch, new, blocked):
+    cfg = Config(data_root=tmp_path / "lake", publication_gate="block")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+
+    def finding(violations):
+        return {
+            "dataset": "daily_bars",
+            "check": "pk_unique",
+            "severity": "error",
+            "message": f"{sum(violations.values())} duplicates",
+            "violations": violations,
+            "violations_complete": True,
+        }
+
+    baseline = [finding({"A": 2, "B": 1})]
+    answers = iter([baseline, [finding(new)], baseline])
+    monkeypatch.setattr("cnequity.quality.publication._errors", lambda *args: next(answers))
+    report = evaluate_publication(cfg, "repair", date(2026, 1, 1), {"daily_bars": candidate})
+    assert report["blocked"] is blocked
+
+
+def _bad_rows(count: int, **scope) -> dict:
+    return {
+        "dataset": "daily_bars",
+        "check": "known_bad_rows",
+        "severity": "error",
+        "message": f"{count} invalid rows",
+        "invalid_rows": count,
+        **scope,
+    }
+
+
+@pytest.mark.parametrize(
+    "candidate,blocked",
+    [
+        ([_bad_rows(1)], False),  # fewer bad rows: improved, not a new error
+        ([_bad_rows(2)], False),  # same issue, reworded message only
+        ([_bad_rows(3)], True),  # worse
+        ([_bad_rows(2), _bad_rows(1, partition_value="2026-01-02")], True),  # new scope
+        ([], False),  # resolved
+    ],
+)
+def test_gate_compares_stable_issue_keys_not_whole_findings(
+    tmp_path, monkeypatch, candidate, blocked
+):
+    cfg = Config(data_root=tmp_path / "lake", publication_gate="block")
+    source = tmp_path / "candidate"
+    source.mkdir()
+    baseline = [{**_bad_rows(2), "message": "2 rows failed invariants", "sample": ["x", "y"]}]
+    answers = iter([baseline, candidate, baseline])
+    monkeypatch.setattr("cnequity.quality.publication._errors", lambda *args: next(answers))
+    report = evaluate_publication(cfg, "keys", date(2026, 1, 1), {"daily_bars": source})
+    assert report["blocked"] is blocked
+    changes = report["issue_changes"]
+    if candidate == [_bad_rows(1)]:
+        assert [item["invalid_rows"] for item in changes["improved"]] == [1.0]
+    if not candidate:
+        assert len(changes["resolved"]) == 1
+
+
+def test_incomplete_violation_lists_fall_back_to_counts():
+    from cnequity.quality.publication import compare_issue
+
+    old = {"duplicate_rows": 5, "violations": {"A": 5}, "violations_complete": False}
+    new = {"duplicate_rows": 4, "violations": {"B": 4}, "violations_complete": False}
+    assert compare_issue(old, new) == "improved"
+    assert compare_issue(new, old) == "worsened"
+
+
+def test_a_new_unregistered_source_label_is_a_regression_even_at_equal_count():
+    from cnequity.quality.publication import compare_issue
+
+    old = {"dataset": "sources", "check": "unregistered_source", "sources": {"bse": ["daily_bars"]}}
+    swapped = {**old, "sources": {"xyz": ["daily_bars"]}}
+    spread = {**old, "sources": {"bse": ["daily_bars", "trading_status"]}}
+    assert compare_issue(old, swapped) == "worsened"
+    assert compare_issue(old, spread) == "worsened"
+    assert compare_issue(old, old) == "unchanged"

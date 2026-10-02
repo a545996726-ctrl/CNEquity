@@ -199,3 +199,59 @@ def test_a_gap_after_the_floor_gets_no_command_because_the_sweep_already_walked_
     assert finding["missing_recorded_action"] == 1
     assert finding["missing_recorded_action_reachable_dates"] == []
     assert finding["remediation"] == ""
+
+
+def test_a_fund_payout_with_a_still_factor_is_convention_not_contradiction(tmp_path):
+    from cnequity.quality.cross_checks import adj_factor_arbitration_findings
+
+    ex_date = date(2025, 12, 29)
+    cfg = _lake_with_one_confirmed_gap(tmp_path, ex_date)
+    fetched = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    for day in (ex_date - timedelta(days=1), ex_date):
+        pl.DataFrame(
+            {
+                "symbol": ["510300.SH"],
+                "trade_date": [day],
+                "adjust_type": ["hfq"],
+                "factor": [1.0],
+                "source": ["sina"],
+                "data_version": ["v1"],
+                "fetched_at": [fetched],
+            }
+        ).write_parquet(
+            cfg.derived_root / "adj_factors" / f"trade_date={day.isoformat()}" / "part-1.parquet"
+        )
+    part = cfg.curated_root / "corporate_actions" / f"ex_date={ex_date.year}"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["510300.SH"],
+            "ex_date": [ex_date],
+            "action_type": ["cash_dividend"],
+            "cash_dividend": [0.05],
+            "bonus_ratio": [0.0],
+            "transfer_ratio": [0.0],
+            "allotment_ratio": [None],
+            "allotment_price": [None],
+            "split_factor": [1.0],
+            "source": ["tdx_protocol"],
+            "data_version": ["v1"],
+            "fetched_at": [fetched],
+        },
+        schema_overrides={"allotment_ratio": pl.Float64, "allotment_price": pl.Float64},
+    ).write_parquet(part / "part-fund.parquet")
+    instruments = cfg.curated_root / "instruments" / "part-merged.parquet"
+    instruments.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["510300.SH", "600110.SH"],
+            "asset_type": ["etf", "stock"],
+            "source": ["tdx_protocol", "tdx_protocol"],
+            "data_version": ["v1", "v1"],
+            "fetched_at": [fetched, fetched],
+        }
+    ).write_parquet(instruments)
+
+    findings = {f["check"]: f for f in adj_factor_arbitration_findings(cfg)}
+    assert findings["adj_factor_fund_payout_unadjusted"]["rows"] == 1
+    assert findings["adj_factor_arbitration"]["contradictions"] == 1

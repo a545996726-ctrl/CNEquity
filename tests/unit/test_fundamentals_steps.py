@@ -755,3 +755,19 @@ def test_top_holders_real_archive_partial_page_reaches_curated_with_gap(tmp_path
     published = load("top_holders", config=config, as_of=date(2024, 5, 1), pit_mode="best_effort")
     assert set(published["holder_scope"].to_list()) == {"float", "total"}
     assert not StateStore(config.meta_root).get_payload("top_holders").get("missing_units")
+
+
+def test_share_structure_symbol_refresh_is_one_window_scoped_to_the_names(cfg, monkeypatch):
+    cfg._backfill = True
+    cfg._backfill_start = date(1990, 1, 1)
+    cfg._backfill_end = date(2026, 9, 29)
+    cfg._backfill_symbols = ["603014.SH"]
+    calls = []
+
+    def fetch(start, end, **kwargs):
+        calls.append((start, end, kwargs.get("symbols")))
+        return pl.DataFrame()
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.shareholders.fetch_share_structure", fetch)
+    fund.step_share_structure(cfg, date(2026, 9, 29), "run-symbols", {})
+    assert calls == [(date(1990, 1, 1), date(2026, 9, 29), ["603014.SH"])]

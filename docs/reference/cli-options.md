@@ -34,7 +34,7 @@
 | `--start` | `—` | 回填区间起点（YYYY-MM-DD），包括 daily_bars、minute_bars、衍生品日线、日期/报告期推进及 sector_bars。sector_bars 默认往前 400 天；有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。 |
 | `--end` | `—` | 回填区间终点（YYYY-MM-DD，默认今天），与 --start 配合限定历史窗口。 |
 | `--outstanding` | `False` | 只修复被容忍缺口欠下的那些 key，范围和窗口都取自欠账台账，不看 --symbols/--start/--end。补上的 key 会销账，仍然缺的继续欠着。 |
-| `--symbols` | `—` | 限定范围的标的列表，逗号分隔：用于 intraday、trading_status、corporate_actions 的限定回填，以及 financial_statement_items、daily_bars 的限定修复。trading_status 的 checkpoint 与覆盖证据会记下确切范围；daily_bars 会把这个显式范围写进 backfill 元数据。 |
+| `--symbols` | `—` | 限定范围的标的列表，逗号分隔：用于 intraday、trading_status、corporate_actions 的限定回填，以及 financial_statement_items、daily_bars、share_structure 的限定修复。trading_status 的 checkpoint 与覆盖证据会记下确切范围；daily_bars 会把这个显式范围写进 backfill 元数据。 |
 | `--workers` | `1` | 仅 margin_trading 的日期推进并发数。每个请求仍然走配置里共享的源限流器；其它数据集必须为 1。 |
 | `--margin-source` | `—` | 仅 margin_trading：本次回填使用的来源，不修改配置文件或来源限速。 |
 | `--payment-date-repair` | `False` | 仅 corporate_actions：先应用已审发行人公告，再用 Baostock 匹配真实派息日；早于除息日的付款日视为未知。 |
@@ -47,6 +47,7 @@
 | `--bse-tip-repair` | `False` | 仅 daily_bars：用北交所官网补已有交易日的 BJ 成交额，不重抓 Sina。 |
 | `--bj-amount-repair` | `False` | 仅 daily_bars：从 TDX 补 Sina 从未发布过的北交所成交额，已存的价格和成交量一律不动。需要 --start/--end。 |
 | `--tdx-volume-repair` | `False` | 仅 daily_bars：重读 TDX，只改写已存 TDX 行的成交量（修 2026-09-17 前的解码错误）；价格须一致，64.5 元以下被放大的成交额一并改写；不新增行。需要 --symbols 和 --start/--end。 |
+| `--turnover-repair` | `False` | 仅 daily_bars：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；开高低收须在半分钱内一致，不一致或未提供的保留原值。需要 --start/--end。 |
 | `--fill-em-outage` | `False` | 仅 valuation_metrics：东财快照中断时，用东财 datacenter 估值报表补东财最后一个完整日之后、今天之前的 --start/--end 窗口；全市场取全才写入。 |
 
 ## `cne config`

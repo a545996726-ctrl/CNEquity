@@ -88,3 +88,32 @@ def test_the_old_ones_cannot_bury_the_recent_one(tmp_path):
     findings = {f["severity"]: f["rows"] for f in balance_sheet_identity_findings(cfg)}
 
     assert findings == {"warning": 1, "info": 2}
+
+
+def test_a_prospectus_period_before_listing_is_counted_not_chased(tmp_path):
+    cfg = _lake(
+        tmp_path,
+        _rows("301665.SZ", "2024Q3", 100.0, 40.0, 30.0)
+        + _rows("600000.SH", "2024Q3", 100.0, 40.0, 50.0),
+    )
+    path = cfg.curated_root / "instruments" / "part-merged.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {"symbol": ["301665.SZ", "600000.SH"], "list_date": [date(2025, 4, 11), date(1999, 11, 10)]}
+    ).write_parquet(path)
+
+    findings = {f["check"]: f for f in balance_sheet_identity_findings(cfg)}
+    assert findings["balance_sheet_identity"]["periods"] == ["600000.SH:2024Q3"]
+    assert findings["balance_sheet_identity_pre_listing"]["severity"] == "info"
+    assert findings["balance_sheet_identity_pre_listing"]["rows"] == 1
+
+
+def test_the_latest_vintage_is_the_one_checked(tmp_path):
+    first = _rows("600519.SH", "2024Q4", 100.0, 40.0, 50.0)
+    restated = [
+        {**row, "announce_date": date(2025, 8, 30), "item_value": 60.0}
+        for row in _rows("600519.SH", "2024Q4", 100.0, 40.0, 60.0)
+        if row["item_code"] == "total_equity"
+    ]
+    cfg = _lake(tmp_path, restated + first)
+    assert balance_sheet_identity_findings(cfg) == []
