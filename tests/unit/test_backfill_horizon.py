@@ -352,6 +352,8 @@ def test_symbols_flag_scopes_daily_bar_repairs(tmp_path, monkeypatch):
         "_backfill_once",
         lambda config, dataset: {"status": "success", "rows_written": 0},
     )
+    # No lake behind this config: skip the before/after lineage fingerprint.
+    monkeypatch.setattr(backfill_cmds, "_bar_fingerprint", lambda config, window: None)
 
     from click.testing import CliRunner
 

@@ -51,6 +51,13 @@
 | `--turnover-repair` | `False` | 仅 daily_bars：成交额缺失、为 0 或量额单位错位的沪深股票行，用 Baostock 同日行整行替换；开高低收须在半分钱内一致，不一致或未提供的保留原值。需要 --start/--end。 |
 | `--fill-em-outage` | `False` | 仅 valuation_metrics：东财快照中断时，用东财 datacenter 估值报表补东财最后一个完整日之后、今天之前的 --start/--end 窗口；全市场取全才写入。 |
 
+## `cne check`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--full` | `False` | 立即重跑全湖审计（读每个历史分区，大湖可能要数小时）；默认读最近一次的审计结果。 |
+
 ## `cne config`
 
 | 参数 | 默认值 | 说明 |

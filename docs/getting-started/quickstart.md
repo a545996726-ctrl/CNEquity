@@ -30,10 +30,10 @@ print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
 
 ```bash
 cne query --sql "SELECT symbol, trade_date, close, source FROM daily_bars ORDER BY trade_date DESC LIMIT 10"
-cne status --datasets
+cne check
 ```
 
-`load` 和 `cne` 命令默认读取当前目录的 `configs/cnequity.toml`。`fresh` 只表示已落盘的日期够新，不等于历史完整。
+`cne check` 一条命令给出新鲜度与覆盖、数据质量和规模的结论。`load` 和 `cne` 命令默认读取当前目录的 `configs/cnequity.toml`。`fresh` 只表示已落盘的日期够新，不等于历史完整。
 
 ## 3. 在浏览器检查
 
@@ -53,7 +53,7 @@ cne run daily
 
 | 后续操作 | 作用 |
 |---|---|
-| `cne status --datasets` | 查新鲜度与缺口提示 |
+| `cne check` | 验收：新鲜度与覆盖、数据质量、规模 |
 | `cne run retry` | 重试每个日更分组最新的失败 run |
 | `pip install -U cnequity && cne config upgrade` | 升级版本，并把新版本的调度 step 补进配置 |
 
@@ -85,4 +85,4 @@ cne init --profile sample --data-root data/cnequity-sample --config-out configs/
 
 接下来：[研究示例](../recipes/README.md) · [配置](configuration.md) · [运行手册](../operations/runbook.md) · [排障](../operations/troubleshooting.md)。
 
-执行结束不表示所有来源证据齐全；有效部分结果可发布，缺口保留。普通 `status` 是只读报告，调度验收请用 `cne status --datasets --gate`。参见[结果契约与升级](../reference/cli.md#命令结果与退出码)。
+执行结束不表示所有来源证据齐全；有效部分结果可发布，缺口保留。验收请用 `cne check`。参见[结果契约与升级](../reference/cli.md#命令结果与退出码)。

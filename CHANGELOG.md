@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-- **调度行为变化：** 不带参数的 `cne run daily` 改为按配置顺序跑完全部日更调度组，再跑事件流（公告、监管事件、资讯），每天调度这一条即可；非交易日调度组跳过、事件流照常运行，事件流锁被单独的 `cne run events` 占用时记为 `skipped_locked` 不算失败。原来只跑核心骨架的行为改用 `--core-only`；`--all-groups` 保持只跑调度组，`--no-events` 可去掉事件流。随包配置的 `core` 组补入 `trading_status_derive` 和 `ths_official_snapshot`，调度组路径此前一直不运行这两步；全湖 `audit` 改为在全部调度组之后统一跑一次，非交易日不跑。
+- 新增 `cne check`：一条命令验收整个湖，依次给出新鲜度与覆盖（同 `status --datasets --gate`）、最近一次 run 审计与全湖审计快照、规模，最后给出结论；退出码 0 可用、1 有缺口或质量 error、2 证明不了。`--full` 当场重跑全湖审计。文档中的三条验收命令统一改为它。
+- **回填自动带上下游派生：** `cne backfill corporate_actions` 对比回填前后已发布的公司行为，只为复权条款有增删改的证券重算复权因子，并核对因子覆盖到最新成交日线，输出受影响、更新、跳过和失败数量；没跟上的证券使命令以 `degraded` 结束并给出重跑命令。此前这类历史事件要等日更碰巧处理，常常一直不被重算。`cne backfill daily_bars`（含 `--profile delisted`）同样对比回填前后的日线，对有变化的证券用缓存因子重新对齐复权因子（不重新抓取，`compute_adj_factors` 新增 `realign_symbols`），并只在变化的月份范围内重建停牌。
+- **调度行为变化：** 不带参数的 `cne run daily` 改为按配置顺序跑完全部日更调度组，再跑事件流（公告、监管事件、资讯），每天调度这一条即可；非交易日调度组跳过、事件流照常运行，事件流锁被单独的 `cne run events` 占用时记为 `skipped_locked` 不算失败。原来只跑核心骨架的行为改用 `--core-only`；`--all-groups` 保持只跑调度组，`--no-events` 可去掉事件流。随包配置的 `core` 组补入 `ths_official_snapshot`（调度组路径此前不运行它）；全湖 `audit` 改为在全部调度组之后统一跑一次，非交易日不跑。核心日更保持精简：停牌由当天的 `trading_status` 快照记录，`trading_status_derive` 移出 `core` 组和核心 waves，改在日线历史变化时运行。
 - 新增 `cne config upgrade`：把当前版本新增的调度 step 和缺少的日更 / 事件流调度组补进用户配置，先备份原文件，写完后校验，其他设置不动；`--dry-run` 只列出改动。`cne config diff` 另报调度组里缺少的 step，`cne run daily` 发现配置落后时提示运行 `cne config upgrade`。
 - 少一步手动命令：`cne ths-official backfill`、`resource-sectors --apply`、`repair-bars --apply` 写入 staging 后自动 compact 发布；不带 `--run-id` 的 `cne run compact` 发布所有已结束未发布的 run（不再只处理最近一次）；`cne verify --repair` 修完自动复查，仍有缺口时返回 1；`cne stats show` 在统计表过期，或 `--dataset` / `--by-source` 需要尚未生成的统计表时自动重算。
 - `cne init` 在默认配置 `configs/cnequity.toml` 不存在时自动生成它，新用户安装后只需 `cne init` 一条命令；显式 `--config` 或 `CNE_CONFIG` 指向的缺失文件仍报错，不会自动生成。中断、部分覆盖或旧版未完成的 init（包括因 400 只历史 ST 上限失败的 run），重跑同一条 `cne init` 即续跑。README 以初始化为入口，不再以 demo 开篇。

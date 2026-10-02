@@ -566,17 +566,26 @@ def test_the_derive_batch_does_not_overwrite_the_vendor_batch(tmp_path):
     assert set(published["source"].to_list()) == {"eastmoney", "derived_bar_gap"}
 
 
-def test_the_shipped_daily_job_derives_between_bars_and_compact():
-    """Ordering is the whole point: staged before compact, derived after bars."""
+def test_the_lean_daily_core_leaves_suspension_derivation_to_bar_changes():
+    """The daily snapshot records halts; the bar-gap derive follows bar history.
+
+    It runs in init's phase5 and after `cne backfill daily_bars`, never in the
+    daily schedule, where it rescanned the whole bar history every evening to
+    re-find halts the snapshot had already recorded.
+    """
     from pathlib import Path
 
     from cnequity.config import load_config
+    from cnequity.orchestrator.init_phases import INIT_PHASE_STEPS
 
     root = Path(__file__).resolve().parents[2]
     cfg = load_config(root / "configs" / "cnequity.example.toml")
-    order = [step for wave in cfg.daily_waves for step in wave.steps]
-    assert order.index("daily_bars") < order.index("trading_status_derive")
-    assert order.index("trading_status_derive") < order.index("compact")
+    scheduled = {step for wave in cfg.daily_waves for step in wave.steps} | {
+        step for group in cfg.schedule_groups.values() for step in group.steps
+    }
+    assert "trading_status" in scheduled
+    assert "trading_status_derive" not in scheduled
+    assert "trading_status_derive" in INIT_PHASE_STEPS["phase5_derive_and_publish"]
 
 
 def _seed_single_gap_lake(root):

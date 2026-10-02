@@ -48,6 +48,7 @@
 
 | 命令 | 作用 |
 |------|------|
+| [`cne check`](#cne-check) | **这个湖能不能用**：新鲜度与覆盖、数据质量、规模一条命令验收 |
 | [`cne status`](#cne-status) | 最近 run 状态；`--datasets` 看逐数据集新鲜度 |
 | [`cne verify`](#cne-verify) | **该落的有没有落**。默认按数据集×交易日，`--bars` 按证券×会话，[`--runs`](#cne-verify---runs) 按连续交易日运行证据 |
 | [`cne audit`](#cne-audit) | **落下来的对不对**；`--full` 给全湖健康快照 |
@@ -353,6 +354,28 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 
 取数后自动 compact 当前 run 中经过封存校验的有效结果，部分来源失败不阻止独立事实发布。
 
+**下游派生跟着输入走，不等第二天的日更。** 回填改变了哪些输入，就当场重算依赖它们的派生数据并核对：
+
+| 回填 | 自动跟进 |
+|---|---|
+| `corporate_actions` | 对比回填前后已发布的公司行为，只取影响复权的条款（现金分红、送转、拆并、配股、参考价）有增删改的证券，重算它们的复权因子，再核对每只证券的因子覆盖到最新成交日线。只改到账日不触发重算 |
+| `daily_bars`（含 `--profile delisted`） | 对比本次窗口内回填前后的日线（按证券×月份），对有变化的证券用已缓存的因子重新对齐复权因子（不重新抓取）并核对覆盖；再从第一个变化月份往前 90 天到最后一个变化月份，从日线缺口重建停牌。日线没有变化时两者都跳过 |
+
+```
+公司行为回填完成
+  写入：            1,234 条
+  受影响标的：      87
+
+派生复权因子…
+  处理：            87
+  更新：            84
+  跳过：            3（无日线 2, CDR 1）
+
+✓ 公司行为与复权因子已同步
+```
+
+结果 JSON 另有 `adj_factors_sync` / `trading_status_derive` 字段。没有跟上的证券（抓取失败或未覆盖最新日线）会被列出，命令以 `degraded` 结束并给出重跑命令；下游派生出错同样记为 `degraded`，已发布的回填结果照常报告。
+
 | 选项 | 说明 |
 |------|------|
 | `--start` / `--end` | 请求窗口；超出来源历史边界的部分报告覆盖不足，可用范围仍会获取 |
@@ -466,7 +489,7 @@ python scripts/delisted_ops.py coverage --start 2016-01-01 --universe all_a_sh_s
 | name | 说明 |
 |------|------|
 | `adj_factors`（默认） | 计算 Sina hfq 因子 |
-| `trading_status` | 派生历史停牌记录（`--start` / `--end` 按年分块重建） |
+| `trading_status` | 派生历史停牌记录（`--start` / `--end` 按年分块重建）；`init` 和 `cne backfill daily_bars` 之后会自动按窗口运行 |
 | `sector_routing` | 可选：EM 板块 × TDX 88xxxx 名称映射表（**不驱动** sector_bars 采集） |
 | `sector_code_map` | BK* ↔ BOARD_CODE 身份映射（lake-only；推荐成分 join） |
 | `futures_continuous` | 期货主力/次主力连续合约，按 T-1 持仓换月、只向后换；由 futures_bars 全量重建（需 `[futures] enabled`） |
@@ -600,6 +623,20 @@ cne verify --derivatives --dataset futures_bars --start 2026-09-01 --end 2026-09
 取数 / 写入命令：`success`、来源受限的 `warning` / `degraded`（包括 0 行）返回 0，`failed` 返回 1。显式质量检查（`audit`、`verify`、`status --gate`）继续按各自质量规则返回非零。只读报告成功读取并展示后返回 0，不要求报告中的数据完全健康。
 
 **升级调度脚本：** 若以前依靠 `status --datasets` 的退出码触发告警，改为 `status --datasets --gate`（按组调度时同时加 `--groups`）。依赖日更 / 回填退出码 2 的脚本，应读取 `coverage_status`，或另行运行显式质量门禁。现有数据目录、manifest、检查点和成功批次不需要删除；旧元数据以增量方式迁移。旧部分 staging 没有校验封存时保持保守门禁，通过原范围重试后再发布。
+
+## cne check
+
+一条命令验收整个湖，依次给出：
+
+1. **新鲜度与覆盖**：与 `cne status --datasets --gate` 相同，含最新交易日截面核对和未完成的 init；
+2. **数据质量**：最近一次 run 的审计（error 会列出）和最近的全湖审计快照及其年龄；
+3. **规模**：数据集、行数和体积，统计表过期时先自动重算。
+
+| 选项 | 说明 |
+|------|------|
+| `--full` | 当场重跑全湖审计。它读每个历史分区，大湖可能要数小时；默认读最近一次的结果 |
+
+退出码取最差的一项：0 可用；1 有缺口或质量 error；2 证明不了（没有审计记录、instruments 缺失等）。调度脚本仍可只用较轻的 `cne status --datasets --gate`。
 
 ## cne status
 

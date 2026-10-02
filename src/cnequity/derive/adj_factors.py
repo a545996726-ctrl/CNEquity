@@ -1636,6 +1636,7 @@ def compute_adj_factors(
     adjust_type: str | None = None,
     *,
     refresh_symbols: list[str] | None = None,
+    realign_symbols: list[str] | None = None,
     full: bool = False,
 ) -> AdjFactorsResult:
     """Derive hfq adj_factors (ADR-0004).
@@ -1643,6 +1644,10 @@ def compute_adj_factors(
     Default path is append-only: only new trade_date partitions since the derived
     watermark are written, plus full-history merge for ex-date / new-listing /
     explicit refresh symbols. Pass ``full=True`` to rewrite every partition.
+
+    ``refresh_symbols`` refetches those symbols' factors; ``realign_symbols``
+    only re-aligns their cached factors onto their full bar history — what a
+    bar backfill needs, since it changes dates, not the factors themselves.
     """
     # The derive reads existing partitions and then merges/replaces them.  It
     # must not overlap compact, repartition, or another derive invocation.
@@ -1651,6 +1656,7 @@ def compute_adj_factors(
             config,
             adjust_type,
             refresh_symbols=refresh_symbols,
+            realign_symbols=realign_symbols,
             full=full,
         )
 
@@ -1660,6 +1666,7 @@ def _compute_adj_factors_locked(
     adjust_type: str | None = None,
     *,
     refresh_symbols: list[str] | None = None,
+    realign_symbols: list[str] | None = None,
     full: bool = False,
 ) -> AdjFactorsResult:
     """Implementation of :func:`compute_adj_factors` under the mutation lock."""
@@ -1686,6 +1693,10 @@ def _compute_adj_factors_locked(
     source_unavailable_symbols = _source_unavailable_symbols(config)
     explicit_refresh = set(refresh_symbols or [])
     refresh_set = explicit_refresh | retry_symbols
+    # Realigned symbols load their whole bar history like refreshed ones, but
+    # keep their cached factors: `force` below stays tied to `refresh_set`, and
+    # the uncovered-history self-heal must not promote them to a refetch.
+    realign_set = set(realign_symbols or []) - explicit_refresh
     # An explicit empty response for a formally delisted symbol is a stable
     # source limitation, not a transient fetch failure. Re-probe only when the
     # caller explicitly asks for that symbol or requests a full derive.
@@ -1716,7 +1727,9 @@ def _compute_adj_factors_locked(
         # `_uncovered_symbols`. Only meaningful when that path is in play:
         # `full`, and a lake with no watermark at all, already load every date,
         # and forcing a refresh there would only bypass a valid factor cache.
-        uncovered = sorted(_uncovered_symbols(config) - refresh_set - source_unavailable_symbols)
+        uncovered = sorted(
+            _uncovered_symbols(config) - refresh_set - realign_set - source_unavailable_symbols
+        )
         if uncovered:
             # Capped so a lake that has never derived does not turn one daily run
             # into a full-market sweep; the remainder is picked up next run, and
@@ -1732,7 +1745,10 @@ def _compute_adj_factors_locked(
             )
             refresh_set |= set(batch)
 
-    bars = _bars_for_derive(config, watermark=watermark, refresh_set=refresh_set, full=full)
+    realign_set -= refresh_set
+    bars = _bars_for_derive(
+        config, watermark=watermark, refresh_set=refresh_set | realign_set, full=full
+    )
     if bars.is_empty():
         logger.info(
             "adj_factors: nothing to derive (watermark=%s, refresh=%d, full=%s)",

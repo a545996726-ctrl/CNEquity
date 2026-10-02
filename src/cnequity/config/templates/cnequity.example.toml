@@ -496,9 +496,7 @@ steps = ["instruments", "trading_calendar", "trading_status"]
 [[job.daily.waves]]
 name = "corp_actions_to_bars"
 parallel = false
-# `trading_status_derive` reconstructs suspensions from daily_bars interior
-# gaps, so it runs after the bars and before `compact` publishes the revision.
-steps = ["corporate_actions", "daily_bars", "trading_status_derive"]
+steps = ["corporate_actions", "daily_bars"]
 
 [[job.daily.waves]]
 name = "parallel_core"
@@ -544,16 +542,17 @@ run_at = "21:00"
 # still run every session, since a missed snapshot day is lost for good.
 # futures_minute_bars also runs every session: its rolling window expires.
 # `core` carries what the [[job.daily.waves]] spine fetches and derives, so the
-# group schedule loses nothing: `trading_status_derive` waits for daily_bars
-# through its declared dependency, and the finalize steps run in their fixed
-# order after compact. `audit` is not here: it reads the whole lake, so
-# `cne run daily` runs it once after every group has landed.
+# group schedule loses nothing; the finalize steps run in their fixed order
+# after compact. Kept lean on purpose: `audit` reads the whole lake, so
+# `cne run daily` runs it once after every group has landed, and suspensions
+# come from the `trading_status` snapshot each day — the bar-gap derivation
+# runs where bar history changes (`cne init`, `cne backfill daily_bars`).
 [job.daily.groups.core]
 at = "16:00"
 parallel = true
 steps = [
   "instruments", "trading_calendar", "trading_status",
-  "corporate_actions", "daily_bars", "trading_status_derive", "index_bars",
+  "corporate_actions", "daily_bars", "index_bars",
   "compact", "derive_adj_factors", "derive_industry_index",
   "ths_official_snapshot",
 ]

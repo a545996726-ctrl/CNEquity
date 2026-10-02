@@ -316,8 +316,9 @@ def derive(
     """派生计算类数据集。
 
     \b
-    `adj_factors`、`industry_index` 和 `trading_status` 本来就是日更里的 step
-    （`derive_adj_factors`、`derive_industry_index`、`trading_status_derive`），
+    `adj_factors` 和 `industry_index` 本来就是日更里的 step（`derive_adj_factors`、
+    `derive_industry_index`）；`trading_status` 的停牌派生在 init 和
+    `cne backfill daily_bars` 之后自动运行，`cne backfill corporate_actions` 之后也会自动重算受影响证券的因子。
     所以在这里跑它们属于修复或补更早的窗口，不是正常一天的一部分。
     `sector_routing`、`sector_code_map` 和 `valuation_orphans` 没有任何调度会跑，只能手动执行。
     `adj_factor_source` 用 Baostock 仲裁因子与公司行为的矛盾；证明新浪有误且 Baostock

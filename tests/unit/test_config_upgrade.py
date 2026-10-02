@@ -20,12 +20,12 @@ from cnequity.config.upgrade import _append_to_steps, plan_upgrade
 
 
 def _old_config(tmp_path, text: str | None = None):
-    """The example as an older release shipped it: core without the wave-only steps."""
+    """The example as an older release shipped it: core without `ths_official_snapshot`."""
     text = text if text is not None else example_toml_text()
     text = text.replace(
-        '"daily_bars", "trading_status_derive", "index_bars"', '"daily_bars", "index_bars"'
+        '  "compact", "derive_adj_factors", "derive_industry_index",\n  "ths_official_snapshot",\n]',
+        '  "compact", "derive_adj_factors", "derive_industry_index",\n]',
     )
-    text = text.replace('  "ths_official_snapshot",\n', "")
     # `cne config create` writes workers = 1 on macOS; the raw example does not.
     text = re.sub(r"(?m)^workers = \d+", "workers = 1", text)
     path = tmp_path / "cnequity.toml"
@@ -46,7 +46,7 @@ def test_upgrade_restores_the_group_steps_and_keeps_a_backup(tmp_path):
     result = CliRunner().invoke(cli, ["config", "upgrade", "--config", str(path)])
 
     assert result.exit_code == 0, result.output
-    assert {"trading_status_derive", "ths_official_snapshot"} <= set(_core_steps(path))
+    assert "ths_official_snapshot" in _core_steps(path)
     assert config_drift(path).group_steps == {}
     backups = list(tmp_path.glob("cnequity.toml.bak-*"))
     assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == before
@@ -59,7 +59,7 @@ def test_dry_run_writes_nothing(tmp_path):
     result = CliRunner().invoke(cli, ["config", "upgrade", "--dry-run", "--config", str(path)])
 
     assert result.exit_code == 0, result.output
-    assert "trading_status_derive" in result.output
+    assert "ths_official_snapshot" in result.output
     assert path.read_text(encoding="utf-8") == before
     assert not list(tmp_path.glob("*.bak-*"))
 
@@ -110,7 +110,7 @@ def test_a_layout_the_edit_cannot_read_is_left_for_a_manual_edit(tmp_path):
     result = CliRunner().invoke(cli, ["config", "upgrade", "--config", str(path)])
 
     assert result.exit_code == 1
-    assert "手动" in result.output and "trading_status_derive" in result.output
+    assert "手动" in result.output and "ths_official_snapshot" in result.output
     assert _core_steps(path) == ["daily_bars", "compact"]
 
 

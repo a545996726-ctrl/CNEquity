@@ -18,16 +18,19 @@ def _write(tmp_path, text: str):
     return path
 
 
-def _without_trading_status_derive() -> str:
-    """The example with `trading_status_derive` removed from its wave and its group."""
+# `ths_official_snapshot` is scheduled twice in the example: in the core group
+# and in the finalize wave.
+CORE_WITH, CORE_WITHOUT = (
+    '  "compact", "derive_adj_factors", "derive_industry_index",\n  "ths_official_snapshot",\n]',
+    '  "compact", "derive_adj_factors", "derive_industry_index",\n]',
+)
+WAVE_WITH, WAVE_WITHOUT = '    "ths_official_snapshot",\n    "audit",', '    "audit",'
+
+
+def _without_snapshot_step() -> str:
+    """The example with `ths_official_snapshot` removed from its wave and its group."""
     text = example_toml_text()
-    for old, new in (
-        (
-            'steps = ["corporate_actions", "daily_bars", "trading_status_derive"]',
-            'steps = ["corporate_actions", "daily_bars"]',
-        ),
-        ('"daily_bars", "trading_status_derive", "index_bars"', '"daily_bars", "index_bars"'),
-    ):
+    for old, new in ((CORE_WITH, CORE_WITHOUT), (WAVE_WITH, WAVE_WITHOUT)):
         assert old in text
         text = text.replace(old, new)
     return text
@@ -42,10 +45,10 @@ def test_the_packaged_example_has_no_drift_against_itself(tmp_path):
 
 def test_a_step_missing_from_every_group_is_reported(tmp_path):
     """The case that actually loses data: installed, configured nowhere, never runs."""
-    text = _without_trading_status_derive()
+    text = _without_snapshot_step()
     drift = config_drift(_write(tmp_path, text))
 
-    assert "trading_status_derive" in drift.unscheduled_steps
+    assert "ths_official_snapshot" in drift.unscheduled_steps
     assert not drift.clean
 
 
@@ -87,12 +90,12 @@ def test_extra_local_settings_are_not_reported(tmp_path):
 
 
 def test_render_names_the_unscheduled_steps_first(tmp_path):
-    text = _without_trading_status_derive()
+    text = _without_snapshot_step()
     path = _write(tmp_path, text)
 
     lines = render_drift(config_drift(path), path)
 
-    assert "trading_status_derive" in lines[1]
+    assert "ths_official_snapshot" in lines[1]
     assert "未被调度" in lines[0]
 
 
@@ -104,28 +107,24 @@ def test_render_says_so_when_there_is_nothing_to_report(tmp_path):
 
 def test_a_step_only_a_wave_still_runs_is_missing_from_its_group(tmp_path):
     """`cne run daily` runs the groups; a wave-only step there never runs."""
-    text = example_toml_text().replace(
-        '"daily_bars", "trading_status_derive", "index_bars"', '"daily_bars", "index_bars"'
-    )
+    text = example_toml_text().replace(CORE_WITH, CORE_WITHOUT)
     path = _write(tmp_path, text)
     drift = config_drift(path)
 
     assert drift.unscheduled_steps == []
-    assert drift.group_steps == {"job.daily.groups.core": ["trading_status_derive"]}
+    assert drift.group_steps == {"job.daily.groups.core": ["ths_official_snapshot"]}
     lines = render_drift(drift, path)
-    assert any("trading_status_derive" in line for line in lines)
+    assert any("ths_official_snapshot" in line for line in lines)
     assert any("cne config upgrade" in line for line in lines)
 
 
 def test_a_step_moved_to_another_group_is_not_missing(tmp_path):
     text = (
         example_toml_text()
-        .replace(
-            '"daily_bars", "trading_status_derive", "index_bars"', '"daily_bars", "index_bars"'
-        )
+        .replace(CORE_WITH, CORE_WITHOUT)
         .replace(
             'steps = ["dragon_tiger", "block_trades", "compact"]',
-            'steps = ["dragon_tiger", "block_trades", "trading_status_derive", "compact"]',
+            'steps = ["dragon_tiger", "block_trades", "ths_official_snapshot", "compact"]',
         )
     )
     assert config_drift(_write(tmp_path, text)).group_steps == {}

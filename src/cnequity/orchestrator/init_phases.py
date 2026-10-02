@@ -15,8 +15,9 @@ INIT_PHASE_STEPS: dict[str, list[str]] = {
     "phase4_finalize": ["compact", "derive_adj_factors", "derive_industry_index", "audit"],
     # Reconstructing suspensions needs the bars *committed*, which only happens
     # in phase4, so this cannot run earlier — and it needs a compact of its own
-    # to publish what it stages. The daily job keeps it current from there with
-    # a short tail window; this is the one pass that reaches the whole history.
+    # to publish what it stages. This is the one pass that reaches the whole
+    # history; afterwards the daily `trading_status` snapshot records halts and
+    # `cne backfill daily_bars` re-derives the window whose bars it changed.
     "phase5_derive_and_publish": ["trading_status_derive", "compact"],
 }
 

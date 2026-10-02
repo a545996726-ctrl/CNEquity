@@ -95,49 +95,28 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 </details>
 
 
-## 一条命令初始化
+## 快速开始
 
-需要 **Python 3.10+**，支持 macOS、Linux 和 Windows，无需账号或 token。在准备长期存放数据的目录执行：
+需要 Python 3.10+（macOS / Linux / Windows），不需要账号或 token。
 
 ```bash
 pip install cnequity
-cne init
+cne init     # 下载沪深京全市场最近 3 年的数据，第一次可能需要几个小时
+cne check    # 检查数据是否完整、可用
 ```
 
-`cne init` 一次完成以下工作，不需要先手动生成配置：
+中途断了，再运行一次 `cne init`，已经下载的部分不会重来。
 
-1. **生成配置**：第一次运行时写出 `configs/cnequity.toml`，数据放在当前目录的 `data/cnequity/`（配置里记绝对路径）；已有配置直接沿用。
-2. **建全市场主干**：沪深京全部 A 股最近 **3 年**的证券列表、交易日历、公司行为、个股与指数日线、复权因子和行业指数。
-3. **补退市与交易状态**：自动恢复窗口内已知退市股票的日线，避免幸存者偏差；获取当前交易状态，并从日线派生历史停牌。
-4. **审计并发布**：校验后发布到本地 Parquet 湖，生成可直接查询的视图。
-
-全市场初始化可能需要数小时，取决于网络和数据源，没有固定完成时间；终端实时打印批次进度和 ETA。
-
-**中断了，或结果里有 `warning`？重跑同一条 `cne init`。** 它会找到没跑完的那次初始化，保留已成功的批次，只补剩下的部分。`warning` / `degraded` 表示数据已经发布，只是部分来源暂时覆盖不足，命令仍返回 0，缺口会记下来供重跑或日更补齐；只有程序、存储或完整性错误才返回失败。
-
-完成后查看各数据集的覆盖与缺口，并读取数据：
-
-```bash
-cne status --datasets
-```
+读取数据：
 
 ```python
 from cnequity.query import load
 
 bars = load("daily_bars", symbols=["600519.SH"])
-print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
+print(bars.tail())
 ```
 
-也可以运行 `cne serve` 打开本地只读控制台（<http://127.0.0.1:8787>）。
-
-| 需要 | 命令 |
-|---|---|
-| 一开始就要更深历史（日线从 2016-01-01 起） | `cne init --profile full` |
-| 自定义历史起点 | `cne init --since 2018-01-01` |
-| 全市场历史 ST 证据（可选，逐证券扫描，耗时长） | `cne backfill trading_status` |
-| 某个数据集更早的历史 | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD` |
-
-`init` 不是所有数据集的全历史下载：分钟线、分笔和逐合约期货/期权默认关闭；只有当前快照的来源从启用后开始积累，不能补造过去。范围、磁盘和续跑细节见[初始化指南](docs/getting-started/initialization.md)；连不上数据源时先跑 `cne doctor`，再看[排障指南](docs/operations/troubleshooting.md)。
+之后每天运行一次 `cne run daily` 保持更新。想要更长的历史，或了解 `init` 具体做了什么，见[初始化指南](docs/getting-started/initialization.md)。
 
 ## 为什么值得把数据管起来
 
@@ -185,7 +164,7 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 cne run daily
 ```
 
-每天（含周末）用系统调度器运行这一条：交易日跑行情及其他已启用的日更组，然后更新公告、监管事件和资讯；非交易日只更新事件流。调度验收用 `cne status --datasets --gate`，有缺口或失败时返回非零。
+每天（含周末）用系统调度器运行这一条：交易日跑行情及其他已启用的日更组，然后更新公告、监管事件和资讯；非交易日只更新事件流。验收用 `cne check`，有缺口或质量 error 时返回非零。
 
 升级版本时：
 

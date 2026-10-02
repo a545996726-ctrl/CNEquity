@@ -1780,3 +1780,25 @@ def test_pre_close_check_is_silent_on_a_lake_without_the_column(crosscheck_confi
     out = _factor_frame("600519.SH", _DAYS, [1.0, 1.0, 1.2])
 
     assert _pre_close_step_findings(crosscheck_config, out) == []
+
+
+@pytest.mark.parametrize(("mode", "fetched"), [("realign", []), ("refresh", ["600519.SH"])])
+def test_backfilled_older_bars_are_realigned_from_cache(adj_config, monkeypatch, mode, fetched):
+    """A bar backfill changes dates, not factors: realign keeps the cache."""
+    compute_adj_factors(adj_config)
+    _write_factor_cache(adj_config, "600519.SH", date(2024, 6, 28))
+    _write_bar(adj_config, "600519.SH", date(2024, 6, 27))
+    calls: list[str] = []
+
+    def fake_fetch(symbol, adjust_type, client=None):
+        calls.append(symbol)
+        return pl.DataFrame({"trade_date": [date(2024, 6, 27)], "factor": [0.5]})
+
+    monkeypatch.setattr("cnequity.derive.adj_factors.fetch_adj_factor_series", fake_fetch)
+    kwargs = {f"{mode}_symbols": ["600519.SH"]}
+
+    compute_adj_factors(adj_config, **kwargs)
+
+    assert calls == fetched
+    older = adj_config.derived_root / "adj_factors" / "trade_date=2024-06-27"
+    assert list(older.glob("*.parquet")), "the older bar date now has a factor row"

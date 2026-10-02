@@ -6,31 +6,26 @@
 
 [GitHub / English](https://github.com/rootSunc/CNEquity/blob/main/README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [更新日志](https://github.com/rootSunc/CNEquity/blob/main/CHANGELOG.md)
 
-## 一条命令初始化
+## 快速开始
 
-无需账号或 token，也不必克隆仓库。在准备长期存放数据的目录执行：
+不需要账号或 token，也不必克隆仓库。
 
 ```bash
 pip install cnequity
-cne init
+cne init     # 下载沪深京全市场最近 3 年的数据，第一次可能需要几个小时
+cne check    # 检查数据是否完整、可用
 ```
 
-第一次运行会生成 `configs/cnequity.toml`（数据放在当前目录的 `data/cnequity/`），然后建沪深京全市场最近 3 年的主干：证券、日历、公司行为、个股与指数日线、复权因子、行业指数；自动恢复窗口内已知退市股票的日线，获取当前交易状态并派生历史停牌，审计后发布为本地 Parquet。全市场初始化可能需要数小时，终端实时显示进度和 ETA。
-
-**中断了，或结果里有 `warning`？重跑同一条 `cne init`**，它会保留已成功的批次，只补剩下的部分。`warning` / `degraded` 表示数据已发布、部分来源暂时覆盖不足，命令返回 0 并记下缺口；只有程序、存储或完整性错误才失败。
-
-```bash
-cne status --datasets
-```
+中途断了，再运行一次 `cne init`，已经下载的部分不会重来。
 
 ```python
 from cnequity.query import load
 
 bars = load("daily_bars", symbols=["600519.SH"])
-print(bars.select("symbol", "trade_date", "close", "source").tail(10))
+print(bars.tail())
 ```
 
-更深历史用 `cne init --profile full`（日线从 2016-01-01 起）；全市场历史 ST 证据是可选的 `cne backfill trading_status`。`cne serve` 打开本地只读控制台（http://127.0.0.1:8787）。
+之后每天运行一次 `cne run daily` 保持更新。更长的历史和 `init` 的细节见[初始化指南](https://rootsunc.github.io/CNEquity/getting-started/initialization/)。
 
 ## 数据与研究口径
 
@@ -59,4 +54,4 @@ cne run daily
 
 如果它帮你省下重复搭建数据底座的时间，欢迎在 [GitHub 点一个 ⭐ Star](https://github.com/rootSunc/CNEquity)。
 
-命令执行与数据覆盖分别报告：有效部分结果可以发布，缺口继续保留。调度验收使用 `cne status --datasets --gate`；程序、存储和完整性错误仍会失败。
+命令执行与数据覆盖分别报告：有效部分结果可以发布，缺口继续保留。验收使用 `cne check`；程序、存储和完整性错误仍会失败。

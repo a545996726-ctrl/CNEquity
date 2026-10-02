@@ -1493,3 +1493,134 @@ def _report_outstanding_keys(cfg, datasets: list[str]) -> None:
             " —— 没有任何已配置的源提供它们；查一下 `cne sources probe`，"
             "或者接受这个缺口。"
         )
+
+
+@cli.command("check")
+@config_option
+@click.option(
+    "--full",
+    is_flag=True,
+    help="立即重跑全湖审计（读每个历史分区，大湖可能要数小时）；默认读最近一次的审计结果。",
+)
+@click.pass_context
+def check(ctx: click.Context, config_path: str, full: bool):
+    """验收这个湖：新鲜度与覆盖、数据质量、规模，一条命令给出结论。
+
+    \b
+    依次给出：
+      1. 新鲜度与覆盖 —— 与 `cne status --datasets --gate` 相同（含截面核对、未完成的 init）；
+      2. 数据质量 —— 最近一次 run 的审计和最近的全湖审计快照；`--full` 当场重跑全湖审计；
+      3. 规模 —— 数据集、行数和体积（统计表过期时先自动重算）。
+    退出码取最差的一项：0 可用；1 有缺口或质量 error；2 证明不了（缺证据或配置问题）。
+    """
+    cfg = _cfg(config_path)
+    codes: list[int] = []
+    problems: list[str] = []
+
+    click.echo("== 新鲜度与覆盖 ==")
+    try:
+        ctx.invoke(
+            status,
+            config_path=config_path,
+            run_selector=None,
+            show_datasets=True,
+            all_columns=False,
+            gate_groups=None,
+            scope=True,
+            gate=True,
+        )
+        codes.append(0)
+    except SystemExit as exc:
+        code = int(exc.code or 0)
+        codes.append(code)
+        if code:
+            problems.append("新鲜度或覆盖不合格" if code == 1 else "新鲜度证明不了")
+
+    click.echo("\n== 数据质量 ==")
+    code, note = _check_quality(cfg, full=full)
+    codes.append(code)
+    if note:
+        problems.append(note)
+
+    click.echo("\n== 规模 ==")
+    _check_size(cfg)
+
+    worst = 1 if 1 in codes else max(codes, default=0)
+    click.echo("\n== 结论 ==")
+    if worst == 0:
+        click.echo("✓ 湖可用：新鲜度、覆盖和质量都通过")
+        return
+    click.echo(f"✗ {'；'.join(problems)}")
+    raise SystemExit(worst)
+
+
+def _check_quality(cfg, *, full: bool) -> tuple[int, str | None]:
+    """Gate on recorded audit errors; rerun the whole-lake audit only when asked."""
+    from datetime import datetime
+
+    from cnequity.quality.publication import coverage_only
+
+    quality_root = cfg.meta_root / "quality"
+    code, note = 0, None
+
+    runs = sorted(
+        (quality_root / "findings").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    if runs:
+        payload = json.loads(runs[0].read_text(encoding="utf-8"))
+        findings = payload.get("findings", [])
+        errors = [f for f in findings if f.get("severity") == "error" and not coverage_only(f)]
+        warnings = sum(f.get("severity") == "warning" for f in findings)
+        click.echo(
+            f"  最近一次 run 审计（{payload.get('run_id')}，{payload.get('trade_date')}）："
+            f"{len(errors)} error、{warnings} warning"
+        )
+        for finding in errors[:10]:
+            click.echo(f"    [error] {finding.get('dataset', ''):22} {finding.get('message', '')}")
+        if errors:
+            code, note = 1, f"最近一次审计有 {len(errors)} 条 error"
+    else:
+        click.echo("  还没有任何 run 的审计记录")
+
+    if full:
+        from cnequity.quality.audit import lake_health
+
+        click.echo("  正在重跑全湖审计（读每个历史分区）…")
+        health = lake_health(cfg, shanghai_today())
+        errors = int(health["findings_by_severity"].get("error", 0))
+        click.echo(f"  全湖审计（刚刚）：{errors} error")
+        for finding in health["error_findings"][:10]:
+            click.echo(f"    [error] {finding.get('dataset', ''):22} {finding.get('message', '')}")
+        if errors:
+            code, note = 1, f"全湖审计有 {errors} 条 error"
+    else:
+        snapshot = quality_root / "health-latest.json"
+        if snapshot.exists():
+            health = json.loads(snapshot.read_text(encoding="utf-8"))
+            age = (datetime.now() - datetime.fromtimestamp(snapshot.stat().st_mtime)).days
+            errors = int(health.get("findings_by_severity", {}).get("error", 0))
+            click.echo(
+                f"  全湖审计快照（{health.get('trade_date')}，{age} 天前）：{errors} error"
+                "；加 --full 立即重跑"
+            )
+        else:
+            click.echo("  还没有全湖审计快照；加 --full 立即生成")
+    if not runs and not full:
+        return 2, "没有审计记录，质量证明不了（加 --full 立即审计）"
+    return code, note
+
+
+def _check_size(cfg) -> None:
+    from cnequity.storage.stats import load_summary, refresh_stats_if_stale, stats_freshness
+
+    if stats_freshness(cfg).stale:
+        click.echo("  统计表过期或尚未生成，正在重算…", err=True)
+        refresh_stats_if_stale(cfg)
+    summary = load_summary(cfg)
+    if summary is None:
+        click.echo("  还没有统计表（另一个重算正在进行）")
+        return
+    click.echo(
+        f"  {int(summary.get('datasets') or 0)} 个数据集、{int(summary.get('rows') or 0):,} 行、"
+        f"{int(summary.get('bytes') or 0) / 1e9:.1f} GB（统计于 {summary.get('generated_at')}）"
+    )

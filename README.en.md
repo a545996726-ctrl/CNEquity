@@ -31,49 +31,28 @@ The current development tree registers **52 datasets: 47 curated + 5 derived**, 
 
 Minutes, trade snapshots and futures/options are disabled by default. Check each source's historical horizon and actual coverage after opting in.
 
-## Initialize with one command
+## Quick start
 
-Requires **Python 3.10+** on macOS, Linux or Windows. No account or token is needed. Run this in the directory where the lake should live:
+Requires Python 3.10+ on macOS, Linux or Windows. No account or token needed.
 
 ```bash
 pip install cnequity
-cne init
+cne init     # download the last 3 years for every Shanghai, Shenzhen and Beijing A-share; the first run can take hours
+cne check    # confirm the data is complete and usable
 ```
 
-`cne init` does all of the following; you do not need to create a config first:
+If it stops halfway, run `cne init` again; nothing already downloaded is fetched twice.
 
-1. **Writes the config.** On the first run it creates `configs/cnequity.toml` and stores data in `data/cnequity/` under the current directory (recorded as an absolute path). An existing config is reused.
-2. **Builds the full-market backbone.** All Shanghai, Shenzhen and Beijing A-shares over the last **3 years**: securities, trading calendar, corporate actions, stock and index daily bars, adjustment factors and industry indices.
-3. **Recovers delisted bars and trading status.** Known delisted stocks in the window get their daily bars back, avoiding survivorship bias; current trading status is fetched and historical suspensions are derived from the bars.
-4. **Audits and publishes** the result to a local Parquet lake with ready-to-query views.
-
-A full-market init can take hours depending on your network and the sources; there is no fixed completion time. Batch progress and an ETA are printed as it runs.
-
-**Interrupted, or the result shows `warning`? Run the same `cne init` again.** It finds the unfinished initialization, keeps successful batches and fetches only what is left. `warning` / `degraded` means data was published but some sources were temporarily short of coverage; the command still exits 0 and records the gaps for the next run or daily update. Only programming, storage or integrity errors fail.
-
-When it finishes, check coverage and gaps, then read the data:
-
-```bash
-cne status --datasets
-```
+Read the data:
 
 ```python
 from cnequity.query import load
 
 bars = load("daily_bars", symbols=["600519.SH"])
-print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
+print(bars.tail())
 ```
 
-`cne serve` opens the local read-only dashboard at <http://127.0.0.1:8787>.
-
-| Need | Command |
-|---|---|
-| Deeper history from the start (daily bars from 2016-01-01) | `cne init --profile full` |
-| A custom history start | `cne init --since 2018-01-01` |
-| Full-market historical ST evidence (optional, per-security and slow) | `cne backfill trading_status` |
-| Earlier history for one dataset | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD` |
-
-`init` is not a full-history download of every dataset: minutes, trade snapshots and contract-level futures/options are disabled by default, and snapshot-only feeds accumulate from activation; missing past snapshots cannot be invented. See [initialization and recovery](docs/getting-started/initialization.md) for scope, disk and resume details. If sources are unreachable, run `cne doctor` and see [troubleshooting](docs/operations/troubleshooting.md).
+Then run `cne run daily` once a day to stay current. For longer history, or what `init` does step by step, see the [initialization guide](docs/getting-started/initialization.md).
 
 ## Why keep a lake?
 
@@ -120,7 +99,7 @@ Adapters and batch orchestration collect data into staging; validated batches be
 cne run daily
 ```
 
-Schedule this one command every day, weekends included: on trading days it runs every enabled daily group, then updates announcements, regulatory events and news; on other days it runs only the event stream. For scheduled acceptance use `cne status --datasets --gate`, which exits non-zero on gaps or failures.
+Schedule this one command every day, weekends included: on trading days it runs every enabled daily group, then updates announcements, regulatory events and news; on other days it runs only the event stream. Accept the lake with `cne check`, which exits non-zero on gaps or quality errors.
 
 When you upgrade:
 

@@ -10,6 +10,8 @@ cne init
 
 默认配置 `configs/cnequity.toml` 不存在时，`cne init` 会先按随包示例生成它（与 `cne config create` 相同：写入绝对 `data.root`，macOS / Windows 默认 `workers=1`），再开始初始化。想先改数据目录等设置，可以先运行 `cne config create --data-root /path/to/lake`，修改后再 `cne init`。显式传入的 `--config` 或 `CNE_CONFIG` 指向不存在的文件时不会自动生成，避免拼写错误建出新湖。已有配置升级后运行 `cne config upgrade` 补上新的调度 step。
 
+连不上数据源时先运行 `cne doctor`（离线体检），再看[排障指南](../operations/troubleshooting.md)。
+
 `init` 按 `[job.init.phases]` 建目录、manifest、视图并回填证券、日历、公司行为、日线、指数、交易状态及派生数据。只建布局可用 `cne init --layout-only`；它不产生研究数据。
 
 <a id="init-scope"></a>
@@ -22,6 +24,7 @@ cne init
 |---|---|---|
 | `cne init`（`--profile quick`） | 沪深京全市场 × 最近 3 年；证券、日历、日线、交易状态等主干 | 全市场，按证券与缺口分页 |
 | `cne init --profile full` | 还是全市场；主干按各数据集默认起点拉取，日线从 2016-01-01 起 | 深历史，页数和落盘量更多 |
+| `cne init --since 2018-01-01` | 全市场，从指定日期起 | 介于两者之间 |
 | `cne backfill trading_status` | 补齐全市场历史 ST 证据 | 逐证券、按源节奏执行，宜安排长窗口 |
 
 TDX / Baostock 的可达性、出口、上游限流、重试和机器配置都会改变耗时；`init` 启动时会打印范围；单数据集回填另有 `cne backfill DATASET --plan` 可离线审阅。`init` 没有 `--plan` 参数。
@@ -48,7 +51,7 @@ cne run daily --config configs/cnequity.toml
 
 这里说的「完整」不是「全部数据集都有无限历史」。项目没有一条命令能把所有数据集的全部历史一次拉完。`init` 负责证券、日历、公司行为、个股/指数日线、交易状态和派生因子这些主干；分钟线、5 分钟线和分笔默认关闭，快照型数据也无法回补源端没有提供的历史。某个可回补的数据集需要更早的历史时，使用 `cne backfill <dataset> --start ... --end ...`；各数据集能拉到哪一年，见[数据集目录](../datasets/catalog.md)。
 
-如果中途按了 Ctrl-C、进程被杀，或者结果里有 `warning`，不要删除 `data/`，也不需要从头开始：重跑同一条 `cne init`，它会自动找到未完成的 run，从失败批次和缺失阶段继续。完成后用 `cne status --datasets` 查看覆盖与缺口。需要指定某个旧 run 时才用 `cne init --run-id RUN_ID`。
+如果中途按了 Ctrl-C、进程被杀，或者结果里有 `warning`，不要删除 `data/`，也不需要从头开始：重跑同一条 `cne init`，它会自动找到未完成的 run，从失败批次和缺失阶段继续。完成后用 `cne check` 验收。需要指定某个旧 run 时才用 `cne init --run-id RUN_ID`。
 
 Ctrl-C 之后，命令会先停住正在跑的 worker，再把没跑完的批次记成可以马上重试的 `failed`；已经成功的批次不会重拉。进程被直接杀掉也没关系：下一次命令会根据运行锁认出这个孤儿 run。活动批次和未经封存校验的旧暂存数据仍受发布门禁保护；已经封存校验的独立事实可以发布。缺输入的派生步骤会解释跳过原因。执行结束不代表窗口内每只证券的证据都已齐全。
 
@@ -99,10 +102,10 @@ cne backfill daily_bars --symbols 600519.SH,000001.SZ --start 2026-09-15 --end 2
 ## 验收，而不只看完成提示
 
 ```bash
-cne status --datasets --gate --config configs/cnequity.toml
-cne stats show --config configs/cnequity.toml
-cne audit --full --config configs/cnequity.toml
+cne check
 ```
+
+一条命令依次给出新鲜度与覆盖（同 `cne status --datasets --gate`）、数据质量（最近一次 run 的审计和全湖审计快照）和规模，最后给出结论；退出码 0 可用、1 有缺口或质量 error、2 证明不了。全湖审计要读每个历史分区，默认读最近一次的结果，需要当场重跑时加 `--full`。
 
 `fresh` 是新鲜度；审计健康也不等于任意历史窗口都可研究。全量审计会写报告，且按源开关执行外部核验，详见[命令副作用](../reference/cli-surface.md)。需要历史股票池时，再按真实研究窗口执行 `audit --full --research-start ... --research-end ...`，或使用严格 profile 查询。
 

@@ -118,7 +118,7 @@ bars = load(
 
 ### 历史 ST 限制
 
-日更只抓当天 `trading_status`。停牌可由 `cne derive trading_status --start/--end` 按年重建，覆盖可与 `daily_bars` 同起点（约 2001）。**ST 标签**由 Baostock 的逐标的 `isST` 历史与可选 Tushare BJ 历史源共同提供；只有生成了完整、版本化的 `historical_st_evidence` 收据，才能把对应窗口用于研究。部分回补（例如仅从 2016 年开始）不能证明 2001 年起的历史 ST 已剔除。
+日更只抓当天 `trading_status`（交易所板块记录当天停牌）。`init` 和 `cne backfill daily_bars` 之后会按日线窗口自动重建停牌；更早的历史可由 `cne derive trading_status --start/--end` 按年重建，覆盖可与 `daily_bars` 同起点（约 2001）。**ST 标签**由 Baostock 的逐标的 `isST` 历史与可选 Tushare BJ 历史源共同提供；只有生成了完整、版本化的 `historical_st_evidence` 收据，才能把对应窗口用于研究。部分回补（例如仅从 2016 年开始）不能证明 2001 年起的历史 ST 已剔除。
 
 收据可通过重叠的深历史范围与较新尾段范围合并，但新增标的必须有首个交易日证据。北交所（BJ）可通过显式配置的 Tushare Pro 回补：2016 年使用 `bak_basic` 历史简称，2017-01-01 起使用 `stock_st`；接口需要 token，2016 年以前仍会作为源端能力限制阻塞，不能把接口空结果当成 normal。未配置 Tushare 时，BJ 仍会显式阻塞。审计项 `trading_status_coverage_start` 区分总覆盖与 `st_coverage_start`，历史研究应使用 `cne audit --full --research-start ...` 复核。
 

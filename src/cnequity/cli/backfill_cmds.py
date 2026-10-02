@@ -310,7 +310,11 @@ def backfill(
             return
         cfg = _cfg(config_path)
         attach_log_file(cfg, "delisted-backfill")
+        window = _bar_lineage_window(since, None)
+        bars_before = _bar_fingerprint(cfg, window)
         result = _run_delisted_profile(cfg, since)
+        if result.get("status") != "failed":
+            _follow_lineage(result, lambda: _after_daily_bars(cfg, bars_before, window, result))
         click.echo(json.dumps(result, indent=2, default=str))
         if _run_status_exit_code(result["status"]):
             raise click.ClickException("delisted recovery execution or publication failed")
@@ -619,6 +623,16 @@ def backfill(
         cfg.st_history_symbols_per_run = 0
 
     spec = get_dataset(dataset)
+    # Explicit lineage: fingerprint the inputs a derive reads before fetching,
+    # so the follow-up below derives exactly what this backfill changed.
+    actions_before = bars_before = bar_window = None
+    if dataset == "corporate_actions":
+        from cnequity.derive.lineage import corporate_action_fingerprint
+
+        actions_before = corporate_action_fingerprint(cfg)
+    elif dataset == "daily_bars":
+        bar_window = _bar_lineage_window(start_d, end_d)
+        bars_before = _bar_fingerprint(cfg, bar_window)
     # Offset-paged sources (intraday) chunk by symbol, not by date, so each
     # symbol pays for locating the window only once.
     if spec.backfill_chunk_symbols and start_d and end_d:
@@ -636,12 +650,183 @@ def backfill(
         result["followup"] = followup
         if followup.get("status") != "success":
             result["status"] = followup.get("status", "degraded")
+    if actions_before is not None and result.get("status") != "failed":
+        result["adj_factors_sync"] = _follow_lineage(
+            result, lambda: _after_corporate_actions(cfg, actions_before, result)
+        )
+    if bars_before is not None and result.get("status") != "failed":
+        _follow_lineage(result, lambda: _after_daily_bars(cfg, bars_before, bar_window, result))
     if outstanding:
         result["outstanding"] = _settle_outstanding(cfg, dataset)
     click.echo(json.dumps(result, indent=2, default=str))
     code = _run_status_exit_code(result["status"])
     if code:
         raise SystemExit(code)
+
+
+def _follow_lineage(result: dict, derive) -> dict:
+    """Run a downstream derive; its failure degrades the backfill, never hides it.
+
+    The fetched rows are already published by this point, so the command's own
+    output must still reach the caller with the derive's failure recorded.
+    """
+    try:
+        summary = derive()
+    except Exception as exc:  # noqa: BLE001 — report it alongside the published fetch
+        logging.getLogger(__name__).exception("downstream derive failed")
+        click.echo(f"下游派生失败：{type(exc).__name__}: {exc}", err=True)
+        summary = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    if (
+        summary.get("status") in {"failed", "degraded", "warning"}
+        or summary.get("synchronized") is False
+    ) and result.get("status") == "success":
+        result["status"] = "degraded"
+    return summary
+
+
+def _after_corporate_actions(cfg, before, result: dict) -> dict:
+    """Refetch and check factors for the symbols whose action terms changed."""
+    from cnequity.derive.lineage import changed_symbols, corporate_action_fingerprint
+
+    affected = changed_symbols(before, corporate_action_fingerprint(cfg))
+    click.echo("\n公司行为回填完成", err=True)
+    click.echo(f"  写入：            {int(result.get('rows_written') or 0):,} 条", err=True)
+    click.echo(f"  受影响标的：      {len(affected):,}", err=True)
+    if not affected:
+        click.echo("✓ 公司行为没有改变任何复权因子输入，无需重算", err=True)
+        return {"affected_symbols": 0, "synchronized": True}
+    return _sync_adj_factors(
+        cfg,
+        affected,
+        realign=False,
+        input_label="公司行为",
+        rerun="cne backfill corporate_actions --symbols",
+    )
+
+
+def _bar_lineage_window(start: date | None, end: date | None) -> tuple[date, date]:
+    """The bar range a daily_bars backfill can touch: its own default when unset."""
+    from cnequity.steps.common import BACKFILL_START
+
+    return start or BACKFILL_START, end or shanghai_today()
+
+
+def _bar_fingerprint(cfg, window: tuple[date, date]):
+    from cnequity.derive.lineage import daily_bar_fingerprint
+
+    return daily_bar_fingerprint(cfg, *window)
+
+
+def _after_daily_bars(cfg, before, window: tuple[date, date], result: dict) -> dict:
+    """Realign factors and re-derive suspensions over the bars that changed.
+
+    Same lineage as corporate actions: the next daily run would only realign a
+    capped batch of symbols with history the factor table does not reach, and
+    no daily step re-derives suspensions at all.
+    """
+    from cnequity.derive.lineage import changed_bar_scope
+    from cnequity.steps.reference import DERIVE_TAIL_DAYS
+
+    affected, first, last = changed_bar_scope(before, _bar_fingerprint(cfg, window))
+    click.echo("\n日线回填完成", err=True)
+    click.echo(f"  写入：            {int(result.get('rows_written') or 0):,} 行", err=True)
+    click.echo(f"  受影响标的：      {len(affected):,}", err=True)
+    if not affected:
+        click.echo("✓ 日线没有变化，复权因子与停牌无需重算", err=True)
+        summary = {"affected_symbols": 0, "synchronized": True}
+        result["adj_factors_sync"] = summary
+        return summary
+    click.echo(f"  变化月份：        {first:%Y-%m} .. {last:%Y-%m}", err=True)
+    result["adj_factors_sync"] = _follow_lineage(
+        result,
+        lambda: _sync_adj_factors(
+            cfg,
+            affected,
+            realign=True,
+            input_label="日线",
+            rerun="cne backfill daily_bars --symbols",
+        ),
+    )
+    # A halt shows only as a gap between two traded bars, so the window reaches
+    # back past the first changed month by the derive's own tail.
+    month_end = (last.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    start = first - timedelta(days=DERIVE_TAIL_DAYS)
+    end = min(month_end, window[1])
+    result["trading_status_derive"] = _follow_lineage(
+        result, lambda: _derive_suspensions(cfg, start, end)
+    )
+    return {"affected_symbols": len(affected), "status": result.get("status")}
+
+
+def _sync_adj_factors(
+    cfg, affected: list[str], *, realign: bool, input_label: str, rerun: str
+) -> dict:
+    """Derive factors for *affected*, then check each reaches its latest traded bar.
+
+    Explicit lineage instead of hoping the next daily run notices: see
+    `cnequity.derive.lineage`. *realign* keeps cached factors (bars changed,
+    factors did not); otherwise the factors are refetched. A symbol left
+    unsynchronized degrades the command.
+    """
+    from cnequity.cli.maintain_cmds import _published_derive
+    from cnequity.derive.adj_factors import compute_adj_factors
+    from cnequity.derive.lineage import verify_factor_sync
+
+    click.echo("\n派生复权因子…", err=True)
+    with _published_derive(cfg, "adj_factors") as outcome:
+        derived = (
+            compute_adj_factors(cfg, realign_symbols=affected)
+            if realign
+            else compute_adj_factors(cfg, refresh_symbols=affected)
+        )
+        outcome["rows_written"] = derived.rows
+        if derived.failed:
+            outcome["status"] = "degraded"
+    sync = verify_factor_sync(cfg, affected, failed=derived.failed, rows=derived.rows)
+    reasons = {"no_bars": "无日线", "cdr": "CDR"}
+    skipped = ", ".join(
+        f"{reasons[r]} {sum(v == r for v in sync.skipped.values())}"
+        for r in reasons
+        if r in sync.skipped.values()
+    )
+    click.echo(f"  处理：            {len(affected):,}", err=True)
+    click.echo(f"  更新：            {len(sync.updated):,}", err=True)
+    click.echo(
+        f"  跳过：            {len(sync.skipped):,}" + (f"（{skipped}）" if skipped else ""),
+        err=True,
+    )
+    if sync.synchronized:
+        click.echo(f"\n✓ {input_label}与复权因子已同步", err=True)
+    else:
+        behind = sorted(sync.failed + sync.lagging)
+        preview = ",".join(behind[:20])
+        click.echo(
+            f"  失败：            {len(sync.failed):,}\n"
+            f"  未覆盖最新日线：  {len(sync.lagging):,}\n"
+            f"\n✗ {len(behind)} 只标的的复权因子没有跟上{input_label}；"
+            f"重跑：cne derive adj_factors 或 {rerun} {preview}",
+            err=True,
+        )
+    return sync.as_dict()
+
+
+def _derive_suspensions(cfg, start: date, end: date) -> dict:
+    """Reconstruct suspensions over the bar window a backfill changed.
+
+    Bar-gap suspensions are not part of the lean daily core: the daily
+    `trading_status` snapshot records each session's halts. Only a change to
+    bar history can reveal suspensions nobody snapshotted, so the derivation
+    follows the command that changes it.
+    """
+    from cnequity.cli.maintain_cmds import _derive_trading_status
+
+    summary = _derive_trading_status(cfg, start=start, end=end)
+    click.echo(
+        f"\n已按 {start.isoformat()}..{end.isoformat()} 的日线重算停牌："
+        f"{int(summary.get('rows_staged') or 0):,} 行（{summary.get('status')}）",
+        err=True,
+    )
+    return summary
 
 
 def _backfill_plan(cfg, dataset, start, end, symbols, workers, repair_modes) -> dict:

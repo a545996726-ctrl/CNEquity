@@ -6,6 +6,7 @@
 |---|---|---|
 | `cne audit` | 条件 | 读取湖、输出审计；启用外部对照时访问源 |
 | `cne backfill` | 执行时 | 补历史并写暂存与发布数据；--plan 仅读配置和状态 |
+| `cne check` | 无 | 读取状态、新鲜度、审计结果与统计；统计过期时重算，--full 重跑全湖审计 |
 | `cne config` | 无 | create 写个人配置；upgrade 备份后补调度 step；validate/diff 仅读 |
 | `cne contract diff` | 无 | 读取契约并输出差异 |
 | `cne contract show` | 无 | 读取契约；指定输出路径时写文件 |

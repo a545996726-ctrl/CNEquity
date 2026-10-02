@@ -1052,12 +1052,14 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
     return result
 
 
-# How far back the daily run re-examines sessions for interior bar gaps. A halt
-# only becomes visible here once the symbol trades again, so the window has to
+# How far back an unbounded derive re-examines sessions for interior bar gaps
+# — the tail an incremental `cne backfill daily_bars` re-derives. A halt only
+# becomes visible here once the symbol trades again, so the window has to
 # outlive an ordinary suspension rather than just cover the last few sessions.
-# Anything older is closed by an explicit rebuild (`cne derive trading_status`,
-# which walks the full history) — the daily step deliberately does not pay for
-# a whole-history cross-join every evening.
+# The daily core does not run this step at all: the `trading_status` snapshot
+# records each session's halts, and only a change to bar history can reveal
+# one nobody snapshotted. Anything older is closed by an explicit rebuild
+# (`cne derive trading_status`, which walks the full history).
 DERIVE_TAIL_DAYS = 90
 
 
