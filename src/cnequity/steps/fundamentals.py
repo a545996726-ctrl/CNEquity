@@ -440,6 +440,12 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
             "orphan_purge": purge_summary,
         }
 
+    from cnequity.domain.valuation import reconstruct_total_mv
+    from cnequity.storage.valuation_repair import load_share_counts
+
+    # Year-end share counts miss intra-year changes; the lake's own share
+    # history gives the count effective on each session where it has one.
+    shares = load_share_counts(config)
     rows_read = 0
     rows_written = 0
     all_failed: list[str] = []
@@ -458,6 +464,7 @@ def _backfill_valuation_metrics_locked(config: Config, trade_date: date, run_id:
         all_failed.extend(failed)
         if not df.is_empty():
             df = _validate_valuation_history_batch(df, batch, history_start, history_end)
+            df = reconstruct_total_mv(df, shares).drop("close", strict=False)
             # Unique part name per chunk — write_simple's default batch-0 would
             # overwrite prior chunks in the same run_id before compact.
             chunk = write_fetched(

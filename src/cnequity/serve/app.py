@@ -1,17 +1,8 @@
-"""The read-only lake dashboard: JSON API plus one self-contained page.
+"""Lake dashboard with an explicit browser-confirmed storage maintenance flow.
 
-**Nothing here writes to the lake.** There is no endpoint that runs, retries or
-cleans anything, and there will not be: an unauthenticated local HTTP service
-that can trigger ingestion is a liability, and the CLI is already the right
-front door for those. The page shows the command to run and lets you copy it.
-
-The one exception proves the rule — ``meta/stats`` is regenerated in the
-background when ingestion has moved on, because it is a cache of the lake rather
-than part of it, and a dashboard serving numbers from last week is worse than
-one that refreshes its own cache.
-
-Responses are pydantic models so ``/api/docs`` documents the real contract:
-the OpenAPI page is generated from the handlers and cannot drift from them.
+Data views remain read-only. Storage cleanup alone supports reviewed POSTs,
+with same-origin CSRF checks, expiring approval and lifecycle revalidation.
+Stats refresh remains a background cache write and is drained before cleanup.
 """
 
 from __future__ import annotations
@@ -395,12 +386,19 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
     """
     app = FastAPI(
         title="cnequity dashboard",
-        description="Read-only view of one lake: coverage, freshness and provenance.",
+        description="Lake coverage, freshness and provenance; storage cleanup requires explicit web confirmation.",
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
     app.state.view = LakeView(config)
     app.state.token = token
+    from cnequity.serve.storage import StorageMaintenance
+    from cnequity.serve.storage_routes import install_storage_routes
+
+    maintenance = StorageMaintenance(config, invalidate=app.state.view.invalidate)
+    app.state.storage_maintenance = maintenance
+    app.state.view.maintenance_gate = maintenance.gate
+    install_storage_routes(app, maintenance)
 
     @app.middleware("http")
     async def _authenticate(request: Request, call_next):
@@ -413,7 +411,31 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
                 from fastapi.responses import JSONResponse
 
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
-        return await call_next(request)
+        is_storage = request.url.path.startswith("/api/storage")
+        if is_storage:
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        if not maintenance.gate.enter():
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                {"detail": "存储维护正在执行，读取暂时暂停，请稍后刷新。"}, status_code=503
+            )
+        try:
+            return await call_next(request)
+        finally:
+            maintenance.gate.leave()
+
+    @app.middleware("http")
+    async def _browser_boundary(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     # Same-origin only: the bundle is packaged beside the page, never fetched
     # from a CDN. `html=False` so a missing asset 404s rather than silently
@@ -462,7 +484,7 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
                 "<h1>还没有探测记录</h1>"
                 "<p>先跑一次探测，报告会写进湖里，这个页面读它：</p>"
                 "<pre><code>cne sources probe --vantage cn</code></pre>"
-                "<p>探测放在 CLI 上是有意的——这个面板只读，不会替你去请求十几个第三方主机。</p>",
+                "<p>探测放在 CLI 上是有意的——健康页只展示已有报告，不会替你去请求十几个第三方主机。</p>",
                 status_code=404,
             )
         return HTMLResponse(render_page(reports))

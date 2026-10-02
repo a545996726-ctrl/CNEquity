@@ -54,8 +54,45 @@ def write_simple(
     batch_id: str = "batch-0",
 ) -> dict:
     writer = StagingWriter(config.staging_root)
-    writer.write_batch(dataset, run_id, batch_id, df)
-    return {"rows_read": df.height, "rows_written": df.height}
+    spec = DATASETS.get(dataset)
+    if spec is None or not spec.partial_rows:
+        writer.write_batch(dataset, run_id, batch_id, df)
+        return {"rows_read": df.height, "rows_written": df.height}
+    report = writer.write_usable_batch(dataset, run_id, batch_id, df)
+    result = {"rows_read": report["rows_read"], "rows_written": report["rows_written"]}
+    if not report["rows_rejected"]:
+        return result
+    rejected_dates = report.get("rejected_dates", [])
+    if rejected_dates:
+        StateStore(config.meta_root).record_missing_dates(
+            dataset, [date.fromisoformat(day) for day in rejected_dates], reason="quarantined_rows"
+        )
+    result.update(
+        status="degraded",
+        batch_settled=True,
+        rows_rejected=report["rows_rejected"],
+        quarantine=report["quarantine"],
+        rejected_dates=rejected_dates,
+    )
+    result["context_updates"] = {
+        "audit_findings": [
+            {
+                "dataset": dataset,
+                "severity": "warning",
+                "check": "quarantined_rows",
+                "message": (
+                    f"{report['rows_rejected']} row(s) quarantined, "
+                    f"{report['rows_written']} valid row(s) staged; "
+                    "the affected dates stay missing until a clean fetch"
+                ),
+                "rows_rejected": report["rows_rejected"],
+                "quarantine": report["quarantine"],
+                "rejected_dates": rejected_dates,
+                "reasons": report.get("reasons", []),
+            }
+        ]
+    }
+    return result
 
 
 # StateStore field recording the day a tiered feed last completed its deep

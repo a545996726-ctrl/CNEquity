@@ -92,15 +92,15 @@ class _FakeBaostock:
 
 
 def test_fetch_valuation_history_maps_market_cap():
-    # fields: date,code,close,amount,turn,peTTM,pbMRQ,psTTM
-    # float_mv = amount / (turn/100); total_mv = close * totalShare (Q4 asof)
+    # fields: date,code,close,volume,turn,peTTM,pbMRQ,psTTM
+    # float_mv = close * volume / (turn/100); total_mv = close * totalShare (Q4 asof)
     bs = _FakeBaostock(
         {
             "sh.600519": [
                 ["malformed"],
                 ["2015-12-31", "sh.600519", "199.0", "900000.0", "1.0", "12.4", "3.0", "7.9"],
-                ["2016-01-04", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"],
-                ["not-a-date", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"],
+                ["2016-01-04", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"],
+                ["not-a-date", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"],
                 [
                     "2016-01-05",
                     "sh.600519",
@@ -113,7 +113,7 @@ def test_fetch_valuation_history_maps_market_cap():
                 ],  # suspend → null mv
             ],
             "sz.000001": [
-                ["2016-01-04", "sz.000001", "10.0", "500000.0", "2.0", "7.0", "0.9", "1.5"],
+                ["2016-01-04", "sz.000001", "10.0", "50000.0", "2.0", "7.0", "0.9", "1.5"],
             ],
         },
         profit_q4={
@@ -160,12 +160,15 @@ def test_fetch_valuation_history_maps_market_cap():
         "source",
         "data_version",
         "fetched_at",
-    }
+    } | {"close"}
 
     moutai = df.filter(
         (pl.col("symbol") == "600519.SH") & (pl.col("trade_date") == date(2016, 1, 4))
     )
-    assert moutai["float_mv"].item() == pytest.approx(100_000_000.0)  # 1e6 / 0.01
+    assert moutai["float_mv"].item() == pytest.approx(80_000_000.0)  # 200 * 4000 / 0.01
+    assert moutai["total_mv_basis"].item() == "close_x_year_end_shares_estimate"
+    assert moutai["float_mv_basis"].item() == "close_x_turn_implied_shares"
+    assert moutai["shares_as_of"].item() == date(2015, 12, 31)
     assert moutai["total_mv"].item() == pytest.approx(200.0 * 1_000_000_000)
     assert moutai["pe_ttm"].item() == 12.5
 
@@ -180,11 +183,7 @@ def test_fetch_valuation_history_maps_market_cap():
 
 def test_fetch_valuation_history_skips_uncovered_symbol():
     bs = _FakeBaostock(
-        {
-            "sh.600519": [
-                ["2016-01-04", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"]
-            ]
-        }
+        {"sh.600519": [["2016-01-04", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"]]}
     )
     df, failed = fetch_valuation_history(
         ["600519.SH", "999999.SH"], date(2016, 1, 1), date(2016, 1, 5), bs=bs, sleep=lambda _: None
@@ -195,7 +194,7 @@ def test_fetch_valuation_history_skips_uncovered_symbol():
 
 
 def test_fetch_valuation_history_dedupes_source_rows():
-    row = ["2016-01-04", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"]
+    row = ["2016-01-04", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"]
     bs = _FakeBaostock({"sh.600519": [row, row]})
     df, failed = fetch_valuation_history(
         ["600519.SH"], date(2016, 1, 1), date(2016, 1, 5), bs=bs, sleep=lambda _: None
@@ -206,11 +205,7 @@ def test_fetch_valuation_history_dedupes_source_rows():
 
 def test_fetch_valuation_history_rejects_rows_for_another_code():
     bs = _FakeBaostock(
-        {
-            "sh.600519": [
-                ["2016-01-04", "sh.000001", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"]
-            ]
-        }
+        {"sh.600519": [["2016-01-04", "sh.000001", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"]]}
     )
     df, failed = fetch_valuation_history(
         ["600519.SH"], date(2016, 1, 1), date(2016, 1, 5), bs=bs, sleep=lambda _: None
@@ -224,8 +219,8 @@ def test_fetch_valuation_history_rejects_mixed_source_identities():
     bs = _FakeBaostock(
         {
             "sh.600519": [
-                ["2016-01-04", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"],
-                ["2016-01-05", "sh.000001", "201.0", "1000000.0", "1.0", "12.6", "3.1", "8.1"],
+                ["2016-01-04", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"],
+                ["2016-01-05", "sh.000001", "201.0", "4000.0", "1.0", "12.6", "3.1", "8.1"],
             ]
         }
     )
@@ -240,7 +235,7 @@ def test_fetch_valuation_history_rejects_profit_rows_for_another_code():
     bs = _FakeBaostock(
         {
             "sh.600519": [
-                ["2016-01-04", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"]
+                ["2016-01-04", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"]
             ]
         },
         profit_q4={
@@ -273,7 +268,7 @@ def test_fetch_valuation_history_reports_failed_symbols_fail_loud():
     bs = _FakeBaostock(
         {
             "sh.600519": [
-                ["2016-01-04", "sh.600519", "200.0", "1000000.0", "1.0", "12.5", "3.1", "8.0"]
+                ["2016-01-04", "sh.600519", "200.0", "4000.0", "1.0", "12.5", "3.1", "8.0"]
             ]
         },
         error_codes={"sz.000001": "10002"},

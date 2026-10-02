@@ -23,8 +23,10 @@ from cnequity.cli import (  # noqa: F401
     govern_cmds,
     maintain_cmds,
     quality_cmds,
+    repair_cmds,
     run_cmds,
     setup_cmds,
+    storage_cmds,
     ths_official_cmds,
 )
 from cnequity.cli._root import cli

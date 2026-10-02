@@ -78,6 +78,22 @@ def test_contract_diff_finds_shape_pk_units_pit_and_history_breaks():
     assert "schema_version_not_bumped" in kinds
 
 
+def test_unit_for_a_new_column_is_compatible_but_changing_an_old_unit_is_not():
+    old = build_contract()
+    new = copy.deepcopy(old)
+    row = new["datasets"]["valuation_metrics"]
+    row["schema"]["pe_forward"] = "float64"
+    row["columns"]["pe_forward"] = "float64"
+    row["unit_contract"] = {**row["unit_contract"], "pe_forward": "ratio"}
+    diff = diff_contracts(old, new)
+    assert any(item["kind"] == "unit_contract_extended" for item in diff["compatible"])
+    assert not diff["breaking"]
+
+    row["unit_contract"]["total_mv"] = "10k_CNY"
+    diff = diff_contracts(old, new)
+    assert any(item["kind"] == "unit_contract_changed" for item in diff["breaking"])
+
+
 def test_new_column_is_compatible_but_removed_dataset_is_breaking():
     old = build_contract()
     new = copy.deepcopy(old)

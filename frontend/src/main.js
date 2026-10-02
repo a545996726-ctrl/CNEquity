@@ -1,5 +1,6 @@
 // Lake dashboard. Two views routed on the hash: the tier overview (#/) and one
 // dataset (#/dataset/<name>[/state|meta]).
+import { renderStorage, closeStorage } from "./storage.js";
 import { disposeAll, heatmap, provenanceSeries, runGantt, severityTimeline } from "./charts.js";
 
 const qs = new URLSearchParams(location.search);
@@ -15,6 +16,7 @@ const NAV_ITEMS = [
   ["datasets", "数据集", "#/datasets"],
   ["runs", "跑批", "#/runs"],
   ["quality", "质量", "#/quality"],
+  ["storage", "存储运维", "#/storage"],
 ];
 
 function pageShell(content, active = "overview") {
@@ -30,7 +32,7 @@ function pageShell(content, active = "overview") {
       </a>
       <span class="rail-label">Workspace</span>
       <nav class="nav" aria-label="主导航">${nav}</nav>
-      <div class="topbar-meta"><span class="console-mode">只读控制台</span>
+      <div class="topbar-meta"><span class="console-mode">清理需网页确认</span>
         <button class="button button-ghost" id="refresh-page" type="button">刷新</button>
       </div>
     </header>
@@ -43,10 +45,10 @@ function setPage(content, active = "overview") {
   document.getElementById("refresh-page")?.addEventListener("click", () => location.reload());
 }
 
-async function api(path) {
+async function api(path, options) {
   const sep = path.includes("?") ? "&" : "?";
   const url = TOKEN ? `${path}${sep}token=${encodeURIComponent(TOKEN)}` : path;
-  const res = await fetch(url);
+  const res = await fetch(url, options);
   if (!res.ok) {
     // Surface what the server said. A 422 here is usually a real contract
     // message ("requires as_of= for point-in-time queries"), and showing the
@@ -859,11 +861,13 @@ async function renderQualityRun(runId) {
 async function route() {
   disposeAll();
   closeRunStream();
+  closeStorage();
   const dataset = location.hash.match(/^#\/dataset\/([^/]+)(?:\/(state|meta|data))?/);
   const run = location.hash.match(/^#\/runs\/(.+)$/);
   const qrun = location.hash.match(/^#\/quality\/(.+)$/);
   try {
-    if (dataset) await renderDetail(decodeURIComponent(dataset[1]), dataset[2] || "state");
+    if (location.hash === "#/storage") await renderStorage({ api, setPage, esc, dataTable });
+    else if (dataset) await renderDetail(decodeURIComponent(dataset[1]), dataset[2] || "state");
     else if (run) await renderRunDetail(decodeURIComponent(run[1]));
     else if (location.hash.startsWith("#/runs")) await renderRuns();
     else if (qrun) await renderQualityRun(decodeURIComponent(qrun[1]));

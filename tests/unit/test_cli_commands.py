@@ -995,8 +995,10 @@ def test_clean_dry_run(cfg_path, monkeypatch):
     # stdout alone: the log-file notice shares `result.output` but not stdout.
     payload = json.loads(result.stdout)
     assert payload["dry_run"] is True
-    assert payload["removed_run_ids"] == ["r1"]
-    assert payload["bytes_freed"] == 120
+    assert payload["removed_run_ids"] == []
+    assert payload["candidate_run_ids"] == ["r1"]
+    assert payload["bytes_freed"] == 0
+    assert payload["logical_bytes_selected"] == 120
 
 
 def test_stats_show_scans_curated_when_no_stats_exist(tmp_path, cfg_path):

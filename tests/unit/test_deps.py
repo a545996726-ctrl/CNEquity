@@ -114,3 +114,9 @@ def test_finalize_wave_order():
 def test_finalize_subset_skips_missing_steps():
     levels = step_execution_levels(["compact", "audit"])
     assert levels[-2:] == [["compact"], ["audit"]]
+
+
+def test_core_snapshot_can_depend_on_compact_in_finalize_wave():
+    levels = step_execution_levels(["daily_bars", "compact", "ths_official_snapshot", "audit"])
+    flat = [name for level in levels for name in level]
+    assert flat == ["daily_bars", "compact", "ths_official_snapshot", "audit"]

@@ -28,6 +28,7 @@ import polars as pl
 from cnequity.adapters.eastmoney.common import _to_float, symbol_from_secucode
 from cnequity.adapters.eastmoney.datacenter import fetch_datacenter
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient
+from cnequity.domain.valuation import MV_VENDOR_REPORTED
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ _SCHEMA = {
     "ps_ttm": pl.Float64,
     "total_mv": pl.Float64,
     "float_mv": pl.Float64,
+    "total_mv_basis": pl.Utf8,
+    "float_mv_basis": pl.Utf8,
 }
 
 
@@ -98,6 +101,8 @@ def fetch_valuation_datacenter(
                 "ps_ttm": _to_float(item.get("PS_TTM")),
                 "total_mv": _to_float(item.get("TOTAL_MARKET_CAP")),
                 "float_mv": _to_float(item.get("NOTLIMITED_MARKETCAP_A")),
+                "total_mv_basis": MV_VENDOR_REPORTED,
+                "float_mv_basis": MV_VENDOR_REPORTED,
             }
         )
     if skipped:

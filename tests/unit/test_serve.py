@@ -1,4 +1,4 @@
-"""The read-only dashboard API."""
+"""Dashboard data views and authorization contracts."""
 
 from __future__ import annotations
 
@@ -540,15 +540,16 @@ def test_rows_reject_an_unknown_adjustment(client):
     assert client.get("/api/datasets/daily_bars/rows", params={"adjust": "nope"}).status_code == 422
 
 
-# --- the read-only and auth contracts ----------------------------------------
+# --- storage boundary and auth contracts ----------------------------------------
 
 
-def test_no_route_can_mutate_the_lake(client):
-    """The dashboard shows; the CLI acts. Guard the boundary, not the intent."""
-    methods = set()
-    for route in client.app.routes:
-        methods |= set(getattr(route, "methods", set()))
-    assert methods <= {"GET", "HEAD"}, f"a mutating method is routed: {methods}"
+def test_only_storage_review_and_confirmation_allow_post(client):
+    mutations = {
+        (route.path, method)
+        for route in client.app.routes
+        for method in getattr(route, "methods", set()) - {"GET", "HEAD"}
+    }
+    assert mutations == {("/api/storage/reviews", "POST"), ("/api/storage/confirm", "POST")}
 
 
 def test_a_token_is_required_when_one_is_configured(lake):

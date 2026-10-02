@@ -1108,6 +1108,22 @@ class SnapshotStore:
         runtime_state: dict[str, Any] = {}
         try:
             research_inputs = self._capture_research_inputs(temp, selected, records)
+            from cnequity.storage.lifecycle import LifecycleStore
+            from cnequity.storage.lifecycle_snapshot import DEPENDENCIES_PATH, export_dependencies
+
+            lifecycle_dependencies = export_dependencies(LifecycleStore(self.config.meta_root))
+            if lifecycle_dependencies is not None:
+                stored = temp / "meta" / DEPENDENCIES_PATH
+                write_json_atomic(stored, lifecycle_dependencies, indent=2)
+                records.append(
+                    SnapshotFile(
+                        dataset=selected[0],
+                        layer="meta",
+                        path=stored.relative_to(temp).as_posix(),
+                        size_bytes=stored.stat().st_size,
+                        sha256=_sha256(stored),
+                    )
+                )
             dataset_states = {dataset: state.get_payload(dataset) for dataset in selected}
             for dataset in selected:
                 layer, source = self._source_root(dataset)
@@ -1347,6 +1363,13 @@ class SnapshotStore:
                 "lineage": runtime_lineage(self.config),
                 "runtime_state": runtime_state,
                 "research_inputs": research_inputs,
+                "lifecycle_dependencies": {
+                    "path": "meta/lifecycle/snapshot-dependencies.json",
+                    "external_bytes_materialized": False,
+                    "requires_rebinding": True,
+                }
+                if lifecycle_dependencies is not None
+                else None,
                 "files": [asdict(item) for item in records],
             }
             # Evidence publishers can run independently of the compact lock.
@@ -1512,6 +1535,27 @@ class SnapshotStore:
             mismatched.append(path)
         mismatched.extend(_manifest_contract_issues(manifest))
         mismatched.extend(_manifest_state_issues(snapshot, manifest))
+        lifecycle = manifest.get("lifecycle_dependencies")
+        dependency_path = "meta/lifecycle/snapshot-dependencies.json"
+        if lifecycle is not None or dependency_path in seen:
+            from cnequity.storage.lifecycle import LifecycleError
+            from cnequity.storage.lifecycle_snapshot import read_dependencies
+
+            if (
+                lifecycle
+                != {
+                    "path": dependency_path,
+                    "external_bytes_materialized": False,
+                    "requires_rebinding": True,
+                }
+                or dependency_path not in seen
+            ):
+                mismatched.append("lifecycle_dependencies")
+            try:
+                if read_dependencies(snapshot / "meta") is None:
+                    missing.append(dependency_path)
+            except (LifecycleError, ValueError, OSError):
+                mismatched.append(dependency_path)
         research = manifest.get("research_inputs")
         if research is not None:
             if not isinstance(research, Mapping) or research.get("schema_version") != 1:
@@ -2051,6 +2095,13 @@ class SnapshotStore:
         _reject_symlink_path(lake_root, label="lake root")
         root = Path(lake_root).resolve(strict=False)
         _reject_symlink_path(root / "meta", label="metadata root")
+        for protection in ("registry.json", "snapshot-dependencies.json"):
+            path = root / "meta/lifecycle" / protection
+            if path.exists() or path.is_symlink():
+                raise ValueError(
+                    "lifecycle-protected lakes require a full snapshot; "
+                    "delta does not yet merge retention dependencies"
+                )
         index: dict[str, dict[str, Any]] = {}
 
         def add(path: Path, relative: Path, dataset: str, layer: str) -> None:

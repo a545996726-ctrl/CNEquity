@@ -2,13 +2,16 @@
 
 import io
 import json
+from contextlib import nullcontext
 from datetime import date
 
+import httpx
 import pandas as pd
 import pytest
 
 from cnequity.adapters.exchange.etf_profiles import (
     CNI_DOMESTIC_INDEX_METHODOLOGIES,
+    _get_official_response,
     parse_cni_domestic_index_methodology,
     parse_sse_profiles,
     parse_szse_fund_classes,
@@ -17,6 +20,56 @@ from cnequity.adapters.exchange.etf_profiles import (
 from cnequity.config import Config
 from cnequity.domain.schemas import frame_from_rows
 from cnequity.steps.etf_profiles import step_etf_profiles
+
+
+def test_official_directory_retries_transport_failure_under_source_guard(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "lake")
+    attempts = []
+    guarded = []
+    recorded = []
+
+    def handle(request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200, content=b"directory", request=request)
+
+    def guard(_cfg, source):
+        guarded.append(source)
+        return nullcontext()
+
+    monkeypatch.setattr("cnequity.adapters.exchange.etf_profiles.source_request", guard)
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.etf_profiles.record_http_response",
+        lambda _cfg, source, response: recorded.append((source, response.status_code)),
+    )
+    monkeypatch.setattr("cnequity.adapters.exchange.etf_profiles.time.sleep", lambda _: None)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        response = _get_official_response(cfg, client, "https://exchange.test/directory")
+    assert response.content == b"directory"
+    assert len(attempts) == 2
+    assert guarded == ["exchange", "exchange"]
+    assert recorded == [("exchange", 200)]
+
+
+def test_official_directory_does_not_retry_http_rejection(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "lake")
+    attempts = []
+
+    def handle(request):
+        attempts.append(request)
+        return httpx.Response(403, request=request)
+
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.etf_profiles.source_request", lambda *_: nullcontext()
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.etf_profiles.record_http_response", lambda *_: None
+    )
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            _get_official_response(cfg, client, "https://exchange.test/directory")
+    assert len(attempts) == 1
 
 
 def _sse_payload(rows, total=None):

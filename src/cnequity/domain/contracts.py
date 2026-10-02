@@ -843,14 +843,22 @@ def _diff_record(name: str, old: Mapping[str, Any], new: Mapping[str, Any]) -> l
     old_unit = _field(old, "unit_contract")
     new_unit = _field(new, "unit_contract")
     if old_unit != new_unit and (old_unit is not None or new_unit is not None):
+        # Declaring the unit of a newly added column changes no existing
+        # measure; any other unit change does.
+        extended = (
+            isinstance(old_unit, Mapping)
+            and isinstance(new_unit, Mapping)
+            and all(new_unit.get(key) == value for key, value in old_unit.items())
+            and set(new_unit) - set(old_unit) <= set(new_schema) - set(old_schema)
+        )
         changes.append(
             _change(
                 name,
-                "unit_contract_changed",
+                "unit_contract_extended" if extended else "unit_contract_changed",
                 f"datasets.{name}.unit_contract",
                 old_unit,
                 new_unit,
-                breaking=True,
+                breaking=not extended,
             )
         )
 

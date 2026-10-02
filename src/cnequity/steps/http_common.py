@@ -496,7 +496,7 @@ def write_fetched(
             url=url,
         )
         result = write_simple(config, run_id, dataset, df, batch_id=batch_id)
-    if not df.is_empty() and "source" in df.columns:
+    if not result.get("rows_rejected") and not df.is_empty() and "source" in df.columns:
         from cnequity.diagnostics.source_health import record_validated_ingest
 
         try:
@@ -557,13 +557,21 @@ def run_incremental_fetched(
     )
     recovered: dict[date, pl.DataFrame] = {}
     if checkpoint_days:
-        for path in StagingWriter(config.staging_root).list_run_files(dataset, run_id):
+        writer = StagingWriter(config.staging_root)
+        # A day that staged only part of its rows is fetched again, not reused.
+        partial = {
+            report["batch_id"]
+            for report in writer.quality_receipts(dataset, run_id)
+            if report.get("rows_rejected")
+        }
+        for path in writer.list_run_files(dataset, run_id):
             match = re.fullmatch(r"part-day-(\d{4}-\d{2}-\d{2})-[0-9a-f]+", path.stem)
-            if match:
+            if match and path.stem.removeprefix("part-") not in partial:
                 recovered[date.fromisoformat(match.group(1))] = validate_dataframe(
                     pl.read_parquet(path), dataset
                 )
     successful_days: list[date] = []
+    partial_days: list[dict] = []
 
     def on_day(day: date, part: pl.DataFrame) -> None:
         if checkpoint_days:
@@ -576,7 +584,7 @@ def run_incremental_fetched(
                 staged = staged.filter(pl.col("symbol").is_in(list(universe)))
                 if staged.is_empty():
                     raise RuntimeError(f"{dataset}: no rows matched the reconciled universe")
-            write_fetched(
+            day_result = write_fetched(
                 config,
                 run_id,
                 dataset,
@@ -584,6 +592,9 @@ def run_incremental_fetched(
                 source=source,
                 batch_id=f"day-{day.isoformat()}-{uuid.uuid4().hex}",
             )
+            if day_result.get("rows_rejected"):
+                partial_days.append(day_result)
+                return
         successful_days.append(day)
 
     df, findings = fetch_incremental_daily(
@@ -659,7 +670,15 @@ def run_incremental_fetched(
     if checkpoint_days:
         # Each requested day is already durable. Avoid writing a second full
         # copy under batch-0, and retain earlier days if a later request fails.
-        result = {"rows_read": df.height, "rows_written": df.height}
+        rejected = sum(item["rows_rejected"] for item in partial_days)
+        result = {"rows_read": df.height, "rows_written": df.height - rejected}
+        if rejected:
+            result.update(status="degraded", batch_settled=True, rows_rejected=rejected)
+            findings.extend(
+                finding
+                for item in partial_days
+                for finding in item["context_updates"]["audit_findings"]
+            )
     else:
         result = write_fetched(
             config,
@@ -672,10 +691,13 @@ def run_incremental_fetched(
             request_params=request_params,
             url=url,
         )
+        rejected_days = {date.fromisoformat(day) for day in result.get("rejected_dates", [])}
+        successful_days = [day for day in successful_days if day not in rejected_days]
     StateStore(config.meta_root).mark_staged_request_days(dataset, run_id, successful_days)
     _mark_snapshot_capture(config, dataset, trade_date)
     if findings:
-        result["context_updates"] = {"audit_findings": findings}
+        existing = result.get("context_updates", {}).get("audit_findings", [])
+        result["context_updates"] = {"audit_findings": [*existing, *findings]}
         status = _incomplete_window_status(findings)
         if status is not None:
             result["status"] = status

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,6 +10,7 @@ from pathlib import Path
 from cnequity.config import Config
 from cnequity.file_lock import is_locked
 from cnequity.orchestrator.manifest import Manifest
+from cnequity.storage.lifecycle_resources import resource_holds
 
 
 @dataclass
@@ -155,6 +155,19 @@ def clean_staging(
     demoted to failed in the manifest so a later ``cne run retry`` refetches them
     instead of silently losing their rows.
     """
+    with resource_holds(config.meta_root, dry_run=dry_run) as holds:
+        return _clean_staging(
+            config,
+            dry_run=dry_run,
+            orphan_retention_days=orphan_retention_days,
+            force=force,
+            holds=holds,
+        )
+
+
+def _clean_staging(
+    config: Config, *, dry_run: bool, orphan_retention_days: int, force: bool, holds: set[str]
+) -> StagingCleanupResult:
     manifest = Manifest(config.manifest_path)
     staging_root = config.staging_root
     now = datetime.now(timezone.utc)
@@ -171,6 +184,9 @@ def clean_staging(
     for run_id in sorted(staging_run_ids):
         paths = staging_run_paths(staging_root, run_id)
         if not paths:
+            continue
+        if f"staging/{run_id}" in holds:
+            skipped.append(run_id)
             continue
 
         if run_id not in known_run_ids:
@@ -240,6 +256,15 @@ def clean_run_logs(
     Only files this CLI names are considered — anything else under ``logs/``
     belongs to whoever put it there (launchd redirects its own stdout here).
     """
+    with resource_holds(Path(data_root) / "meta", dry_run=dry_run) as holds:
+        return _clean_run_logs(
+            data_root, retention_days=retention_days, dry_run=dry_run, now=now, holds=holds
+        )
+
+
+def _clean_run_logs(
+    data_root: Path, *, retention_days: int, dry_run: bool, now: datetime | None, holds: set[str]
+) -> LogCleanupResult:
     log_dir = Path(data_root) / "logs"
     if retention_days <= 0 or not log_dir.is_dir():
         return LogCleanupResult(removed=[], kept=0, bytes_freed=0)
@@ -254,12 +279,11 @@ def clean_run_logs(
             stat = path.stat()
         except OSError:
             continue
-        if stat.st_mtime >= cutoff:
+        if stat.st_mtime >= cutoff or f"log/{path.name}" in holds:
             kept += 1
             continue
+        if not dry_run:
+            path.unlink()
         removed.append(path.name)
         freed += stat.st_size
-        if not dry_run:
-            with contextlib.suppress(OSError):
-                path.unlink()
     return LogCleanupResult(removed=removed, kept=kept, bytes_freed=freed)

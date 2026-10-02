@@ -537,6 +537,10 @@ VALUATION_METRICS_SCHEMA = {
     "ps_ttm": pl.Float64,
     "total_mv": pl.Float64,
     "float_mv": pl.Float64,
+    "pe_dynamic": pl.Float64,
+    "total_mv_basis": pl.Utf8,
+    "float_mv_basis": pl.Utf8,
+    "shares_as_of": pl.Date,
     "source": pl.Utf8,
     "data_version": pl.Utf8,
     "fetched_at": FETCHED_AT_DTYPE,
@@ -1317,6 +1321,25 @@ def validate_dataframe(
         ):
             raise SchemaValidationError("unit_split cannot carry stock distribution terms")
         df = df.with_columns(factor.fill_null(1.0).alias("split_factor"))
+
+    if dataset == "valuation_metrics":
+        from cnequity.domain.valuation import MV_BASES
+
+        # Columns added after the original valuation contract. A legacy row's
+        # basis stays unknown (null); it is never inferred here.
+        df = df.with_columns(
+            [
+                pl.lit(None, dtype=schema[col]).alias(col)
+                for col in ("pe_dynamic", "total_mv_basis", "float_mv_basis", "shares_as_of")
+                if col not in df.columns
+            ]
+        )
+        for col in ("total_mv_basis", "float_mv_basis"):
+            unknown = set(df.get_column(col).drop_nulls().cast(pl.Utf8).unique()) - MV_BASES
+            if unknown:
+                raise SchemaValidationError(
+                    f"dataset 'valuation_metrics': unknown {col} {sorted(unknown)}"
+                )
 
     missing = [col for col in schema if col not in df.columns]
     if allow_missing_optional:

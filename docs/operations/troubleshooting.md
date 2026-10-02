@@ -210,7 +210,7 @@ cne run retry --run-id INIT_RUN_ID
 ## 症状：磁盘不足 / staging 膨胀
 
 1. 找出 stranded success（有 staging、incomplete=0、无 compact batch）→ 逐个 `cne run compact --run-id <id>`
-2. `cne run clean --dry-run` → `cne run clean`（终态 + 已 compact 即可删，含 failed/warning）
+2. `cne run clean` 查看候选；现在只预览，不再删除。历史版本与登记试验到 serve 存储运维页确认，staging 暂仅报告
 3. incomplete / 未 compact 的失败 run 默认保留供 `cne run retry`；只有确认可丢弃时才 `--force`
 4. 压缩或归档旧 `meta/source_snapshots/`（长期会膨胀）
 5. curated 勿删；用 backfill 重采而非部分删除

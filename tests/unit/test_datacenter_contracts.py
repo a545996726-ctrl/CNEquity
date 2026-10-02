@@ -18,6 +18,7 @@ from cnequity.adapters.eastmoney.share_unlock import _UNLOCK_COLUMNS, _UNLOCK_RE
 # when a new adapter lands — the live probe iterates the same list.
 _EXPECTED_REQUIRED_REPORTS = frozenset(
     {
+        "RPT_VALUEANALYSIS_DET",
         "RPT_SHAREBONUS_DET",
         "RPT_LIFT_STAGE",
         "RPTA_WEB_RZRQ_GGMX",

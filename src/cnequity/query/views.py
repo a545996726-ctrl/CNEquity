@@ -136,9 +136,7 @@ def _view_select_sql(
     Python API returns one canonical observation.
     """
     primary_key = PRIMARY_KEYS.get(name, [])
-    source = (
-        f"read_parquet('{glob_path}', hive_partitioning={str(hive).lower()}, union_by_name=true)"
-    )
+    source = f"read_parquet({_sql_literal(glob_path)}, hive_partitioning={str(hive).lower()}, union_by_name=true)"
     # A few pre-schema-migration fragments in the wild (and lightweight
     # bootstrap fixtures) do not carry provenance. If no provenance field is
     # available, keep the raw view readable and let the schema/quality checks
@@ -198,7 +196,7 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # as_posix() keeps Windows drive letters (`C:/…`) while turning `\` into
     # `/`, which is what the SQL literals below and DuckDB's glob both want.
-    root = config.data_root.resolve().as_posix().replace("'", "''")
+    root = config.data_root.resolve().as_posix()
 
     con = duckdb.connect(str(db_path))
     con.execute(f"SET memory_limit='{config.duckdb_memory_limit}'")
@@ -209,7 +207,7 @@ def ensure_duckdb_views(config: Config, *, require_data: bool = False) -> Path:
         glob_path, hive = _view_glob(root, spec)
         if _glob_has_files(glob_path) or require_data:
             source = (
-                f"read_parquet('{glob_path}', "
+                f"read_parquet({_sql_literal(glob_path)}, "
                 f"hive_partitioning={str(hive).lower()}, union_by_name=true)"
             )
             # Types, not just names: the canonical ordering declines a

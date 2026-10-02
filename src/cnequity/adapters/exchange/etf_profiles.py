@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 import warnings
 from datetime import date
 from hashlib import sha256
@@ -41,6 +42,33 @@ CNI_DOMESTIC_INDEX_METHODOLOGIES = {
     "399330": "https://www.cnindex.com.cn/docs/gz_399330_e.pdf",
     "399673": "https://www.cnindex.com.cn/docs/gz_399673_e.pdf",
 }
+
+
+def _get_official_response(
+    config: Config,
+    client: httpx.Client,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    referer: str | None = None,
+) -> httpx.Response:
+    """Retry a brief transport interruption without bypassing source pacing."""
+    for attempt in range(3):
+        try:
+            with source_request(config, "exchange"):
+                response = client.get(
+                    url,
+                    params=params,
+                    headers={"Referer": referer} if referer else None,
+                )
+                record_http_response(config, "exchange", response)
+            response.raise_for_status()
+            return response
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+    raise AssertionError("unreachable")
 
 
 def parse_cni_domestic_index_methodology(
@@ -312,10 +340,7 @@ def fetch_exchange_etf_profiles(
                 "xlsx",
             ),
         ):
-            with source_request(config, "exchange"):
-                response = client.get(url, params=params, headers={"Referer": referer})
-                record_http_response(config, "exchange", response)
-            response.raise_for_status()
+            response = _get_official_response(config, client, url, params=params, referer=referer)
             if not response.content:
                 raise ValueError(f"empty exchange ETF directory: {url}")
             wire.append((str(response.request.url), response.content, params, kind))
@@ -329,10 +354,7 @@ def fetch_exchange_etf_profiles(
         for index_code, url in CNI_DOMESTIC_INDEX_METHODOLOGIES.items():
             if index_code not in tracked_codes:
                 continue
-            with source_request(config, "exchange"):
-                response = client.get(url)
-                record_http_response(config, "exchange", response)
-            response.raise_for_status()
+            response = _get_official_response(config, client, url)
             evidence = parse_cni_domestic_index_methodology(
                 response.content, index_code, url, index_evidence=index_evidence
             )

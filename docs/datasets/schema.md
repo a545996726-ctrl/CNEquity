@@ -694,11 +694,15 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 |--------|------|-------|
 | symbol | string |  |
 | trade_date | date |  |
-| pe_ttm | float64 |  |
+| pe_ttm | float64 | 滚动十二个月市盈率（TTM）；东方财富 push2 行为空 |
 | pb | float64 |  |
 | ps_ttm | float64 |  |
-| total_mv | float64 |  |
-| float_mv | float64 |  |
+| total_mv | float64 | 元；口径见 `total_mv_basis` |
+| float_mv | float64 | 元；口径见 `float_mv_basis` |
+| pe_dynamic | float64 | 动态市盈率（最新一期年化，push2 `f9`）；与 `pe_ttm` 口径不同，不可混用 |
+| total_mv_basis | string | `vendor_reported`、`close_x_share_structure`（收盘价 × 当日有效总股本）或 `close_x_year_end_shares_estimate`（收盘价 × 上一年末总股本，估算）；旧行可空 |
+| float_mv_basis | string | `vendor_reported`、`close_x_turn_implied_shares`（收盘价 × 换手率反推流通股）或 `close_x_turn_implied_shares_repaired`（由旧成交均价口径按收盘价/均价换算）或 `vwap_x_turn_implied_shares`（旧成交均价口径，无一致行情可换算）；旧行可空 |
+| shares_as_of | date | 计算总市值所用股本的生效或统计日期；供应商报告值为空 |
 | source | string | 溯源 |
 | data_version | string | 溯源 |
 | fetched_at | timestamp | 溯源 |

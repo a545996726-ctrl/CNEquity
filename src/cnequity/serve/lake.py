@@ -125,6 +125,7 @@ class LakeView:
         self._cache: dict[str, _Cached] = {}
         self._refresh_lock = threading.Lock()
         self._refreshing = False
+        self.maintenance_gate = None
 
     # --- caching -----------------------------------------------------------
 
@@ -160,6 +161,8 @@ class LakeView:
                 return False
             if not stats_freshness(self.config).stale:
                 return False
+            if self.maintenance_gate is not None and not self.maintenance_gate.enter():
+                return False
             self._refreshing = True
 
         def _run() -> None:
@@ -177,8 +180,17 @@ class LakeView:
             finally:
                 with self._refresh_lock:
                     self._refreshing = False
+                if self.maintenance_gate is not None:
+                    self.maintenance_gate.leave()
 
-        threading.Thread(target=_run, name="stats-refresh", daemon=True).start()
+        try:
+            threading.Thread(target=_run, name="stats-refresh", daemon=True).start()
+        except BaseException:
+            with self._refresh_lock:
+                self._refreshing = False
+            if self.maintenance_gate is not None:
+                self.maintenance_gate.leave()
+            raise
         return True
 
     # --- primitives --------------------------------------------------------

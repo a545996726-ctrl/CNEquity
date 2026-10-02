@@ -182,6 +182,7 @@ _UNIT_CONTRACT_DEFAULTS: dict[str, UnitContract] = {
     "northbound_flows": {"net_buy": "CNY", "buy_amount": "CNY", "sell_amount": "CNY"},
     "valuation_metrics": {
         "pe_ttm": "ratio",
+        "pe_dynamic": "ratio",
         "pb": "ratio",
         "ps_ttm": "ratio",
         "total_mv": "CNY",
@@ -563,6 +564,12 @@ class DatasetSpec:
     # datasets keep the strict trading-day walk and keep failing loud on an
     # empty day, which is what catches a silently broken EOD source.
     session_scope: Literal["session", "calendar"] = "session"
+    # Whether each row is an independently usable fact. When True, a batch with
+    # a few invalid rows stages the valid ones, keeps the input and the rejects
+    # under ``_quarantine`` and leaves the affected dates in the missing-date
+    # ledger. Whole-set snapshots (membership, profiles, calendars) keep
+    # all-or-nothing staging: a partial write there publishes a truncated set.
+    partial_rows: bool = False
 
     def __post_init__(self) -> None:
         """Materialise inferred contract fields without changing old APIs.
@@ -772,6 +779,7 @@ _SPECS = [
     # L1 bars
     DatasetSpec(
         "daily_bars",
+        partial_rows=True,
         primary_source="tdx_protocol",
         backup_source="eastmoney",
         # Measured on the reference lake for 2026-09-15: exchange 5,181 rows,
@@ -794,6 +802,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "index_bars",
+        partial_rows=True,
         primary_source="tdx_protocol",
         backup_source="eastmoney",
         # THS serves the board indices whose base the other two disagree on;
@@ -816,6 +825,7 @@ _SPECS = [
     # that never enabled it must not be judged unhealthy for holding no rows.
     DatasetSpec(
         "minute_bars",
+        partial_rows=True,
         primary_source="tdx_protocol",
         tier="L1",
         partition_col="trade_date",
@@ -849,6 +859,7 @@ _SPECS = [
     # more datasets holding a `group_by_dynamic` away from data already here.
     DatasetSpec(
         "minute_bars_5m",
+        partial_rows=True,
         primary_source="tdx_protocol",
         tier="L1",
         partition_col="trade_date",
@@ -909,6 +920,7 @@ _SPECS = [
     # gold (Sina COMEX ``GC0.CMX``); not A-share equity.
     DatasetSpec(
         "commodity_bars",
+        partial_rows=True,
         primary_source="sina",
         backup_source="eastmoney",
         tier="L9",
@@ -951,6 +963,7 @@ _SPECS = [
     # completeness is proved per exchange by `cne status` and the audit.
     DatasetSpec(
         "futures_bars",
+        partial_rows=True,
         primary_source="futures_exchange",
         # DCE, from mid-2018: no turnover, no-trade sessions absent (ADR-0013).
         supplementary_sources=("sina",),
@@ -981,6 +994,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "option_bars",
+        partial_rows=True,
         primary_source="futures_exchange",
         tier="L9",
         partition_col="trade_date",
@@ -1127,6 +1141,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "valuation_metrics",
+        partial_rows=True,
         primary_source="eastmoney",
         tier="L3",
         partition_col="trade_date",
@@ -1144,6 +1159,7 @@ _SPECS = [
     # L4 capital flows
     DatasetSpec(
         "fund_flow",
+        partial_rows=True,
         primary_source="eastmoney",
         tier="L4",
         partition_col="trade_date",
@@ -1151,6 +1167,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "margin_trading",
+        partial_rows=True,
         primary_source="exchange",
         # `[margin_trading].source` picks between the two at runtime: the
         # exchange path is the better data, EastMoney the reachable one from a
@@ -1291,6 +1308,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "sector_bars",
+        partial_rows=True,
         primary_source="ths",
         tier="L7",
         partition_col="trade_date",
@@ -1306,6 +1324,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "sector_fund_flow",
+        partial_rows=True,
         primary_source="eastmoney",
         tier="L7",
         partition_col="trade_date",
@@ -1318,6 +1337,7 @@ _SPECS = [
     # or old table is not a finding.
     DatasetSpec(
         "fund_flow_ths",
+        partial_rows=True,
         primary_source="ths",
         tier="L4",
         partition_col="trade_date",
@@ -1329,6 +1349,7 @@ _SPECS = [
     ),
     DatasetSpec(
         "sector_fund_flow_ths",
+        partial_rows=True,
         primary_source="ths",
         tier="L7",
         partition_col="trade_date",

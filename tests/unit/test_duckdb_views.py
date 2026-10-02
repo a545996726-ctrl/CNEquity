@@ -397,3 +397,22 @@ def test_duckdb_qfq_views_use_the_correct_anchor(tmp_path):
     assert [row[1] for row in full] == pytest.approx([5.0, 9.0, 14.0])
     assert [row[0] for row in bounded] == day[:2]
     assert [row[1] for row in bounded] == pytest.approx([20.0 / 3.0, 12.0])
+
+
+def test_apostrophe_in_lake_path_preserves_real_data(tmp_path):
+    root = tmp_path / "owner's lake"
+    partition = root / "curated/daily_bars/trade_date=2026-01-01"
+    partition.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "trade_date": [date(2026, 1, 1)],
+            "open": [10.0],
+            "high": [10.0],
+            "low": [10.0],
+            "close": [10.0],
+        }
+    ).write_parquet(partition / "part.parquet")
+    db = ensure_duckdb_views(Config(data_root=root))
+    with duckdb.connect(str(db), read_only=True) as con:
+        assert con.execute("SELECT close FROM daily_bars").fetchall() == [(10.0,)]

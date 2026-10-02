@@ -262,7 +262,7 @@
 | 日更源 | `eastmoney_datacenter`（datacenter 报表 `RPT_VALUEANALYSIS_DET`，按日期取全市场，含北交所，每天约 2 次请求）；datacenter 还没发布或失败时退到 eastmoney push2 clist 快照（来源记 `eastmoney`） |
 | 历史源 | baostock（`cne backfill valuation_metrics`；按标的每日 PE/PB/PS 回填至 2016；**不含北交所**，不再请求 BJ）；东财断档窗口用 `--fill-em-outage`，读 datacenter |
 | 主键 | (symbol, trade_date) |
-| 已知限制 | baostock 历史含 pe_ttm/pb/ps_ttm；`float_mv`←amount/turn，`total_mv`←Q4 totalShare×close；日更 EM 快照覆盖最新交易日。**P/E 口径不一**：push2 f9 是动态市盈率（按最新一期年化），datacenter `PE_TTM` 与 baostock `peTTM` 一致（真 TTM）；不同来源其他估值字段也应按字段契约核对。`eastmoney` 来源行的 `pe_ttm` 因此是动态 P/E |
+| 已知限制 | baostock 历史含 pe_ttm/pb/ps_ttm；`float_mv`←close×volume/turn（收盘价口径），`total_mv`←Q4 totalShare×close（估算，按 `total_mv_basis` 标注）；日更 EM 快照覆盖最新交易日。**P/E 口径**：push2 f9 是动态市盈率，写入 `pe_dynamic`，不进入 `pe_ttm`；datacenter `PE_TTM` 与 baostock `peTTM` 一致（真 TTM）。市值字段按 `total_mv_basis` / `float_mv_basis` 区分供应商报告值与估算值 |
 
 #### announcement_index
 

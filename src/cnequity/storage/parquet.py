@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from uuid import uuid4
 
 import polars as pl
 
@@ -12,11 +14,24 @@ from cnequity.domain.pit import (
     PIT_DATASET_NAMES,
     PIT_STORAGE_COLUMNS,
     normalize_pit_storage_columns,
+    retain_pit_vintages,
 )
-from cnequity.domain.schemas import PRIMARY_KEYS, sanitize_dataset_rows, validate_dataframe
-from cnequity.storage.atomic import write_parquet_atomic
+from cnequity.domain.schemas import (
+    DATASET_SCHEMAS,
+    PRIMARY_KEYS,
+    SchemaValidationError,
+    sanitize_dataset_rows,
+    validate_dataframe,
+)
+from cnequity.storage.atomic import write_json_atomic, write_parquet_atomic
 from cnequity.storage.changes import summarize_changes
 from cnequity.storage.revisions import sha256_file
+
+
+def _dedupe_storage(frame: pl.DataFrame, dataset: str) -> pl.DataFrame:
+    if dataset in PIT_DATASET_NAMES:
+        return retain_pit_vintages(frame, dataset)
+    return dedupe_by_primary_key(frame, dataset)
 
 
 def _business_equal(left: pl.DataFrame, right: pl.DataFrame) -> bool:
@@ -57,6 +72,108 @@ class StagingWriter:
         path = out_dir / f"part-{batch_id}.parquet"
         write_parquet_atomic(path, df, compression="zstd")
         return path
+
+    def write_usable_batch(
+        self,
+        dataset: str,
+        run_id: str,
+        batch_id: str,
+        df: pl.DataFrame,
+    ) -> dict:
+        """Stage the valid rows of a batch whose rows are independent facts.
+
+        Invalid rows are isolated by bisection, so one bad row costs a few
+        extra validations rather than the batch. The full input and the rejects
+        are kept under ``_quarantine`` as evidence. Accepting some rows never
+        certifies coverage: the caller records the rejected dates as missing.
+        Only datasets registered with ``partial_rows`` may use this path.
+        """
+        from cnequity.domain.datasets import DATASETS
+
+        spec = DATASETS.get(dataset)
+        if spec is None or not spec.partial_rows:
+            raise ValueError(f"{dataset} does not accept partial batches")
+        accepted: list[pl.DataFrame] = []
+        rejected: list[pl.DataFrame] = []
+        reasons: set[str] = set()
+        required = DATASET_SCHEMAS.get(dataset, {})
+
+        def split(frame: pl.DataFrame) -> None:
+            try:
+                accepted.append(validate_dataframe(frame, dataset))
+            except SchemaValidationError as exc:
+                # A missing column is a batch-level fault; bisecting it would
+                # only reject every row one at a time.
+                if frame.height <= 1 or any(column not in frame.columns for column in required):
+                    rejected.append(frame)
+                    reasons.add(str(exc))
+                else:
+                    middle = frame.height // 2
+                    split(frame.head(middle))
+                    split(frame.slice(middle))
+
+        split(df)
+        count = sum(frame.height for frame in rejected)
+        report: dict = {
+            "dataset": dataset,
+            "run_id": run_id,
+            "batch_id": batch_id,
+            "rows_read": df.height,
+            "rows_rejected": count,
+        }
+        if rejected:
+            safe_run = "".join(c if c.isalnum() or c in "-_" else "_" for c in run_id)
+            quarantine = (
+                self.staging_root.parent
+                / "_quarantine"
+                / f"{dataset}-{safe_run}-rows-{uuid4().hex}"
+            )
+            quarantine.mkdir(parents=True)
+            bad = pl.concat(rejected, how="diagonal_relaxed")
+            write_parquet_atomic(quarantine / "input.parquet", df, compression="zstd")
+            write_parquet_atomic(quarantine / "rejected.parquet", bad, compression="zstd")
+            date_col = spec.date_col or spec.partition_col
+            days: set[str] = set()
+            if date_col and date_col in bad.columns:
+                values = (
+                    bad.select(
+                        pl.col(date_col).cast(pl.String).str.slice(0, 10).str.to_date(strict=False)
+                    )
+                    .to_series()
+                    .drop_nulls()
+                )
+                days.update(value.isoformat() for value in values)
+            report.update(
+                quarantine=str(quarantine),
+                reasons=sorted(reasons),
+                rejected_dates=sorted(days),
+            )
+            write_json_atomic(quarantine / "report.json", report, indent=2)
+        if not accepted:
+            raise SchemaValidationError(
+                f"{dataset}: all {count} rows rejected; retained at {report.get('quarantine')}"
+            )
+        good = pl.concat(accepted, how="diagonal_relaxed")
+        path = self.write_batch(dataset, run_id, batch_id, good)
+        report.update(rows_written=good.height, path=str(path))
+        if rejected:
+            receipt = self.quality_receipt(dataset, run_id, batch_id)
+            write_json_atomic(receipt, report, indent=2)
+        return report
+
+    def quality_receipt(self, dataset: str, run_id: str, batch_id: str) -> Path:
+        """Where a partially accepted batch records what it left out.
+
+        Inside the run directory, so staging cleanup removes it with the run.
+        """
+        return self.staging_root / dataset / f"run_id={run_id}" / "_quality" / f"{batch_id}.json"
+
+    def quality_receipts(self, dataset: str, run_id: str) -> list[dict]:
+        """Every partial-batch receipt of one run, oldest batch id first."""
+        root = self.staging_root / dataset / f"run_id={run_id}" / "_quality"
+        return [
+            json.loads(path.read_text(encoding="utf-8")) for path in sorted(root.glob("*.json"))
+        ]
 
     def list_run_files(self, dataset: str, run_id: str) -> list[Path]:
         run_dir = self.staging_root / dataset / f"run_id={run_id}"
@@ -176,7 +293,7 @@ def compact_dataset(
         combined = clear_invalid_payment_evidence(combined)
     pk = PRIMARY_KEYS.get(dataset, [])
     if pk:
-        combined = dedupe_by_primary_key(combined, dataset)
+        combined = _dedupe_storage(combined, dataset)
 
     def _pit(frame: pl.DataFrame) -> pl.DataFrame:
         """Materialize the bitemporal columns so they reach disk.
@@ -213,7 +330,7 @@ def compact_dataset(
             existing = _pit(existing)
             combined = pl.concat([existing, combined], how="diagonal_relaxed")
             if pk:
-                combined = dedupe_by_primary_key(combined, dataset)
+                combined = _dedupe_storage(combined, dataset)
         out_dir.mkdir(parents=True, exist_ok=True)
         business_changed = not _business_equal(existing, combined)
         if change_log is not None and business_changed:
@@ -264,12 +381,12 @@ def compact_dataset(
             if existing_files:
                 existing = pl.concat(existing_files, how="diagonal_relaxed")
                 if pk:
-                    existing = dedupe_by_primary_key(existing, dataset)
+                    existing = _dedupe_storage(existing, dataset)
                 existing = _pit(existing)
                 frames.append(existing)
         merged = pl.concat(frames, how="diagonal_relaxed")
         if pk:
-            merged = dedupe_by_primary_key(merged, dataset)
+            merged = _dedupe_storage(merged, dataset)
         merged = _pit(merged)
         business_changed = not _business_equal(existing, merged)
         if change_log is not None and business_changed:

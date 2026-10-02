@@ -9,6 +9,7 @@ FINALIZE_STEP_ORDER = (
     "derive_industry_index",
     "derive_futures_continuous",
     "derive_option_greeks",
+    "ths_official_snapshot",
     "audit",
 )
 
@@ -58,11 +59,26 @@ def _levels_for(
 
 
 def _finalize_execution_levels(finalize_steps: list[str]) -> list[list[str]]:
-    """Return one step per level in canonical finalize order."""
+    """Serialize finalization, respecting dependencies before preferred order."""
     names = set(finalize_steps)
-    ordered = [s for s in FINALIZE_STEP_ORDER if s in names]
-    ordered.extend(sorted(names - set(FINALIZE_STEP_ORDER)))
-    return [[step] for step in ordered]
+    preferred = [s for s in FINALIZE_STEP_ORDER if s in names]
+    preferred.extend(sorted(names - set(FINALIZE_STEP_ORDER)))
+    remaining = set(names)
+    levels = []
+    while remaining:
+        ready = next(
+            (
+                name
+                for name in preferred
+                if name in remaining and not (set(get_step(name).depends_on) & remaining)
+            ),
+            None,
+        )
+        if ready is None:
+            raise CyclicDependencyError(f"Cyclic finalize dependencies: {sorted(remaining)}")
+        levels.append([ready])
+        remaining.remove(ready)
+    return levels
 
 
 def step_execution_levels(step_names: list[str]) -> list[list[str]]:
@@ -79,8 +95,16 @@ def step_execution_levels(step_names: list[str]) -> list[list[str]]:
     validate_steps_registered(step_names)
 
     names_set = set(step_names)
-    fetch_steps = [n for n in step_names if get_step(n).group not in FINALIZE_STEP_GROUPS]
-    finalize_steps = [n for n in step_names if get_step(n).group in FINALIZE_STEP_GROUPS]
+    deferred = {n for n in step_names if get_step(n).group in FINALIZE_STEP_GROUPS}
+    # A core step may consume compacted data. Defer its transitive dependents
+    # as well instead of treating the fetch/finalize boundary as a cycle.
+    while True:
+        downstream = {n for n in step_names if set(get_step(n).depends_on) & deferred}
+        if downstream <= deferred:
+            break
+        deferred.update(downstream)
+    fetch_steps = [n for n in step_names if n not in deferred]
+    finalize_steps = [n for n in step_names if n in deferred]
 
     levels: list[list[str]] = []
     if fetch_steps:

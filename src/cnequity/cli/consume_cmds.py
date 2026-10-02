@@ -34,11 +34,11 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
     help="要求这个 bearer token（或 ?token=）。--host 不是回环地址时必须设置。",
 )
 def serve(config_path: str, host: str, port: int, token: str | None):
-    """启动只读的数据湖面板。
+    """启动数据湖面板；存储清理须在运维页逐次确认。
 
     \b
-    展示覆盖区间、新鲜度和来源构成。这里没有任何东西会写湖 ——
-    跑批、重试和清理仍然只在 CLI 上。
+    查看覆盖、新鲜度和来源；存储运维页检查并确认已到期版本和试验清理。
+    页面浏览不会自动删除，采集和重试仍通过 CLI 执行。
     """
     import uvicorn
 
@@ -140,7 +140,7 @@ def mcp_cmd(config_path: str, live: bool):
     不是某一家厂商专有的 Claude 集成。
 
     \b
-    和 `cne serve` 一样只读。这些工具只查询湖；采集仍然留在 CLI 上，由人来跑。
+    MCP 工具只读，不提供 serve 的网页确认清理入口。这些工具只查询湖；采集仍然留在 CLI 上，由人来跑。
     """
 
     from cnequity.mcp_server import serve_stdio

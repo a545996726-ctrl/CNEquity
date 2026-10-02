@@ -8,7 +8,7 @@
 
 **命令名不区分大小写**：`cne STATUS`、`cne run DAILY`、`cne config CREATE` 与小写等价（Click 的 `token_normalize_func`）。`-h` 是 `--help` 的短写法。**不做前缀匹配**——`cne stat` 会被拒绝并提示 `stats` / `status`，而不是猜一个执行。
 
-**每个命令都有过程日志。** 管线自己的 INFO 记录统一在命令树根部接到 stderr，所以 stdout 上的 JSON 契约不受影响。耗时的采集和维护命令另外把日志 tee 进 `{data.root}/logs/cne-<命令>-<时间戳>.log`（`cne run clean --log-retention-days` 负责清理）。`cne mcp` 与 `cne serve` 自管日志——前者 stdout 是 JSON-RPC 线路，stderr 必须压在 WARNING；后者交给 uvicorn。
+**每个命令都有过程日志。** 管线自己的 INFO 记录统一在命令树根部接到 stderr，所以 stdout 上的 JSON 契约不受影响。耗时的采集和维护命令另外把日志 tee 进 `{data.root}/logs/cne-<命令>-<时间戳>.log`（`cne run clean --log-retention-days` 可预览过期日志）。`cne mcp` 与 `cne serve` 自管日志——前者 stdout 是 JSON-RPC 线路，stderr 必须压在 WARNING；后者交给 uvicorn。
 
 **任何失败都会留下一条日志记录。** Click 只往 stderr 打一行 `Error:` 就结束，定时任务读的是日志文件而不是终端——失败若没成为日志记录，留下的就是一个最后一行停在半路的文件。记录写在命令树的唯一入口，所有已注册命令共用该入口，且每次失败只有一条：用法错误（参数写错、名字不认识）记 `WARNING`，其余记 `ERROR`，未预期的异常还带 traceback。退出码与 Click 的渲染都不变。
 
@@ -35,9 +35,11 @@
 | [`cne run events`](#cne-run-events) | 7×24 事件流（公告、资讯），走自然日历而非交易日历 |
 | [`cne run retry`](#cne-run-retry) | 重试一个 run，或每个 daily 分组最新的失败 run |
 | [`cne run compact`](#cne-run-compact) | 把 staging 合进 curated |
-| [`cne run clean`](#cne-run-clean) | 清理已 compact 的终态 run 的 staging 与过期孤儿 |
+| [`cne run clean`](#cne-run-clean) | 预览过期 staging、快照、日志与历史版本 |
+| [`cne storage`](#cne-storage) | 版本保留登记、清理计划与原地待删除标记 |
 | [`cne backfill`](#cne-backfill-dataset) | 回填一个数据集 |
 | [`cne derive`](#cne-derive-name) | 派生计算数据集 |
+| [`cne repair`](#cne-repair) | 离线修复已存数据的布局或字段口径；默认只预览，`--apply` 发布新版本 |
 
 `compact` 已经是每个 schedule group 自带的 step，所以 `retry` / `compact` / `clean`
 是**故障后的手动出口**，不属于正常的一天。
@@ -63,7 +65,7 @@
 | 命令 | 作用 |
 |------|------|
 | [`cne query`](#cne-query) | 跑 DuckDB SQL，或按需拉取数据集 |
-| [`cne serve`](#cne-serve) | 只读湖面板（默认 `127.0.0.1:8787`） |
+| [`cne serve`](#cne-serve) | 湖面板与网页确认清理（默认 `127.0.0.1:8787`） |
 | [`cne mcp`](#cne-mcp) | 以 MCP stdio 把湖提供给 AI agent |
 
 ### 治理与检视
@@ -438,6 +440,20 @@ python scripts/delisted_ops.py coverage --start 2016-01-01 --universe all_a_sh_s
 cne derive trading_status --start 2001-01-01 --end 2001-12-31
 ```
 
+## cne repair
+
+只处理湖里已有的数据，不访问数据源。默认输出计划；加 `--apply` 后以新版本发布，旧版本继续保留，可按版本读取。
+
+| 子命令 | 说明 |
+|------|------|
+| `layout DATASET` | 把分区数据集根目录或错误键目录中的文件并入登记分区。同一主键的多份观察只在非空值完全一致时互补填空；有冲突的键按规范规则整行保留一份。重复键的全部原始观察写入 `_quarantine`。发布新版本时若检测到这类布局，会提示运行此命令 |
+| `valuation-basis` | 统一 `valuation_metrics` 口径：push2 动态市盈率移入 `pe_dynamic`；Baostock 流通市值由成交均价口径换算为收盘价口径，无法核对的保留原值并标为 `vwap_x_turn_implied_shares`；总市值按 `share_structure` 当日有效总股本重建，无记录的标为年末股本估算 |
+
+```bash
+cne repair layout futures_bars
+cne repair layout futures_bars --apply
+```
+
 ## cne audit
 
 | 选项 | 说明 |
@@ -554,21 +570,70 @@ init 不属于任何调度组，因此不受 `--groups` 豁免；截面校验则
 
 ## cne run clean
 
-删除已 compact 的终态 run staging，以及超龄 orphan。终态含 `success` / `warning` / `failed`（需 incomplete=0 且有成功 compact batch）。
+预览已 compact 的终态 run staging、超龄 orphan、来源快照、日志和历史版本。即使不加 `--dry-run` 也不会标记或删除文件，定时脚本只能产生提示。
 
 | 选项 | 说明 |
 |------|------|
-| `--dry-run` | 只报告，不删任何东西；不能与会修改运行状态的 `--reconcile-runs` 同用 |
+| `--dry-run` | 兼容选项；不能与会修改运行状态的 `--reconcile-runs` 同用 |
 | `--orphan-retention-days` | 无 manifest 的 orphan staging 保留天数（默认 7） |
-| `--snapshot-retention-days` | `meta/source_snapshots` 下 run_id 目录的保留天数（默认 14）。每个 dataset/source 的最新一份始终保留 |
-| `--keep-revision-generations` | 每个数据集在 `meta/revisions/data` 下保留的已提交代数（默认 5）。receipt 永远保留，`current.json` 指向的那一代永不丢弃；`0` 关闭 |
-| `--log-retention-days` | 删除 `logs/cne-*.log` 里超过这么多天的（默认 30）；`0` 关闭。只处理本 CLI 命名的文件——`logs/` 下其他文件（如 launchd 的 stdout 重定向）不动 |
-| `--reconcile-runs` | 清理前先把卡在 `running` 的 run（worker 崩溃）标记为 failed。`--reconcile-after-seconds` 可覆盖判定窗口，默认取 `[orchestrator].batch_stale_seconds` |
-| `--force` | 也删尚未 cleanup-ready 的 staging（incomplete / 未 compact）；成功 fetch batch 会被 demote，`cne run retry` 全量重抓。**不要**对 success-without-compact 用 force——先 `cne run compact --run-id` |
+| `--snapshot-retention-days` | 来源快照保留天数（默认 14）；每个 dataset/source 的最新一份保留 |
+| `--keep-revision-generations` | 每个数据集保留最近 5 代，另保护 current 和 hold；`0` 跳过版本预览 |
+| `--log-retention-days` | 预览超过指定天数的 `logs/cne-*.log`（默认 30）；`0` 跳过 |
+| `--reconcile-runs` | 显式把符合静默条件的孤儿 running 跑次标记为 failed，仍会修改运行状态 |
+| `--reconcile-after-seconds` | 覆盖对账静默窗口，默认取 `[orchestrator].batch_stale_seconds` |
+| `--force` | 将未 cleanup-ready 的 staging 也列入预览，不删除、不降级批次 |
+
+输出 `dry_run: true`、`confirmation_required: "serve_storage_page"`。`removed` / `removed_run_ids` 等实际删除字段为空或 0，`bytes_freed` 全部为 0；候选见 `candidate_run_ids`、`candidate_run_dirs`、`candidates`，账面大小见 `logical_bytes_selected`。历史版本与登记试验的物理删除入口在 serve 存储运维页；staging、来源快照和日志目前仅报告，不提供网页删除。
+
+## cne storage
+
+版本生命周期包括引用登记、不可变计划、原地观察期和维护窗口下的物理回收。满 7 天不会自动删除。试验目录可先归档再退出原位置；外部读取须由操作者停止。
+
+| 命令 | 行为 |
+|---|---|
+| `inspect --keep 5` | 只读列出仍存在的版本、保留原因和登记试验；未导入引用时仅为初筛 |
+| `explain OBJECT_ID` | 显示版本的 current/recent/hold 等依据 |
+| `import --manifest FILE` | 校验并合并已审核的本地引用清单；不会自动解除已有保护 |
+| `hold OBJECT_ID --reason TEXT` | 新增版本、试验、工件或清理资源的保留理由，取消相应待删除标记 |
+| `plan --keep 5 --phase mark` | 校验引用源后保存内容寻址的标记计划，返回 `plan_id` |
+| `plan --keep 5 --phase purge` | 只选择观察期已满且内容未变的候选，逐文件核对 SHA-256；输出 `purge_ids` 和 `logical_bytes_to_purge` |
+| `apply PLAN_ID --phase mark` | 再次校验指针、引用、登记和文件身份，开始至少 7 天的原地观察期 |
+| `apply PLAN_ID --phase purge` | 已禁用；必须转到 serve 存储运维页重新检查并确认 |
+| `experiment-create --parent DIR --case-id ID` | 新建独立实例身份的空试验目录，登记为 active |
+| `archive OBJECT_ID --destination DIR` | 独立复制已登记试验，逐文件校验后封存工件；保留原目录 |
+| `experiment-seal OBJECT_ID --artifact-id ID` | 显式声明试验结束，校验源身份与归档一致后登记 sealed |
+| `artifact-verify OBJECT_ID` | 校验工件文件集合、大小和 SHA-256 |
+| `resolve OLD_PATH [--artifact-id ID]` | 校验并返回旧路径对应的归档位置；多版本时必须明确选择 |
+| `experiment-plan --phase mark\|purge` | 为非 active、无引用/hold 且原内容与归档一致的试验原目录生成计划 |
+| `experiment-apply PLAN_ID` | 仅执行 mark；purge 必须转到 serve 网页确认 |
+
+每个子命令接受 `--config`。版本 `OBJECT_ID` 为当前湖内的 `revision/<dataset>/<revision_id>`；计划另外绑定湖身份及 metadata 根，不能直接在另一个湖使用。被引用但暂时缺失的版本也可通过清单登记保护，以便恢复后继续受到保护。
+
+引用清单 schema 为 `schema_version: 1`，包含绝对 `meta_root`、`holds`（对象 ID 到非空理由列表）、`reference_roots`（绝对目录及可选的相对 `exclude` 列表）、`reference_fingerprint` 和可选 `experiments`。集成程序可用 `cnequity.storage.lifecycle.reference_files()` 枚举引用源，分类后生成 holds，并用 `reference_fingerprint()` 计算文件集合及 SHA-256 的指纹。导入只校验清单是否仍对应这些文件，不代替引用语义审核；排除项和外部未登记消费者需由操作者核实。
+
+新增、删除或修改引用文件都会阻止旧计划继续标记，须重新审核并导入。重复导入保留已有 hold。当前没有自动解除 hold 的命令；改变保留承诺需要单独审核。无收据、缺少完整文件清单或缺少当前指针的目录不会成为清理候选。
+
+引用清单还可携带 `cases`：每项具有不可变 `case_id`、`roots`（对象 ID 列表）、`dependencies`（`from`、`to`、`kind`）。`requires_bytes` 从根递归产生 hold；`provenance` 仅记录来源，不递归保留字节。循环依赖只计算一次。通过 Python `LifecycleStore.register_case()` 可单独增加案例，需提供 `evidence`（绝对 `path` 及 `sha256`）；此操作只增加保护，取消受影响对象的待删除标记，不解除旧 hold，也不证明完整重放已可用。
+
+**物理删除需要网页确认和维护窗口。** 操作者须在网页确认新的调度、其他服务及所有外部查询已停止，并等待延迟读取结束。面板只会暂停本实例的数据请求并等待后台扫描结束，不会自动停止外部进程。执行器还会尝试取得发布锁，并拒绝 manifest 中仍有 running 跑次的情况。只暂停采集但仍保留外部 LazyFrame 读取，不满足该条件。
+
+所有候选在删除前重新验证。执行器先记录意图，再把单个 generation 原子移入同文件系统的 `meta/lifecycle/trash/<plan-id>/`，随后删除内容。receipt 保留；指定旧版本读取会明确失败。遇到错误不会静默跳过或扩大范围，操作记录位于 `meta/lifecycle/purges/<plan-id>.json`。在保护条件未变时，在网页“未完成的删除记录”重新审核、确认原清单后，会核验残留文件并继续原计划；已完成计划只返回原结果，不再次删除。若期间新增 hold、引用或发布，重试会停止，需先人工核查和恢复受影响的残留内容，不能用新计划绕过未完成操作。
+
+`logical_bytes_deleted` 仅累计已完整删除的版本；部分失败的字节不计入，并报告 `partial_deletion_possible`。文件系统可用空间另记录前后值，可能受到其他系统活动影响。待删除标记和删除收据都不能替代备份。
+
+`logical_bytes_selected` 来自版本文件清单，不是实际磁盘释放量；APFS 克隆和系统快照可使两者相差很大。标记阶段所有字节保持原位。
+
+试验使用 `experiment/<id>`，归档使用 `artifact/<manifest-digest>`。归档采用独立 inode 的复制，支持时使用文件系统克隆；中断副本保留为 `.incomplete-*`，不会登记为 sealed。归档不会自动停止源写入或解除旧 hold，也不证明完整重放可用。托管试验需显式 `experiment-seal` 才退出 active；归档本身不改变此状态。后续源内容改变会阻止按旧归档清理。
+
+旧报告保持不变。读取者需要显式调用 `ArtifactStore.resolve()` 或使用 `storage resolve` 的结果。归档目录解析会校验整个工件，文件解析会校验对应文件。发现原目录引用时继续保留原位置；只有完成消费者迁移并重新审核引用，才能进入观察期。试验清理收据位于 `meta/lifecycle/experiment-purges/`，删除的是冗余原位置，封存工件保持可用。失败后重试同一计划会核验残留；路径被新试验复用时停止。
+
+现有其他清理器共享 hold：`staging/<run_id>`、`source_snapshot/<dataset>/source=<source>/data_version=<version>/run_id=<run>`、`log/<cne-*.log文件名>`。可通过 `storage hold` 保护已存在对象，或由 case 的 `requires_bytes` 提供保护。年龄、compact/readiness 和每类最新快照规则继续有效；`--force` 不绕过 hold。登记后的引用源发生变化或不可读时，这些清理器也停止并要求刷新清单。
+
+完整快照保存生命周期保留依据与外部对象清单，标记 `external_bytes_materialized: false`。这不会把外部工件和全部历史版本打包进快照。恢复后须重新绑定、审核引用源并导入；导入会继承保存的 holds/cases，创建新湖身份，不继承待删除状态或本机删除计划。含生命周期登记的湖暂不支持增量包，创建和应用会明确拒绝；使用完整快照保留这些依赖。
 
 ## cne serve
 
-只读湖面板：分层总览、逐数据集覆盖与新鲜度、溯源分布、覆盖热力图。
+湖面板：分层总览、逐数据集覆盖与新鲜度、溯源分布、覆盖热力图，以及需明确确认的存储运维。
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
@@ -582,7 +647,11 @@ cne serve
 
 页面在 `/`，单数据集在 `#/dataset/<name>`（状态 / 元数据 / 数据 三个 tab），跑批在 `#/runs`（含实时甘特），质量在 `#/quality`，OpenAPI 在 `/api/docs`（由 handler 生成，不会与实现漂移）。
 
-**面板不写湖。** 没有端点会跑批、重试或清理——那些留给 CLI。唯一的例外是 `meta/stats` 会在后台按需重建，因为它是湖的缓存而不是湖的一部分。
+**存储运维在 `#/storage`。** 页面显示到期候选、观察期、保留原因和磁盘可用空间；所有大小均为账面值，APFS 克隆下不能据此承诺释放空间。浏览、刷新、观察期到期均不执行删除。
+
+选择历史版本或试验目录，点击“检查到期项目”，等待完整性与引用核验后核对清单。只有勾选不可撤销确认、外部读写停止确认，并点击“永久删除”才执行；确认凭据 10 分钟后失效，服务重启后也失效。执行前再次检查 current、最近 5 代、hold、引用、文件摘要及维护锁。未标记对象可先“检查待标记项目”，确认后开始至少 7 天观察期，标记不释放空间。失败可能留下部分已删内容，须重新审核未完成记录，不能自动重试删除。
+
+没有端点会采集或重试跑批。`meta/stats` 仍会在后台按需重建。存储操作仅接受当前页面同源请求与页面确认凭据；匿名访问使用 localhost / 回环 IP，远程访问须配置令牌。同一令牌可授权存储维护，应只交给有删除权限的操作者。
 
 数值全部来自已落盘的产物（注册表、目录布局、`meta/stats`、`meta/quality/health-latest.json`、manifest），**请求路径上不扫 curated**。所以：先 `cne stats rebuild` 才有行数与体积；findings 显示的是上次 `cne audit --full` 的快照，页面上标了日期。
 
@@ -669,7 +738,7 @@ SQL 查询本地湖；`--dataset` 与 `--symbol` 成对使用，缓存缺失或 
 
 ## cne mcp
 
-把这个湖接给 AI agent（MCP over stdio）。只读，和 `cne serve` 同样的边界。
+把这个湖接给 AI agent（MCP over stdio）。只读，不提供 serve 的存储删除入口。
 
 | 选项 | 说明 |
 |------|------|
@@ -727,7 +796,7 @@ cne sources probe --vantage cn
 cne serve                    # → http://127.0.0.1:8787/source-health
 ```
 
-**探测在 CLI，展示在 serve。** 面板只读，不会替你去请求十几个第三方主机——和它不触发采集是同一个理由。多次探测（不同 `--vantage`）会并排显示，不合并。
+**探测在 CLI，展示在 serve。** 健康页面只展示已有报告，不会替你去请求十几个第三方主机——和它不触发采集是同一个理由。多次探测（不同 `--vantage`）会并排显示，不合并。
 
 **`--vantage` 标记实际出口。** 可达性受路由、凭证、服务状态与请求历史影响，不能单凭地区判定。标签允许字母、数字、点、下划线和连字符，须以字母或数字开头，最多 64 字符；报告只代表当次观测。
 

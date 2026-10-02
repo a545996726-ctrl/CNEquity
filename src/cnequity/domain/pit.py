@@ -193,6 +193,23 @@ def normalize_pit_storage_columns(
     return out
 
 
+def retain_pit_vintages(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
+    """Retain every fact revision and its earliest complete observation.
+
+    Re-fetching an identical payload is not a new vintage. Keep observation
+    timestamps from one actual row, never a synthetic minimum of evidence
+    obtained at different times.
+    """
+    from cnequity.domain.schemas import PRIMARY_KEYS
+
+    out = normalize_pit_storage_columns(df, dataset)
+    if dataset not in PIT_DATASET_NAMES or out.is_empty():
+        return out
+    keys = [*PRIMARY_KEYS[dataset], "revision_id"]
+    order = [name for name in ("observed_at", "fetched_at") if name in out.columns]
+    return out.sort(order, nulls_last=True).unique(subset=keys, keep="first", maintain_order=True)
+
+
 def _date_expr(df: pl.DataFrame, column: str) -> pl.Expr:
     dtype = df.schema[column]
     expr = pl.col(column)

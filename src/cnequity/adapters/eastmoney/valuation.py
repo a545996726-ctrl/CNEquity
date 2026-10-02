@@ -10,6 +10,7 @@ import polars as pl
 from cnequity.adapters.eastmoney.clist import clist_rows_to_symbols, fetch_clist_pages
 from cnequity.adapters.eastmoney.common import _to_float
 from cnequity.adapters.eastmoney.em_auth import EastMoneyClient
+from cnequity.domain.valuation import MV_VENDOR_REPORTED
 
 # f130 is 市销率 TTM. f45 — which this used to read as ps_ttm — is an amount in
 # yuan, not a ratio: it put a median of 2.05e7 into `ps_ttm` for every EastMoney
@@ -92,7 +93,11 @@ def _fetch_valuation_push2(
                 {
                     "symbol": sym,
                     "trade_date": trade_date,
-                    "pe_ttm": _to_float(item.get("f9")),
+                    # f9 is the dynamic P/E (latest report annualised), not TTM.
+                    "pe_ttm": None,
+                    "pe_dynamic": _to_float(item.get("f9")),
+                    "total_mv_basis": MV_VENDOR_REPORTED,
+                    "float_mv_basis": MV_VENDOR_REPORTED,
                     "pb": _to_float(item.get("f23")),
                     "ps_ttm": _to_float(item.get("f130")),
                     "total_mv": _to_float(item.get("f20")),

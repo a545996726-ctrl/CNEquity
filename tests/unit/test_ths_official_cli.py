@@ -264,7 +264,7 @@ def test_staging_becomes_reclaimable_once_its_run_is_published(tmp_path, monkeyp
         return next(
             (
                 k
-                for k in ("removed_run_ids", "orphan_run_ids", "skipped_run_ids")
+                for k in ("candidate_run_ids", "orphan_run_ids", "skipped_run_ids")
                 if run_id in report[k]
             ),
             "nowhere",
@@ -278,4 +278,4 @@ def test_staging_becomes_reclaimable_once_its_run_is_published(tmp_path, monkeyp
         .exit_code
         == 0
     )
-    assert bucket() == "removed_run_ids"
+    assert bucket() == "candidate_run_ids"

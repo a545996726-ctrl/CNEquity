@@ -274,30 +274,26 @@ def derive(
 
 @run.command("clean")
 @config_option
-@click.option("--dry-run", is_flag=True, help="只报告可以删的 staging，不真删。")
+@click.option("--dry-run", is_flag=True, help="兼容选项；现在所有清理均只预览。")
 @click.option(
     "--orphan-retention-days",
     default=7,
     show_default=True,
-    help="删掉超过这么多天、且 manifest 里没有记录的孤儿 staging。",
+    help="预览超过这么多天、且 manifest 里没有记录的孤儿 staging。",
 )
 @click.option(
     "--snapshot-retention-days",
     default=DEFAULT_SNAPSHOT_RETENTION_DAYS,
     show_default=True,
     help=(
-        "删掉超过这么多天的 meta/source_snapshots run_id 目录（每个数据集 / 源的最新一份始终保留）"
+        "预览超过这么多天的 meta/source_snapshots run_id 目录（每个数据集 / 源的最新一份始终保留）"
         "。"
     ),
 )
 @click.option(
     "--force",
     is_flag=True,
-    help=(
-        "连还不满足清理条件的 staging 也删（批次没跑完、和/或没 compact 过）。成功的抓取批次会被降级为 failed，"
-        "好让 `cne run retry` 重抓（数据是重抓不是丢失，但重试会变成整段重跑）。成功但没 compact 的 run "
-        "不要用它 —— 先跑 `cne run compact --run-id`。"
-    ),
+    help="将未完成或未 compact 的 staging 也列入预览，不删除文件、不降级批次。",
 )
 @click.option(
     "--keep-revision-generations",
@@ -305,8 +301,8 @@ def derive(
     show_default=True,
     type=int,
     help=(
-        "meta/revisions/data 下每个数据集保留这么多代已提交版本，更老的代只删存储字节。receipt 始终保留，"
-        "current.json 指向的那一代永远不删。0 表示不清理。"
+        "每个数据集保留最近这么多代及 current/hold；其他版本只列出候选，不标记、不释放字节。"
+        "网页标记前须导入引用清单。0 表示跳过版本处理。"
     ),
 )
 @click.option(
@@ -314,9 +310,7 @@ def derive(
     default=DEFAULT_LOG_RETENTION_DAYS,
     show_default=True,
     type=int,
-    help=(
-        "删掉超过这么多天的 `logs/cne-*.log`。每次调用都会写一份，没有别的东西会清理它们。0 表示不清理。"
-    ),
+    help="预览超过这么多天的 `logs/cne-*.log`，不删除；0 表示跳过。",
 )
 @click.option(
     "--reconcile-runs",
@@ -340,20 +334,29 @@ def clean(
     reconcile_runs: bool,
     reconcile_after_seconds: float | None,
 ):
-    """清掉已 compact 的终态 run 的 staging，以及过期的孤儿目录。
+    """预览过期数据，不执行物理删除；删除须在 serve 运维网页确认。
 
     \b
     「可清理」是指：run 处于终态（success/warning/failed）、所有批次都已落定，
     并且记录过一次成功的 compact。没跑完或从没 compact 过的 staging 会留着等重试，
-    除非加了 --force。同时清理过期的 `meta/source_snapshots` run_id 目录。
+    --force 只扩大预览范围。来源快照和日志也仅预览，全部 bytes_freed 为 0。
+    历史版本和登记试验可在 serve 存储运维页确认删除；其他资源暂仅报告。
     """
     if dry_run and reconcile_runs:
         raise click.UsageError(
             "--dry-run 不能与 --reconcile-runs 同用：对账会修改运行状态。"
             "请先去掉 --reconcile-runs 查看清理预演。"
         )
+    # Scheduled invocations must never bypass the browser confirmation flow.
+    dry_run = True
     cfg = _cfg(config_path)
     attach_log_file(cfg, "run-clean")
+    # Preview the candidate inventory; no cleanup executor receives write authority.
+    generations = (
+        prune_revision_generations(cfg.meta_root, keep=keep_revision_generations, dry_run=dry_run)
+        if keep_revision_generations > 0
+        else []
+    )
     reconciled: dict[str, int] | None = None
     if reconcile_runs:
         manifest = Manifest(cfg.manifest_path)
@@ -377,38 +380,39 @@ def clean(
         retention_days=snapshot_retention_days,
         dry_run=dry_run,
     )
-    # Each commit copies the whole dataset into a new immutable generation and
-    # nothing removed one, so meta/revisions grew past curated/ itself.
-    generations = (
-        prune_revision_generations(cfg.meta_root, keep=keep_revision_generations, dry_run=dry_run)
-        if keep_revision_generations > 0
-        else []
-    )
     logs = clean_run_logs(cfg.data_root, retention_days=log_retention_days, dry_run=dry_run)
     click.echo(
         json.dumps(
             {
                 "dry_run": dry_run,
+                "confirmation_required": "serve_storage_page",
                 "reconciled": reconciled,
-                "removed_run_ids": result.removed_run_ids,
+                "removed_run_ids": [],
+                "candidate_run_ids": result.removed_run_ids,
                 "orphan_run_ids": result.orphan_run_ids,
-                "force_removed_run_ids": result.force_removed_run_ids,
+                "force_removed_run_ids": [],
+                "force_candidate_run_ids": result.force_removed_run_ids,
                 "skipped_run_ids": result.skipped_run_ids,
-                "bytes_freed": (
+                "bytes_freed": 0,
+                "logical_bytes_selected": (
                     result.bytes_freed
                     + snaps.bytes_freed
                     + logs.bytes_freed
-                    + sum(item.freed_bytes for item in generations)
+                    + sum(item.logical_bytes_selected for item in generations)
                 ),
                 "source_snapshots": {
-                    "removed_run_dirs": snaps.removed_run_dirs,
+                    "removed_run_dirs": [],
+                    "candidate_run_dirs": snaps.removed_run_dirs,
                     "kept_run_dirs": snaps.kept_run_dirs,
-                    "bytes_freed": snaps.bytes_freed,
+                    "bytes_freed": 0,
+                    "logical_bytes_selected": snaps.bytes_freed,
                 },
                 "run_logs": {
-                    "removed": len(logs.removed),
+                    "removed": 0,
+                    "candidates": len(logs.removed),
                     "kept": logs.kept,
-                    "bytes_freed": logs.bytes_freed,
+                    "bytes_freed": 0,
+                    "logical_bytes_selected": logs.bytes_freed,
                 },
                 "revision_generations": [
                     {
@@ -416,6 +420,9 @@ def clean(
                         "removed": len(item.removed_revision_ids),
                         "kept": len(item.kept_revision_ids),
                         "bytes_freed": item.freed_bytes,
+                        "candidates": len(item.candidate_revision_ids),
+                        "marked": len(item.marked_revision_ids),
+                        "logical_bytes_selected": item.logical_bytes_selected,
                     }
                     for item in generations
                 ],

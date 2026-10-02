@@ -590,15 +590,7 @@ def test_raw_archive_rejects_same_size_payload_tampering(tmp_path):
 
 
 def test_prune_keeps_the_pointer_and_the_newest_generations(tmp_path):
-    """Retention bounds the store without breaking the lake anyone reads.
-
-    A commit copies the whole dataset into a new generation and nothing ever
-    removed one, so the store grew by the dataset's size per run — 16 GB
-    against 14 GB of curated data on a two-year lake. Pruning drops the bytes
-    of old generations; it must never drop the one `current.json` resolves to,
-    and it must leave every receipt in place, because the receipt is the
-    lineage record and costs a few KB.
-    """
+    """Marking protects recent/current generations and preserves all bytes."""
     from cnequity.storage.revisions import prune_revision_generations
 
     cfg = Config(data_root=tmp_path / "data")
@@ -626,10 +618,24 @@ def test_prune_keeps_the_pointer_and_the_newest_generations(tmp_path):
     assert dry, "there is something to prune"
     assert {p.name for p in generations.iterdir()} == before, "dry run must not delete"
 
-    prune_revision_generations(cfg.meta_root, keep=2)
+    from cnequity.storage.lifecycle import LifecycleStore, digest
+
+    lifecycle = LifecycleStore(cfg.meta_root)
+    lifecycle.import_manifest(
+        {
+            "schema_version": 1,
+            "meta_root": str(cfg.meta_root.resolve()),
+            "holds": {},
+            "reference_roots": [],
+            "reference_fingerprint": digest([]),
+        }
+    )
+    marked = prune_revision_generations(cfg.meta_root, keep=2)
 
     after = {p.name for p in generations.iterdir()}
-    assert after < before and len(after) <= 3
+    assert after == before, "marking preserves all generation bytes"
+    assert sum(len(r.marked_revision_ids) for r in marked) == len(before) - 3
+    assert all(r.freed_bytes == 0 and not r.removed_revision_ids for r in marked)
     # The generation every reader resolves to survived, and still reads.
     assert current_before is not None and current_before.is_dir()
     assert store.current_root("daily_bars") == current_before
@@ -652,3 +658,112 @@ def test_prune_keeps_what_the_pointer_resolves_to_even_at_keep_one(tmp_path):
     assert store.current_root("daily_bars") == current
     assert load("daily_bars", config=cfg)["close"].to_list() == [10.0]
     assert list(generations.iterdir()), "at least the pointed-to generation remains"
+
+
+def test_commit_excludes_abandoned_mutable_partition(tmp_path):
+    cfg, store, first = _revision_lake(tmp_path, 10.0)
+    _bars(first, date(2026, 1, 1), 99.0)
+    second = cfg.curated_root / "daily_bars/trade_date=2026-01-02/part.parquet"
+    _bars(second, date(2026, 1, 2), 20.0)
+    store.commit(
+        "daily_bars",
+        run_id="next",
+        changed_files=[second],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    assert load("daily_bars", config=cfg).sort("trade_date")["close"].to_list() == [10.0, 20.0]
+
+
+def test_dataset_state_uses_pointer_after_state_write_interruption(tmp_path):
+    from cnequity.query.state import dataset_state
+
+    cfg, store, path = _revision_lake(tmp_path, 10.0)
+    state_path = cfg.meta_root / "state/daily_bars.json"
+    old_state = state_path.read_bytes()
+    _bars(path, date(2026, 1, 1), 20.0)
+    receipt = store.commit(
+        "daily_bars",
+        run_id="next",
+        changed_files=[path],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    state_path.write_bytes(old_state)
+    assert dataset_state("daily_bars", config=cfg).revision_id == receipt.revision_id
+    assert load("daily_bars", config=cfg)["close"].to_list() == [20.0]
+
+
+def test_commit_keeps_undeclared_files_of_a_declared_partition(tmp_path):
+    cfg, store, first = _revision_lake(tmp_path, 10.0)
+    sibling = first.parent / "part-other.parquet"
+    _bars(sibling, date(2026, 1, 1), 11.0)
+    pl.read_parquet(sibling).with_columns(pl.lit("600001.SH").alias("symbol")).write_parquet(
+        sibling
+    )
+    store.commit(
+        "daily_bars",
+        run_id="sibling",
+        changed_files=[sibling],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    assert sorted(load("daily_bars", config=cfg)["close"].to_list()) == [10.0, 11.0]
+
+
+def test_commit_propagates_a_partition_removed_by_the_writer(tmp_path):
+    cfg, store, first = _revision_lake(tmp_path, 10.0)
+    second = cfg.curated_root / "daily_bars/trade_date=2026-01-02/part.parquet"
+    _bars(second, date(2026, 1, 2), 20.0)
+    store.commit(
+        "daily_bars",
+        run_id="add",
+        changed_files=[second],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    shutil.rmtree(first.parent)
+    _bars(second, date(2026, 1, 2), 21.0)
+    store.commit(
+        "daily_bars",
+        run_id="rebuild",
+        changed_files=[second],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    assert load("daily_bars", config=cfg)["close"].to_list() == [21.0]
+
+
+def test_commit_rejects_a_root_file_in_a_partitioned_dataset(tmp_path):
+    cfg, store, first = _revision_lake(tmp_path, 10.0)
+    stray = cfg.curated_root / "daily_bars/merged.parquet"
+    _bars(stray, date(2026, 1, 1), 99.0)
+    with pytest.raises(RevisionConsistencyError, match="partition layout"):
+        store.commit(
+            "daily_bars",
+            run_id="stray",
+            changed_files=[stray],
+            schema_version=1,
+            contract_fingerprint="contract",
+        )
+    assert load("daily_bars", config=cfg)["close"].to_list() == [10.0]
+
+
+def test_layout_violations_flags_root_files_beside_partitions_and_foreign_keys():
+    from cnequity.storage.revisions import layout_violations
+
+    problems = layout_violations(
+        "daily_bars",
+        [
+            Path("merged.parquet"),
+            Path("symbol=600000.SH/part.parquet"),
+            Path("trade_date=2026-01/part.parquet"),
+            Path("trade_date=2026-01-02/part.parquet"),
+        ],
+    )
+    assert len(problems) == 2
+    assert any("root file beside" in problem for problem in problems)
+    assert any("not a trade_date partition" in problem for problem in problems)
+    # A root-only legacy layout or a legacy granularity is left to the audit.
+    assert layout_violations("daily_bars", [Path("merged.parquet")]) == []
+    assert layout_violations("instruments", [Path("part-merged.parquet")]) == []

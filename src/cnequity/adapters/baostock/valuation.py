@@ -2,19 +2,22 @@
 
 EastMoney's valuation endpoint is a live snapshot (the clist page stamped with
 today's ``trade_date``); it cannot replay history. Baostock exposes per-symbol
-daily ``peTTM`` / ``pbMRQ`` / ``psTTM`` plus ``amount`` / ``turn`` / ``close``
+daily ``peTTM`` / ``pbMRQ`` / ``psTTM`` plus ``volume`` / ``turn`` / ``close``
 back to 2016.
 
-Market cap on the backfill path:
+Market cap on the backfill path, each value labelled with its basis
+(``domain/valuation``):
 
-- ``float_mv`` — from k-data: ``amount / (turn/100)`` when turn > 0 (元).
-  Matches EastMoney ``f21`` units.
+- ``float_mv`` — ``close * volume / (turn/100)`` when turn > 0 (元): the
+  closing price times the float that baostock's turnover ratio implies.
+  ``amount / (turn/100)``, used until 2026-09, priced that float at the day's
+  VWAP instead of the close.
 - ``total_mv`` — ``close × totalShare`` with year-end (Q4) ``query_profit_data``
-  shares asof-joined forward. Q4-only keeps the per-symbol wall clock under the
-  session deadline while totalShare changes slowly.
+  shares asof-joined forward, an estimate that misses intra-year share changes.
+  ``shares_as_of`` names the share count used. Q4-only keeps the per-symbol
+  wall clock under the session deadline.
 
-Daily EastMoney snapshots still overwrite the latest day with live ``f20``/``f21``.
-Provenance ``source="baostock"`` marks historical rows for audit.
+Daily EastMoney snapshots still overwrite the latest day with vendor values.
 
 Reliability: baostock throttles/drops a long-held session under a full-market
 sweep. ``fetch_valuation_history`` retries each symbol with a fresh login +
@@ -41,13 +44,14 @@ from cnequity.adapters.baostock._session import (
 from cnequity.adapters.baostock.wide_history import query_history
 from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.rate_limit import source_request
+from cnequity.domain.valuation import FLOAT_MV_TURN_IMPLIED, TOTAL_MV_YEAR_END_ESTIMATE
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["fetch_valuation_history", "to_baostock_symbol"]
 
-# amount/turn unlock float_mv; close + yearly totalShare unlock total_mv.
-_FIELDS = "date,code,close,amount,turn,peTTM,pbMRQ,psTTM"
+# Closing price times circulating shares estimates closing market cap.
+_FIELDS = "date,code,close,volume,turn,peTTM,pbMRQ,psTTM"
 
 # Year-end shares only: ~11 calls/symbol vs ~44 for every quarter; totalShare
 # rarely jumps intra-year enough to matter for size neutralization.
@@ -57,10 +61,17 @@ _OUTPUT_SCHEMA = {
     "symbol": pl.Utf8,
     "trade_date": pl.Date,
     "pe_ttm": pl.Float64,
+    "pe_dynamic": pl.Float64,
     "pb": pl.Float64,
     "ps_ttm": pl.Float64,
     "total_mv": pl.Float64,
     "float_mv": pl.Float64,
+    "total_mv_basis": pl.Utf8,
+    "float_mv_basis": pl.Utf8,
+    "shares_as_of": pl.Date,
+    # Unadjusted close, for rebuilding total_mv from share_structure before the
+    # row is staged; not a valuation_metrics column.
+    "close": pl.Float64,
 }
 
 
@@ -74,11 +85,13 @@ def _to_float(raw: str | None) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _float_mv_from_turn(amount: float | None, turn: float | None) -> float | None:
-    """流通市值 ≈ 成交额 / (换手率/100). turn is percent; empty on suspension."""
-    if amount is None or turn is None or turn <= 0 or amount <= 0:
+def _float_mv_from_turn(
+    close: float | None, volume: float | None, turn: float | None
+) -> float | None:
+    """Closing market cap in yuan; volume is shares, turn is percent."""
+    if any(value is None or value <= 0 for value in (close, volume, turn)):
         return None
-    return amount / (turn / 100.0)
+    return close * volume / (turn / 100.0)
 
 
 def _year_end_total_shares(
@@ -135,12 +148,14 @@ def _year_end_total_shares(
     return out
 
 
-def _asof_total_share(trade: date, share_points: list[tuple[date, float]]) -> float | None:
-    """Latest totalShare with ``stat_date <= trade`` (forward-filled from Q4)."""
-    chosen: float | None = None
-    for stat, shares in share_points:
-        if stat <= trade:
-            chosen = shares
+def _asof_total_share(
+    trade: date, share_points: list[tuple[date, float]]
+) -> tuple[date, float] | None:
+    """Latest ``(stat_date, totalShare)`` with ``stat_date <= trade`` (forward-filled from Q4)."""
+    chosen: tuple[date, float] | None = None
+    for point in share_points:
+        if point[0] <= trade:
+            chosen = point
         else:
             break
     return chosen
@@ -200,7 +215,7 @@ def _fetch_one(bs, symbol: str, start: date, end: date, *, config=None) -> list[
                 len(row),
             )
             continue
-        trade_raw, _code, close_s, amount_s, turn_s, pe, pb, ps = row
+        trade_raw, _code, close_s, volume_s, turn_s, pe, pb, ps = row
         if str(_code).strip().lower() != code:
             identity_mismatches += 1
             logger.warning(
@@ -211,19 +226,19 @@ def _fetch_one(bs, symbol: str, start: date, end: date, *, config=None) -> list[
             )
             continue
         close = _to_float(close_s)
-        amount = _to_float(amount_s)
+        volume = _to_float(volume_s)
         turn = _to_float(turn_s)
-        float_mv = _float_mv_from_turn(amount, turn)
+        float_mv = _float_mv_from_turn(close, volume, turn)
         try:
             trade = date.fromisoformat(trade_raw)
         except (TypeError, ValueError):
             continue
         if trade < start or trade > end:
             continue
-        total_share = _asof_total_share(trade, share_points)
+        share_point = _asof_total_share(trade, share_points)
         total_mv = (
-            close * total_share
-            if close is not None and total_share is not None and close > 0
+            close * share_point[1]
+            if close is not None and share_point is not None and close > 0
             else None
         )
         out.append(
@@ -231,10 +246,15 @@ def _fetch_one(bs, symbol: str, start: date, end: date, *, config=None) -> list[
                 "symbol": symbol,
                 "trade_date": trade,
                 "pe_ttm": _to_float(pe),
+                "pe_dynamic": None,
                 "pb": _to_float(pb),
                 "ps_ttm": _to_float(ps),
                 "total_mv": total_mv,
                 "float_mv": float_mv,
+                "total_mv_basis": TOTAL_MV_YEAR_END_ESTIMATE if total_mv is not None else None,
+                "float_mv_basis": FLOAT_MV_TURN_IMPLIED if float_mv is not None else None,
+                "shares_as_of": share_point[0] if total_mv is not None else None,
+                "close": close,
             }
         )
     if identity_mismatches:

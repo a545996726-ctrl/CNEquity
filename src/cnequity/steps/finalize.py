@@ -425,6 +425,9 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
         # some mutable partitions; it must never become the next compact's
         # implicit base.
         committed_root = revisions.ensure_current(ds)
+        # Candidate audits must see the same base that commit will publish.
+        # Discard only the disposable compatibility copy of an interrupted run.
+        revisions.materialize_current(ds)
         if ds == "instruments":
             rows, inst_findings = compact_instruments(
                 config.staging_root,
@@ -648,6 +651,16 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
         published_state = StateStore(config.meta_root)
         published_state.commit_staged_request_days(published_dataset, run_id)
         published_state.commit_staged_units(published_dataset, run_id)
+        # Committing staged request days marks them covered; a partially
+        # accepted batch must leave its rejected dates in the missing ledger.
+        writer = StagingWriter(config.staging_root)
+        for report in writer.quality_receipts(published_dataset, run_id):
+            if report.get("rows_rejected"):
+                published_state.record_missing_dates(
+                    published_dataset,
+                    [date.fromisoformat(day) for day in report.get("rejected_dates", [])],
+                    reason="quarantined_rows",
+                )
     if compacted:
         _update_watermarks(config, frozenset(compacted), trade_date)
     audit_findings.extend(_reconcile_watermarks(config))

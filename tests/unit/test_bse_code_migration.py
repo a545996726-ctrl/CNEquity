@@ -15,6 +15,7 @@ import polars as pl
 import pytest
 
 from cnequity.config import Config
+from cnequity.domain.datasets import DATASETS
 from cnequity.storage import bse_code_migration as mig
 
 MAPPING = {"430090.BJ": "920090.BJ", "832278.BJ": "920278.BJ"}
@@ -33,7 +34,10 @@ def cfg(tmp_path):
     return config
 
 
-def _write(cfg, dataset: str, rows: list[dict], partition: str = "p") -> None:
+def _write(cfg, dataset: str, rows: list[dict], partition: str | None = None) -> None:
+    if partition is None:
+        column = DATASETS[dataset].partition_col
+        partition = f"{column}={DAY.isoformat()}" if column else "."
     out = cfg.curated_root / dataset / partition
     out.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(rows).write_parquet(out / "part-merged.parquet")
@@ -161,7 +165,7 @@ def test_reporting_writes_nothing(cfg):
 
 def test_a_partition_emptied_of_everything_is_removed(cfg):
     _write(cfg, "daily_bars", [_bar("430090.BJ", DAY)], partition="trade_date=2024-03-01")
-    _write(cfg, "daily_bars", [_bar("920090.BJ", DAY)], partition="trade_date=other")
+    _write(cfg, "daily_bars", [_bar("920090.BJ", DAY)], partition="trade_date=2024-03-04")
 
     mig.migrate_bse_legacy_codes(cfg, apply=True)
 

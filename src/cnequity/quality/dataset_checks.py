@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,7 @@ from cnequity.domain.datasets import (
     ROW_COUNT_MUTATION_MIN_RATIO,
 )
 from cnequity.domain.partitions import granularity_of
+from cnequity.domain.pit import PIT_DATASET_NAMES, normalize_pit_storage_columns
 from cnequity.domain.schemas import (
     DATASET_SCHEMAS,
     MOCK_SOURCE,
@@ -285,9 +287,16 @@ def partition_row_stats(files: list[Path]) -> dict[str, int | None]:
     }
 
 
+# Duplicate keys named individually in one pk_unique finding.
+MAX_RECORDED_PK_VIOLATIONS = 1000
+
+
 def _lazy_pk_duplicate_count(lf: pl.LazyFrame, dataset: str) -> int:
     """Count duplicate PK rows across the whole audited partition."""
     pk = PRIMARY_KEYS.get(dataset, [])
+    if dataset in PIT_DATASET_NAMES:
+        lf = normalize_pit_storage_columns(lf.collect(engine="streaming"), dataset).lazy()
+        pk = [*pk, "revision_id"]
     columns = set(lf.collect_schema().names())
     if not pk or not set(pk).issubset(columns):
         return 0
@@ -303,7 +312,12 @@ def _lazy_pk_duplicate_count(lf: pl.LazyFrame, dataset: str) -> int:
 
 
 def _partitioned_pk_duplicate_count(
-    files: list[Path], dataset: str, partition_col: str | None, root: Path
+    files: list[Path],
+    dataset: str,
+    partition_col: str | None,
+    root: Path,
+    *,
+    violations: dict[str, int] | None = None,
 ) -> int:
     """Count PK duplicates one on-disk partition at a time.
 
@@ -347,14 +361,71 @@ def _partitioned_pk_duplicate_count(
             con.execute("SET threads=1")
             con.execute("SET preserve_insertion_order=false")
             con.execute("SET temp_directory=?", [scratch])
+            if dataset in PIT_DATASET_NAMES:
+                # Legacy files lack revision IDs. Normalize one file at a time
+                # so old/new layouts share the same physical vintage key.
+                keys = [*pk, "revision_id"]
+                projected = {}
+                for index, path in enumerate(files):
+                    frame = normalize_pit_storage_columns(pl.read_parquet(path), dataset)
+                    columns = list(
+                        dict.fromkeys([*keys, *([partition_col] if partition_col else [])])
+                    )
+                    target = Path(scratch) / f"keys-{index}.parquet"
+                    frame.select(columns).write_parquet(target)
+                    projected[path] = target
+                files = list(projected.values())
+                groups = {
+                    name: [projected[path] for path in paths] for name, paths in groups.items()
+                }
+                identifiers = ", ".join(f'"{column}"' for column in keys)
+            # Partition names alone do not prove disjoint primary keys. Check
+            # actual date ranges (Parquet statistics normally answer MIN/MAX)
+            # and fall back to one bounded, spillable query on any overlap.
+            disjoint = partition_col in pk and "__root__" not in groups
+            bounds = []
+            if disjoint:
+                quoted = '"' + partition_col.replace('"', '""') + '"'
+                for group in groups.values():
+                    low, high, nulls = con.execute(
+                        f"SELECT MIN({quoted}), MAX({quoted}), "
+                        f"COUNT(*) FILTER (WHERE {quoted} IS NULL) "
+                        "FROM read_parquet(?, hive_partitioning=false)",
+                        [[str(path) for path in group]],
+                    ).fetchone()
+                    if low is None or high is None or nulls:
+                        disjoint = False
+                        break
+                    bounds.append((low, high))
+                bounds.sort()
+                if any(
+                    left[1] >= right[0] for left, right in zip(bounds, bounds[1:], strict=False)
+                ):
+                    disjoint = False
+            if not disjoint:
+                groups = {"__all__": files}
             for group in groups.values():
                 query = (
                     f"SELECT COUNT(*) - COUNT(DISTINCT ({identifiers})) "
                     "FROM read_parquet(?, hive_partitioning=false)"
                 )
-                duplicate_count += int(
-                    con.execute(query, [[str(path) for path in group]]).fetchone()[0]
-                )
+                paths = [[str(path) for path in group]]
+                count = int(con.execute(query, paths).fetchone()[0])
+                duplicate_count += count
+                room = MAX_RECORDED_PK_VIOLATIONS - len(violations or {})
+                if count and violations is not None and room > 0:
+                    # Bounded: a finding travels through run context and
+                    # publication reports. The caller detects truncation by
+                    # comparing the recorded excess with the total.
+                    cursor = con.execute(
+                        f"SELECT {identifiers}, COUNT(*) - 1 AS excess "
+                        "FROM read_parquet(?, hive_partitioning=false) "
+                        f"GROUP BY {identifiers} HAVING COUNT(*) > 1 "
+                        f"ORDER BY {identifiers} LIMIT {room}",
+                        paths,
+                    )
+                    for row in cursor.fetchall():
+                        violations[json.dumps(row[:-1], default=str)] = int(row[-1])
         finally:
             con.close()
     return duplicate_count
@@ -756,8 +827,11 @@ def audit_curated_dataset(
         }
     )
 
+    violations: dict[str, int] = {}
     if full and audit_files is not None:
-        dupes = _partitioned_pk_duplicate_count(audit_files, dataset, partition_col, root)
+        dupes = _partitioned_pk_duplicate_count(
+            audit_files, dataset, partition_col, root, violations=violations
+        )
     else:
         dupes = _lazy_pk_duplicate_count(audit_lf, dataset)
     if dupes:
@@ -768,6 +842,11 @@ def audit_curated_dataset(
                 "check": "pk_unique",
                 "message": (f"{dupes} duplicate PK rows in audited curated {dataset} partition"),
                 "rows_checked": row_count,
+                "duplicate_rows": dupes,
+                "violations": violations,
+                "violations_complete": bool(
+                    full and audit_files is not None and sum(violations.values()) == dupes
+                ),
             }
         )
 
@@ -877,6 +956,9 @@ def check_mixed_partition_granularity(
     by_gran: dict[str, list[str]] = {}
     for part in partitions:
         by_gran.setdefault(granularity_of(part), []).append(part.value)
+    root_files = sorted(root.glob("*.parquet"))
+    if root_files:
+        by_gran["unpartitioned"] = [path.name for path in root_files]
     stale = {g: vals for g, vals in by_gran.items() if g != configured}
     if not stale:
         return None
@@ -895,10 +977,7 @@ def check_mixed_partition_granularity(
         # Keep the whole-dataset overlap check lazy as well. Mixed layouts are
         # exactly the case where the old eager collect could pull a large
         # legacy lake into memory before the audit reported the layout error.
-        pk_dupes = _lazy_pk_duplicate_count(
-            scan_parquet_files(files, hive=False).select(pk),
-            dataset,
-        )
+        pk_dupes = _partitioned_pk_duplicate_count(files, dataset, partition_col, root)
 
     msg = (
         f"{stale_count} partition(s) still at {[g for g in on_disk if g != configured]} "

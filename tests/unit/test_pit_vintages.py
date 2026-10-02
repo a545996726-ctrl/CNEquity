@@ -400,3 +400,36 @@ def test_cninfo_archive_recovery_requires_full_announcement_identity():
 
     assert recovered["announcement_id"].to_list() == ["a"]
     assert recovered["source_published_at"].null_count() == 0
+
+
+def test_same_announce_date_correction_preserves_original_and_first_observation(tmp_path):
+    cfg = Config(data_root=tmp_path)
+    batches = [
+        [_row(_ORIGINAL, 100.0, "2024-04-20T09:00:00Z")],
+        [_row(_ORIGINAL, 90.0, "2024-05-20T09:00:00Z")],
+        [
+            _row(_ORIGINAL, 100.0, "2024-06-20T09:00:00Z"),
+            {**_row(_ORIGINAL, 3.0, "2024-06-20T09:00:00Z"), "item_code": "net_profit"},
+        ],
+    ]
+    for index, rows in enumerate(batches):
+        run = f"run-{index}"
+        StagingWriter(cfg.staging_root).write_batch(_DATASET, run, "batch", _frame(rows))
+        compact_dataset(
+            cfg.staging_root, cfg.curated_root, _DATASET, run, partition_col="report_period"
+        )
+    early = load(_DATASET, config=cfg, as_of="2024-04-30", items=["revenue"])
+    assert early["item_value"].to_list() == [100.0]
+    later = load(_DATASET, config=cfg, as_of="2024-07-01", items=["revenue"])
+    assert later["item_value"].to_list() == [90.0]
+    all_rows = load(_DATASET, config=cfg, as_of="2024-07-01", items=["revenue"], all_vintages=True)
+    assert sorted(all_rows["item_value"].to_list()) == [90.0, 100.0]
+    from cnequity.quality.dataset_checks import _partitioned_pk_duplicate_count
+
+    root = cfg.curated_root / _DATASET
+    assert (
+        _partitioned_pk_duplicate_count(
+            list(root.rglob("*.parquet")), _DATASET, "report_period", root
+        )
+        == 0
+    )

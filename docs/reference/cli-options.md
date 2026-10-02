@@ -193,17 +193,32 @@
 | `--symbol` | `—` | 按需抓取的标的代码 |
 | `--refresh` | `False` | 抓取前先刷新按需缓存（需要同时给 --dataset 和 --symbol）。 |
 
+## `cne repair layout`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `dataset` | `—` | 必填；位置参数 |
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--apply` | `False` | 写入并发布新版本；默认只输出计划。 |
+
+## `cne repair valuation-basis`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--apply` | `False` | 写入并发布新版本；默认只输出计划。 |
+
 ## `cne run clean`
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
-| `--dry-run` | `False` | 只报告可以删的 staging，不真删。 |
-| `--orphan-retention-days` | `7` | 删掉超过这么多天、且 manifest 里没有记录的孤儿 staging。 |
-| `--snapshot-retention-days` | `14` | 删掉超过这么多天的 meta/source_snapshots run_id 目录（每个数据集 / 源的最新一份始终保留）。 |
-| `--force` | `False` | 连还不满足清理条件的 staging 也删（批次没跑完、和/或没 compact 过）。成功的抓取批次会被降级为 failed，好让 `cne run retry` 重抓（数据是重抓不是丢失，但重试会变成整段重跑）。成功但没 compact 的 run 不要用它 —— 先跑 `cne run compact --run-id`。 |
-| `--keep-revision-generations` | `5` | meta/revisions/data 下每个数据集保留这么多代已提交版本，更老的代只删存储字节。receipt 始终保留，current.json 指向的那一代永远不删。0 表示不清理。 |
-| `--log-retention-days` | `30` | 删掉超过这么多天的 `logs/cne-*.log`。每次调用都会写一份，没有别的东西会清理它们。0 表示不清理。 |
+| `--dry-run` | `False` | 兼容选项；现在所有清理均只预览。 |
+| `--orphan-retention-days` | `7` | 预览超过这么多天、且 manifest 里没有记录的孤儿 staging。 |
+| `--snapshot-retention-days` | `14` | 预览超过这么多天的 meta/source_snapshots run_id 目录（每个数据集 / 源的最新一份始终保留）。 |
+| `--force` | `False` | 将未完成或未 compact 的 staging 也列入预览，不删除文件、不降级批次。 |
+| `--keep-revision-generations` | `5` | 每个数据集保留最近这么多代及 current/hold；其他版本只列出候选，不标记、不释放字节。网页标记前须导入引用清单。0 表示跳过版本处理。 |
+| `--log-retention-days` | `30` | 预览超过这么多天的 `logs/cne-*.log`，不删除；0 表示跳过。 |
 | `--reconcile-runs` | `False` | 清理前，把卡在 'running'（worker 崩溃）的 run 标成 failed。 |
 | `--reconcile-after-seconds` | `—` | 只对静默超过这么多秒的 run 做上面的对账（默认取 [orchestrator].batch_stale_seconds）。 |
 
@@ -413,6 +428,106 @@
 | `--all-columns` | `False` | 配合 --datasets：打印数据集清单的全部列，而不只是新鲜度。 |
 | `--groups` | `—` | 配合 --datasets：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，但不会让门禁失败。截面检查同样受它约束——daily_bars 归哪个组，它的覆盖率就归谁判。未跑完的 init 不属于任何调度组，始终判失败。 |
 | `--scope, --no-scope` | `True` | 配合 --datasets：是否做最新交易日的标的截面校验。它要读 daily_bars 的 tip 分区、instruments 和 trading_status，比单纯看水位贵；--no-scope 让这条命令回到纯元数据。 |
+
+## `cne storage apply`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `plan_id` | `—` | 必填；位置参数 |
+| `--phase` | `mark` | mark 原地标记；purge 已禁用，请转到 serve 存储运维页。 |
+| `--maintenance-window` | `False` | 兼容选项；不能绕过网页删除确认。 |
+
+## `cne storage archive`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `object_id` | `—` | 必填；位置参数 |
+| `--destination` | `—` | 必填 |
+
+## `cne storage artifact-verify`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `object_id` | `—` | 必填；位置参数 |
+
+## `cne storage experiment-apply`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `plan_id` | `—` | 必填；位置参数 |
+| `--maintenance-window` | `False` | 兼容选项；不能绕过网页删除确认。 |
+
+## `cne storage experiment-create`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--parent` | `—` | 必填 |
+| `--case-id` | `—` | 必填 |
+
+## `cne storage experiment-plan`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--phase` | `mark` | — |
+
+## `cne storage experiment-seal`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `object_id` | `—` | 必填；位置参数 |
+| `--artifact-id` | `—` | 必填 |
+
+## `cne storage explain`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `object_id` | `—` | 必填；位置参数 |
+
+## `cne storage hold`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `object_id` | `—` | 必填；位置参数 |
+| `--reason` | `—` | 必填 |
+
+## `cne storage import`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--manifest` | `—` | 必填 |
+
+## `cne storage inspect`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--keep` | `5` | — |
+
+## `cne storage plan`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `--keep` | `5` | — |
+| `--phase` | `mark` | — |
+
+## `cne storage resolve`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | `configs/cnequity.toml` | 配置文件路径。 |
+| `old_path` | `—` | 必填；位置参数 |
+| `--artifact-id` | `—` | 存在多个封存版本时明确选择一个工件。 |
 
 ## `cne ths-official backfill`
 

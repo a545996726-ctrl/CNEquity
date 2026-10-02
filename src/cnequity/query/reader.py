@@ -25,6 +25,7 @@ from cnequity.domain.pit import (
     PitMode,
     classify_pit_rows,
     normalize_pit_storage_columns,
+    retain_pit_vintages,
 )
 from cnequity.domain.schemas import DATASET_SCHEMAS, PRIMARY_KEYS, validate_dataframe
 from cnequity.domain.universe_profiles import (
@@ -434,6 +435,8 @@ def _read_dataset(
         if dataset in PIT_DATASETS:
             df = normalize_pit_storage_columns(df, dataset)
         df = validate_dataframe(df, dataset)
+        if dataset in PIT_DATASETS:
+            return retain_pit_vintages(df, dataset)
         return dedupe_by_primary_key(df, dataset)
     return df
 

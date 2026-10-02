@@ -14,6 +14,7 @@ import shutil
 import stat
 import tempfile
 import uuid
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,6 +122,40 @@ class DatasetRevision:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _partition_of(relative: Path) -> str:
+    """Top-level partition directory of a dataset-relative file ('' for root files)."""
+    return relative.parts[0] if len(relative.parts) > 1 else ""
+
+
+def layout_violations(dataset: str, relatives: list[Path]) -> list[str]:
+    """Data files whose place lets one primary key live twice unnoticed.
+
+    Compaction merges one partition directory at a time, so a root file beside
+    partition directories, or a directory keyed on another column, is never
+    merged with the partitions that may hold the same keys. Out-of-band
+    repairs that bypass compaction are how such files arrive. A layout that is
+    only at a legacy granularity is left to the audit and repartitioning.
+    """
+    from cnequity.domain.partitions import parse_partition
+
+    spec = DATASETS.get(dataset)
+    if spec is None or spec.partition_col is None:
+        return []
+    data = sorted(path for path in relatives if path.suffix == ".parquet")
+    partitioned = any(_partition_of(path) for path in data)
+    problems: list[str] = []
+    for relative in data:
+        top = _partition_of(relative)
+        if not top:
+            if partitioned:
+                problems.append(f"{relative}: root file beside {spec.partition_col} partitions")
+            continue
+        column, _, value = top.partition("=")
+        if column != spec.partition_col or parse_partition(value) is None:
+            problems.append(f"{relative}: not a {spec.partition_col} partition")
+    return problems
 
 
 class RevisionStore:
@@ -418,9 +453,17 @@ class RevisionStore:
         raise RevisionConsistencyError(f"unknown retained revision {revision!r} for {dataset}")
 
     def _copy_generation(
-        self, dataset: str, revision_id: str
+        self, dataset: str, revision_id: str, *, changed_files: list[Path] | None = None
     ) -> tuple[Path, tuple[RevisionFile, ...]]:
-        """Copy the complete mutable dataset into an unpublished generation."""
+        """Copy a legacy baseline, or build a candidate from the committed base.
+
+        With ``changed_files`` the mutable tree is trusted only for the
+        partitions this commit declares: those are copied whole from the
+        mutable tree, every other partition comes from the committed
+        generation. Bytes an interrupted run left in an undeclared partition
+        therefore never reach a publication. A committed partition that the
+        writer removed from the mutable tree stays removed.
+        """
         source = self._layer_root(dataset) / dataset
         destination = self.generation_root(dataset, revision_id)
         _reject_symlink_path(source, label="mutable dataset root")
@@ -435,9 +478,43 @@ class RevisionStore:
                 pass
             if source_info is not None and not stat.S_ISDIR(source_info.st_mode):
                 raise RevisionConsistencyError(f"mutable dataset root is not a directory: {source}")
+            mutable: dict[Path, Path] = {}
             if source_info is not None:
-                for source_file in self._walk_files(source):
-                    relative = source_file.relative_to(source)
+                mutable = {path.relative_to(source): path for path in self._walk_files(source)}
+            selected: dict[Path, Path]
+            if changed_files is None:
+                selected = mutable
+            else:
+                declared = {_partition_of(path.relative_to(source)) for path in changed_files}
+                present = {_partition_of(relative) for relative in mutable}
+                base = self.current_root(dataset)
+                committed = (
+                    {path.relative_to(base): path for path in self._walk_files(base)}
+                    if base is not None
+                    else {}
+                )
+                selected = {
+                    relative: path
+                    for relative, path in committed.items()
+                    if _partition_of(relative) not in declared
+                    and _partition_of(relative) in present
+                }
+                selected.update(
+                    (relative, path)
+                    for relative, path in mutable.items()
+                    if _partition_of(relative) in declared
+                )
+                # Legacy baselines are adopted as they are; a new publication
+                # must match the registered layout.
+                problems = layout_violations(dataset, list(selected))
+                if problems:
+                    raise RevisionConsistencyError(
+                        f"{dataset} candidate violates its partition layout "
+                        f"({len(problems)} file(s)), e.g. {problems[0]}; "
+                        f"run `cne repair layout {dataset}`"
+                    )
+            if selected:
+                for relative, source_file in sorted(selected.items()):
                     stored = temporary / relative
                     stored.parent.mkdir(parents=True, exist_ok=True)
                     copy2_isolated(source_file, stored)
@@ -669,7 +746,9 @@ class RevisionStore:
         revision = current + 1
         committed_at = datetime.now(timezone.utc).isoformat()
         revision_id = uuid.uuid4().hex
-        generation, generation_files = self._copy_generation(dataset, revision_id)
+        generation, generation_files = self._copy_generation(
+            dataset, revision_id, changed_files=changed_files
+        )
         # File records are already POSIX; Path(str).parent would re-inject
         # Windows separators into the published partition identity.
         partitions = tuple(sorted({Path(item.path).parent.as_posix() for item in files}))
@@ -856,24 +935,15 @@ def committed_revision(
 
 @dataclass(frozen=True)
 class GenerationPruneResult:
-    """What a generation prune removed, per dataset."""
+    """Revision candidates; legacy cleanup marks them without removing bytes."""
 
     dataset: str
     removed_revision_ids: tuple[str, ...]
     kept_revision_ids: tuple[str, ...]
     freed_bytes: int
-
-
-def _directory_size(path: Path) -> int:
-    total = 0
-    for entry in path.rglob("*"):
-        try:
-            info = entry.lstat()
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            total += info.st_size
-    return total
+    candidate_revision_ids: tuple[str, ...] = ()
+    marked_revision_ids: tuple[str, ...] = ()
+    logical_bytes_selected: int = 0
 
 
 def prune_revision_generations(
@@ -882,80 +952,39 @@ def prune_revision_generations(
     keep: int = 5,
     dry_run: bool = False,
 ) -> list[GenerationPruneResult]:
-    """Drop the stored bytes of all but the newest *keep* generations.
+    """Preview or mark old generations through the shared retention policy.
 
-    A commit copies the whole dataset into a new immutable generation, so the
-    store grows by the dataset's full size per commit and nothing ever removed
-    one: 307 generations and 16 GB on a two-year lake, of which ``adj_factors``
-    alone was 46 generations and 9.5 GB — larger than ``curated/`` itself.
-
-    Receipts are deliberately kept. They are a few KB each and carry the
-    lineage: run id, code version, config fingerprint and the per-file sha256
-    of the generation. Pruning removes the ability to *read* an old revision,
-    not the record that it existed or the evidence of what was in it.
-
-    The generation named by ``current.json`` is always kept, whatever *keep*
-    says, because it is what every reader resolves to.
+    This compatibility entry point no longer deletes generation directories.
+    Explicit holds and current pointers always win over the recent count.
+    Non-dry operations require an imported reference inventory. Physical purge
+    requires a separate plan and the explicit maintenance-window entry point.
     """
-    root = Path(meta_root).expanduser() / "revisions"
-    if not root.is_dir():
-        return []
-    keep = max(1, int(keep))
-    results: list[GenerationPruneResult] = []
+    from cnequity.storage.lifecycle import LifecycleStore
 
-    for dataset_dir in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "data"):
-        dataset = dataset_dir.name
-        generations_root = root / "data" / dataset
-        if not generations_root.is_dir():
-            continue
-
-        # Receipts are named ``<zero-padded revision>-<revision_id>.json``, so
-        # the filename alone orders them without opening every file.
-        receipts: list[tuple[int, str]] = []
-        for receipt in generations_root.parent.parent.joinpath(dataset).glob("*.json"):
-            if receipt.name == "current.json":
-                continue
-            number, _, remainder = receipt.stem.partition("-")
-            if not number.isdigit() or not remainder:
-                continue
-            receipts.append((int(number), remainder))
-        # The pre-revision baseline has no receipt, so without this it would
-        # be dropped whatever ``keep`` said. It is generation zero; order it
-        # as one so ``keep`` covers it like any other.
-        if (generations_root / _LEGACY_REVISION_ID).is_dir():
-            receipts.append((0, _LEGACY_REVISION_ID))
-        receipts.sort()
-
-        protected = {revision_id for _, revision_id in receipts[-keep:]}
-        current = _read_json_quietly(dataset_dir / "current.json")
-        current_id = str(current.get("revision_id", "")).strip() if current else ""
-        if current_id:
-            protected.add(current_id)
-
-        removed: list[str] = []
-        freed = 0
-        for generation in sorted(p for p in generations_root.iterdir() if p.is_dir()):
-            if generation.name in protected:
-                continue
-            freed += _directory_size(generation)
-            removed.append(generation.name)
-            if not dry_run:
-                shutil.rmtree(generation, ignore_errors=True)
-
-        if removed:
+    store = LifecycleStore(meta_root)
+    with nullcontext() if dry_run else lake_mutation_lock(store.meta):
+        report = store.inspect(keep=max(1, int(keep)))
+        candidates = [o for o in report["objects"] if not o["blocked_reasons"]]
+        if candidates and not dry_run:
+            plan = store.plan(keep=max(1, int(keep)))
+            store.mark(plan["plan_id"])
+        results = []
+        for dataset in sorted({o["dataset"] for o in candidates}):
+            selected = [o for o in candidates if o["dataset"] == dataset]
+            ids = tuple(o["revision_id"] for o in selected)
             results.append(
                 GenerationPruneResult(
                     dataset=dataset,
-                    removed_revision_ids=tuple(removed),
-                    kept_revision_ids=tuple(sorted(protected)),
-                    freed_bytes=freed,
+                    removed_revision_ids=(),
+                    kept_revision_ids=tuple(
+                        o["revision_id"]
+                        for o in report["objects"]
+                        if o["dataset"] == dataset and o["blocked_reasons"]
+                    ),
+                    freed_bytes=0,
+                    candidate_revision_ids=ids,
+                    marked_revision_ids=ids if not dry_run else (),
+                    logical_bytes_selected=sum(o["logical_bytes"] for o in selected),
                 )
             )
-    return results
-
-
-def _read_json_quietly(path: Path) -> dict[str, Any] | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+        return results

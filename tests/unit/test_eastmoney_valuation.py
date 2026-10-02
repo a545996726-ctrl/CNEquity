@@ -40,7 +40,8 @@ def test_fetch_valuation_metrics_maps_fields(monkeypatch):
     row = df.row(0, named=True)
     assert row["symbol"] == "600519.SH"
     assert row["trade_date"] == date(2024, 6, 28)
-    assert row["pe_ttm"] == 35.2
+    assert row["pe_ttm"] is None
+    assert row["pe_dynamic"] == 35.2
     assert row["pb"] == 12.1
     assert row["ps_ttm"] == 8.4
     assert row["total_mv"] == 2.1e12
@@ -74,7 +75,8 @@ def test_fetch_valuation_metrics_dedupes_symbols(monkeypatch):
     )
     df = fetch_valuation_metrics(date(2024, 6, 28), client=_Client())
     assert df.height == 1
-    assert df["pe_ttm"][0] == 36.2
+    assert df["pe_ttm"][0] is None
+    assert df["pe_dynamic"][0] == 36.2
 
 
 def test_fetch_valuation_metrics_owns_and_closes_default_client(monkeypatch):

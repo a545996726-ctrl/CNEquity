@@ -232,12 +232,9 @@ if ! "$REPO_ROOT/scripts/backup_meta.sh" >>"$LOG" 2>&1; then
   log "backup FAILED"
 fi
 
-# Staging is per-run scratch; once a run succeeded and compact merged it into
-# curated it is pure duplication. Nothing ran this automatically before, so it
-# grew to ~60% of the curated layer. `cne run clean` only drops staging whose run
-# succeeded *and* compacted (or is an unknown orphan past retention) — the
-# staging of a failed run is resumable state and is always kept.
-log "--- clean staging ---"
+# Storage maintenance is preview-only. Expired revisions and registered trials
+# require review and explicit confirmation on the serve storage page.
+log "--- storage preview (no deletion; confirm cleanup in serve) ---"
 if ! "$CNE" run clean --config "$CONFIG" >>"$LOG" 2>&1; then
   log "staging cleanup FAILED (non-fatal)"
 fi

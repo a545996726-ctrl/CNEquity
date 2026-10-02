@@ -371,3 +371,23 @@ code { background: var(--card-subtle); }
   .catalog-toolbar { align-items: stretch; flex-direction: column; }
   .search-field { width: 100%; }
 }
+
+/* Storage maintenance follows the report layout and requires explicit consent. */
+.storage-stats { display: flex; flex-wrap: wrap; gap: 24px 48px; margin: 18px 0; }
+.storage-stats dt { color: var(--muted); font-size: 12px; }
+.storage-stats dd { margin: 6px 0 0; font-size: 18px; font-weight: 650; }
+.storage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 20px 0; }
+.storage-actions select, #storage-filter { background: var(--card); color: var(--fg); border: 1px solid var(--line); padding: 9px 12px; font: inherit; }
+.storage-review { margin-top: 24px; }
+.storage-id { display: block; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.storage-consent { padding-top: 20px; display: grid; gap: 18px; }
+.storage-consent label { display: flex; align-items: flex-start; gap: 10px; line-height: 1.6; cursor: pointer; }
+.storage-consent input { margin-top: 5px; flex-shrink: 0; width: 17px; height: 17px; }
+.button-danger { background: var(--error); color: white; border-color: var(--error); }
+.button:disabled { opacity: .45; cursor: not-allowed; }
+.storage-confirm { border-color: var(--stale); }
+.storage-resume { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; align-items: center; }
+.storage-resume code { overflow-wrap: anywhere; min-width: 0; }
+.storage-result { padding: 20px; }
+.storage-result pre { overflow: auto; max-height: 360px; font-size: 12px; }
+@media (max-width: 680px) { .storage-stats { gap: 20px; } .storage-stats > div { flex-basis: calc(50% - 10px); } .storage-actions { align-items: stretch; } .storage-actions label { flex-basis: 100%; } }

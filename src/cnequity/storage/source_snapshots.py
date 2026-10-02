@@ -223,6 +223,17 @@ def clean_source_snapshots(
     Always keeps the newest run_id per ``(dataset, source, data_version)`` so
     ``read_latest`` / source_diff still have a peer even after long idle gaps.
     """
+    from cnequity.storage.lifecycle_resources import resource_holds
+
+    with resource_holds(meta_root, dry_run=dry_run) as holds:
+        return _clean_source_snapshots(
+            meta_root, retention_days=retention_days, dry_run=dry_run, now=now, holds=holds
+        )
+
+
+def _clean_source_snapshots(
+    meta_root: Path, *, retention_days: int, dry_run: bool, now: datetime | None, holds: set[str]
+) -> SnapshotCleanupResult:
     root = meta_root / "source_snapshots"
     result = SnapshotCleanupResult()
     if not root.exists() or retention_days < 0:
@@ -246,8 +257,8 @@ def clean_source_snapshots(
                     continue
                 newest = run_dirs[-1]
                 for run_dir in run_dirs:
-                    rel = str(run_dir.relative_to(root))
-                    if run_dir == newest:
+                    rel = run_dir.relative_to(root).as_posix()
+                    if run_dir == newest or f"source_snapshot/{rel}" in holds:
                         result.kept_run_dirs.append(rel)
                         continue
                     if SnapshotStore._run_timestamp(run_dir) >= cutoff:
