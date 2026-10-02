@@ -1,5 +1,6 @@
 import json
 import shutil
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +54,29 @@ def _revision_lake(root: Path, close: float) -> tuple[Config, RevisionStore, Pat
     )
     assert receipt is not None
     return config, store, path
+
+
+@pytest.mark.skipif(not Path("/tmp").is_symlink(), reason="needs the macOS /tmp alias")
+def test_commit_accepts_lake_under_system_tmp_alias():
+    root = Path(tempfile.mkdtemp(dir="/tmp")) / "lake"
+    try:
+        _commit_twice_through(root)
+    finally:
+        shutil.rmtree(root.parent, ignore_errors=True)
+
+
+def _commit_twice_through(root: Path) -> None:
+    cfg, store, path = _revision_lake(root, 10.0)
+    _bars(path, date(2026, 1, 1), 11.0)
+    receipt = store.commit(
+        "daily_bars",
+        run_id="r-again",
+        changed_files=[path],
+        schema_version=1,
+        contract_fingerprint="contract",
+    )
+    assert receipt is not None
+    assert load("daily_bars", config=cfg)["close"].to_list() == [11.0]
 
 
 @pytest.mark.parametrize("changed_dataset", ["instruments", "trading_status"])

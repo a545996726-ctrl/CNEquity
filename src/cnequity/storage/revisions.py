@@ -485,7 +485,10 @@ class RevisionStore:
             if changed_files is None:
                 selected = mutable
             else:
-                declared = {_partition_of(path.relative_to(source)) for path in changed_files}
+                declared = {
+                    _partition_of(Path(path).resolve().relative_to(source))
+                    for path in changed_files
+                }
                 present = {_partition_of(relative) for relative in mutable}
                 base = self.current_root(dataset)
                 committed = (
