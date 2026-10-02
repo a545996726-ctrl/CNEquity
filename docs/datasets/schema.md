@@ -215,6 +215,7 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 | high | float64 |  |
 | low | float64 |  |
 | close | float64 |  |
+| pre_close | float64 | 与日线共用的可空前收盘列；当前指数来源不写入 |
 | volume | int64 | **不是股**：TDX `index()` 原值，单位未确证（见下） |
 | amount | float64 |  |
 | source | string |  |
@@ -660,6 +661,8 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 | fetched_at | timestamp |  |
 
 #### margin_trading
+
+交易所来源分别采集沪、深两市。单个交易所暂未提供数据或后续分页失败时，已校验的数据仍可发布，但该日期标记为部分覆盖并保留补数缺口；完整重试发布后清除缺口。东财来源也检查两市覆盖，单市场响应不会视为完整日期。上交所未提供的 `short_balance` 保持为空。
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|

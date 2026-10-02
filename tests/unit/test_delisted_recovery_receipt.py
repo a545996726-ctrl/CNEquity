@@ -2,6 +2,7 @@ import json
 from datetime import date
 
 import polars as pl
+import pytest
 
 from cnequity.config import Config
 from cnequity.steps import delisted
@@ -193,3 +194,34 @@ def test_history_starting_after_the_window_is_not_accepted(tmp_path):
     _bars(cfg, "920305.BJ", [date(2026, 9, 10)])
 
     assert delisted.delisted_recovery_covers(cfg, start, end, ["920305.BJ"]) is False
+
+
+@pytest.mark.parametrize("prefix", ["complete", "missing", "null", "unverified_ipo", "zero_only"])
+def test_zero_volume_prefix_requires_listing_and_every_session(tmp_path, monkeypatch, prefix):
+    cfg = Config(data_root=tmp_path / "data")
+    symbol = "600001.SH"
+    start, end = date(2016, 1, 4), date(2016, 1, 6)
+    _instruments(cfg, [(symbol, end)])
+    monkeypatch.setattr(
+        delisted,
+        "_known_listing_dates",
+        lambda config: {} if prefix == "unverified_ipo" else {symbol: date(2010, 1, 4)},
+    )
+    _bars(cfg, symbol, [start, date(2016, 1, 5), end])
+    for day in [start, date(2016, 1, 5)] + ([end] if prefix == "zero_only" else []):
+        path = cfg.curated_root / "daily_bars" / f"trade_date={day}" / f"part-{symbol}.parquet"
+        if prefix == "missing" and day == date(2016, 1, 5):
+            path.unlink()
+        else:
+            frame = pl.read_parquet(path).with_columns(
+                pl.lit(None if prefix == "null" else 0).cast(pl.Int64).alias("volume")
+            )
+            frame.write_parquet(path)
+    if prefix == "null":
+        # Legacy span scans retain null-volume bars. The new prefix proof must
+        # nevertheless require an explicit zero, not an unknown volume.
+        assert delisted._zero_volume_prefixes(cfg, {symbol: (end, end)}, {symbol: start}) == set()
+    else:
+        assert delisted.delisted_recovery_covers(cfg, start, end, [symbol]) is (
+            prefix == "complete"
+        )

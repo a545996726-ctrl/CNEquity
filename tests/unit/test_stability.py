@@ -51,7 +51,7 @@ def test_degraded_non_core_passes_but_core_failure_does_not(tmp_path):
         degraded,
         "adj_factors",
         "derive",
-        "failed",
+        "warning",
         criticality="research",
     )
     failed = _run(manifest, days[1], "degraded")

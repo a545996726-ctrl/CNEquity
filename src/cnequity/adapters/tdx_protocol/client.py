@@ -71,6 +71,8 @@ class TdxSourceError(RuntimeError):
     labeled `source="mock"` so audit can reject them.
     """
 
+    reason_code = "source_unavailable"
+
 
 # A validated (host, port) reused across fetches in this process. An upstream
 # bestip scan is slow (~75s) and intermittently selects a server that then
@@ -1000,6 +1002,7 @@ def fetch_index_bars(
     allow_mock: bool = False,
     backfill: bool = False,
     config: Config | None = None,
+    allow_partial: bool = False,
 ) -> pl.DataFrame:
     if rate_limit is None and config is not None:
         rate_limit = config.tdx_rate_limit_spec()
@@ -1031,7 +1034,7 @@ def fetch_index_bars(
                         is_index=True,
                     )
                 except Exception as exc:
-                    if backfill:
+                    if backfill and not allow_partial:
                         # Rotate server and retry the whole set — some TDX hosts
                         # return corrupt bytes for deep index history.
                         raise TdxSourceError(f"index bars failed for {sym}: {exc}") from exc
@@ -1050,14 +1053,16 @@ def fetch_index_bars(
         return rows, missing
 
     reason = "TDX returned no index bars"
+    retained: dict[tuple[str, date], dict] = {}
     try:
         last_exc: Exception | None = None
         for attempt in range(_TDX_FETCH_ATTEMPTS):
             try:
                 rows, missing = _fetch_once()
-                # Fail-loud on any incomplete symbol set — both backfill and daily.
-                # Accepting a non-empty subset used to leave curated partitions with
-                # only one index while audit reported calendar coverage gaps.
+                if allow_partial:
+                    retained.update(((row["symbol"], row["trade_date"]), row) for row in rows)
+                # Rotate servers before returning a subset. The step records
+                # missing keys separately so partial facts cannot certify coverage.
                 if missing:
                     raise TdxSourceError("index bars returned no rows for: " + ", ".join(missing))
                 if rows:
@@ -1079,6 +1084,8 @@ def fetch_index_bars(
     except Exception as exc:
         reset_tdx_server_cache()
         reason = f"TDX fetch failed: {exc}"
+    if allow_partial and retained:
+        return pl.DataFrame(list(retained.values())).with_columns(pl.lit("1d").alias("frequency"))
     return _fail_or_mock(
         "index_bars",
         reason,

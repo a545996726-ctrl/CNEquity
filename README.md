@@ -95,45 +95,49 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 </details>
 
 
-## 先拿到第一份数据
+## 一条命令初始化
 
-需要 **Python 3.10+**，支持 macOS、Linux 和 Windows。基础体验无需账号或token。
+需要 **Python 3.10+**，支持 macOS、Linux 和 Windows，无需账号或 token。在准备长期存放数据的目录执行：
 
 ```bash
 pip install cnequity
-cne init --profile demo
+cne init
 ```
 
-默认抓取 **5 只股票、最近约 30 个交易日**的真实日线，写入独立的 `data/cnequity-demo/`，并生成 `configs/cnequity.demo.toml`。耗时取决于 TDX 行情主机的可达性。
+`cne init` 一次完成以下工作，不需要先手动生成配置：
 
-接着在 Python 里读出结果：
+1. **生成配置**：第一次运行时写出 `configs/cnequity.toml`，数据放在当前目录的 `data/cnequity/`（配置里记绝对路径）；已有配置直接沿用。
+2. **建全市场主干**：沪深京全部 A 股最近 **3 年**的证券列表、交易日历、公司行为、个股与指数日线、复权因子和行业指数。
+3. **补退市与交易状态**：自动恢复窗口内已知退市股票的日线，避免幸存者偏差；获取当前交易状态，并从日线派生历史停牌。
+4. **审计并发布**：校验后发布到本地 Parquet 湖，生成可直接查询的视图。
+
+全市场初始化可能需要数小时，取决于网络和数据源，没有固定完成时间；终端实时打印批次进度和 ETA。
+
+**中断了，或结果里有 `warning`？重跑同一条 `cne init`。** 它会找到没跑完的那次初始化，保留已成功的批次，只补剩下的部分。`warning` / `degraded` 表示数据已经发布，只是部分来源暂时覆盖不足，命令仍返回 0，缺口会记下来供重跑或日更补齐；只有程序、存储或完整性错误才返回失败。
+
+完成后查看各数据集的覆盖与缺口，并读取数据：
+
+```bash
+cne status --datasets
+```
 
 ```python
 from cnequity.query import load
 
-bars = load("daily_bars", data_root="data/cnequity-demo")
+bars = load("daily_bars", symbols=["600519.SH"])
 print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
 ```
 
-或者打开本地控制台：
+也可以运行 `cne serve` 打开本地只读控制台（<http://127.0.0.1:8787>）。
 
-```bash
-cne serve --config configs/cnequity.demo.toml
-# 浏览器访问 http://127.0.0.1:8787
-```
+| 需要 | 命令 |
+|---|---|
+| 一开始就要更深历史（日线从 2016-01-01 起） | `cne init --profile full` |
+| 自定义历史起点 | `cne init --since 2018-01-01` |
+| 全市场历史 ST 证据（可选，逐证券扫描，耗时长） | `cne backfill trading_status` |
+| 某个数据集更早的历史 | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD` |
 
-<details>
-<summary>网络受限？先用离线样例验证安装</summary>
-
-```bash
-cne doctor
-cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
-cne query --config configs/cnequity.sample.toml --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
-```
-
-`sample` 不访问数据源，合成行标记为 `source=mock`，只能验证链路，不能用于研究。这里单独指定目录和配置，方便与真实 demo 并存。更多问题见[排障指南](docs/operations/troubleshooting.md)。
-
-</details>
+`init` 不是所有数据集的全历史下载：分钟线、分笔和逐合约期货/期权默认关闭；只有当前快照的来源从启用后开始积累，不能补造过去。范围、磁盘和续跑细节见[初始化指南](docs/getting-started/initialization.md)；连不上数据源时先跑 `cne doctor`，再看[排障指南](docs/operations/troubleshooting.md)。
 
 ## 为什么值得把数据管起来
 
@@ -175,41 +179,24 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 
 数据经适配器与批次编排进入 staging，校验后发布为 curated 或 derived 数据；质量审计、Python/SQL 查询、控制台和 MCP 围绕已发布数据工作。图示用于说明职责边界，具体来源协议与启用状态以[数据流说明](docs/architecture/data-flow.md)和[数据集目录](docs/datasets/catalog.md)为准。
 
-## 从体验到自己的长期数据湖
-
-在准备长期使用的工作目录执行：
+## 初始化之后：每日更新
 
 ```bash
-cne config create
-cne config validate
-cne init
-
-# 之后：交易日行情与其他已启用的日更组
-cne run daily --all-groups
-
-# 公告、监管事件和资讯：独立运行，周末也更新
-cne run events
-
-cne status --datasets
+cne run daily
 ```
 
-`config create` 生成正式配置，默认正式湖与 demo 分开。`init` 默认覆盖沪深京全市场最近 **3 年的初始化主干**；它不是所有数据集的全历史下载，也没有固定完成时长。
+每天（含周末）用系统调度器运行这一条：交易日跑行情及其他已启用的日更组，然后更新公告、监管事件和资讯；非交易日只更新事件流。调度验收用 `cne status --datasets --gate`，有缺口或失败时返回非零。
 
-| 你想要 | 使用方式 |
-|---|---|
-| 先验证真实采集 | `cne init --profile demo` |
-| 全市场近期主干 | `cne init`（默认 `quick`） |
-| 更深的初始化主干 | `cne init --profile full`，其中日线默认从 2016-01-01 起 |
-| 某个数据集更早的历史 | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD --plan`，审阅后去掉 `--plan` |
-| 补历史 ST 扫描 | `cne backfill trading_status`；覆盖能力仍受市场与来源约束 |
+升级版本时：
 
-三个容易误解的默认值：
+```bash
+pip install -U cnequity
+cne config upgrade
+```
 
-- `cne run daily` 不带选项时只执行核心 waves；`--all-groups` 才遍历日更组，**不包含 `run events`**。
-- 初始化进度里的 **400 只**是默认 Baostock 历史 ST 扫描上限，不是全市场日线范围。
-- 分钟线、分笔和逐合约期货/期权默认关闭；只有当前快照的来源需从启用后积累，不能补造过去。
+`cne config upgrade` 把新版本加入的调度 step 补进你的配置，原文件自动备份。
 
-继续阅读：[快速开始](docs/getting-started/quickstart.md) → [初始化、范围与续跑](docs/getting-started/initialization.md) → [日常运维](docs/operations/runbook.md)。
+继续阅读：[初始化、范围与续跑](docs/getting-started/initialization.md) → [日常运维](docs/operations/runbook.md)。
 
 ## Python、SQL 和 AI agent 共用一份数据
 

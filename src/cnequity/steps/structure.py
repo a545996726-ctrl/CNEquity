@@ -20,7 +20,9 @@ from cnequity.adapters.sw.industry_history import (
     fetch_sw_industry_intervals,
 )
 from cnequity.config import Config
+from cnequity.orchestrator.outcomes import SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
+from cnequity.orchestrator.source_gaps import record_source_gap
 from cnequity.query.canonical import dedupe_lazy_by_primary_key
 from cnequity.steps.common import BACKFILL_START, list_trading_dates
 from cnequity.steps.http_common import (
@@ -122,9 +124,11 @@ def _validate_daily_membership_snapshot(
             f"{column}={count} (minimum {min_unique_counts[column]})"
             for column, count in sorted(thin_dimensions.items())
         )
-        raise RuntimeError(
+        record_source_gap(
+            dataset,
             f"{dataset}: incomplete daily snapshot; expected at least {min_count} "
-            + ", ".join(details)
+            + ", ".join(details),
+            frame=frame,
         )
     return frame
 
@@ -132,7 +136,7 @@ def _validate_daily_membership_snapshot(
 @register_step("sector_members", group="capital", depends_on=["instruments"])
 def step_sector_members(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("sector_members: eastmoney source disabled in config")
+        raise SourceUnavailableError("sector_members: eastmoney source disabled in config")
 
     def _fetch(d: date) -> pl.DataFrame:
         return _validate_daily_membership_snapshot(
@@ -173,7 +177,7 @@ def step_index_constituents(config: Config, trade_date: date, run_id: str, conte
     if getattr(config, "_backfill", False):
         return _backfill_index_constituents(config, trade_date, run_id)
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("index_constituents: eastmoney source disabled in config")
+        raise SourceUnavailableError("index_constituents: eastmoney source disabled in config")
 
     def _fetch(d: date) -> pl.DataFrame:
         frame = fetch_index_constituents(d, config=config)
@@ -189,10 +193,12 @@ def step_index_constituents(config: Config, trade_date: date, run_id: str, conte
                 f"{row['index_symbol']}={row['_member_count']}"
                 for row in counts.iter_rows(named=True)
             )
-            raise RuntimeError(
+            record_source_gap(
+                "index_constituents",
                 "index_constituents: incomplete daily snapshot; "
                 f"each index needs at least {_MIN_DAILY_INDEX_MEMBERS_PER_INDEX} "
-                f"unique members ({details})"
+                f"unique members ({details})",
+                frame=frame,
             )
         return frame
 
@@ -269,7 +275,7 @@ def _backfill_index_constituents(config: Config, trade_date: date, run_id: str) 
         }
     df = pl.concat([f for f in frames if not f.is_empty()])
     if df.is_empty():
-        raise RuntimeError("index_constituents backfill: expansion produced 0 rows")
+        raise SourceUnavailableError("index_constituents backfill: expansion produced 0 rows")
 
     # An adjustment workbook can parse successfully yet cover only a thin
     # slice of an index.  Writing that slice as a complete as-of snapshot is
@@ -282,17 +288,15 @@ def _backfill_index_constituents(config: Config, trade_date: date, run_id: str) 
     counts = unique.group_by("as_of_date", "index_symbol").len().rename({"len": "_member_count"})
     thin = counts.filter(pl.col("_member_count") < _MIN_CNI_MEMBERS_PER_INDEX)
     if not thin.is_empty():
-        df = df.join(
-            thin.select("as_of_date", "index_symbol"),
-            on=["as_of_date", "index_symbol"],
-            how="anti",
+        record_source_gap(
+            "index_constituents", "CNI as-of snapshots below the minimum member count", frame=df
         )
     thin_details = [
         f"{row['index_symbol']}@{row['as_of_date']}={row['_member_count']}"
         for row in thin.sort(["as_of_date", "index_symbol"]).iter_rows(named=True)
     ]
     if df.is_empty():
-        raise RuntimeError(
+        raise SourceUnavailableError(
             "index_constituents backfill: all CNI as-of snapshots were below the "
             f"minimum {_MIN_CNI_MEMBERS_PER_INDEX} unique members"
         )
@@ -336,7 +340,7 @@ def step_industry_members(config: Config, trade_date: date, run_id: str, context
     if getattr(config, "_backfill", False):
         return _backfill_industry_members(config, trade_date, run_id)
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("industry_members: eastmoney source disabled in config")
+        raise SourceUnavailableError("industry_members: eastmoney source disabled in config")
 
     def _fetch(d: date) -> pl.DataFrame:
         return _validate_daily_membership_snapshot(
@@ -392,7 +396,7 @@ def _backfill_industry_members(config: Config, trade_date: date, run_id: str) ->
         intervals = fetch_sw_industry_intervals()
     df = expand_sw_industry_as_of(intervals, todo)
     if df.is_empty():
-        raise RuntimeError("industry_members backfill: Shenwan expansion produced 0 rows")
+        raise SourceUnavailableError("industry_members backfill: Shenwan expansion produced 0 rows")
     # A month with far fewer names than typical means the XLS window does not
     # reach that as_of. Treat both that case and a completely missing requested
     # month as incomplete rather than letting a non-empty response look like a
@@ -405,9 +409,13 @@ def _backfill_industry_members(config: Config, trade_date: date, run_id: str) ->
     thin_dates = set(thin["as_of_date"].to_list())
     incomplete_dates = set(missing_dates) | thin_dates
     if incomplete_dates:
-        df = df.filter(~pl.col("as_of_date").is_in(sorted(incomplete_dates)))
+        record_source_gap(
+            "industry_members",
+            "Shenwan as-of snapshots missing or below the minimum member count",
+            dates=incomplete_dates,
+        )
     if df.is_empty():
-        raise RuntimeError(
+        raise SourceUnavailableError(
             "industry_members backfill: all requested Shenwan as-of snapshots were "
             f"missing or below the minimum {_MIN_DAILY_INDUSTRY_MEMBER_SYMBOLS} "
             "unique members"

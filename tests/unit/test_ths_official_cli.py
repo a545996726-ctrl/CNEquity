@@ -216,7 +216,7 @@ def test_a_dry_run_records_nothing(tmp_path, monkeypatch):
     assert not [r for r in manifest.list_runs() if r["run_id"] == out["run_id"]]
 
 
-def test_staging_becomes_reclaimable_once_its_run_is_published(tmp_path, monkeypatch):
+def test_backfill_publishes_its_staging_and_leaves_it_reclaimable(tmp_path, monkeypatch):
     """The whole point of the run record, end to end.
 
     `clean_staging` reclaims a run's staging only once it can see the run is
@@ -256,7 +256,8 @@ def test_staging_becomes_reclaimable_once_its_run_is_published(tmp_path, monkeyp
     monkeypatch.setattr(fundamentals, "backfill_statement_gap_ths_official", _stage)
     monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "sk-test")
     path = _writable_config(tmp_path)
-    run_id = _run(["ths-official", "backfill", "--config", str(path)])["run_id"]
+    out = _run(["ths-official", "backfill", "--config", str(path)])
+    run_id = out["run_id"]
 
     def bucket() -> str:
         result = CliRunner().invoke(cli, ["run", "clean", "--dry-run", "--config", str(path)])
@@ -270,12 +271,6 @@ def test_staging_becomes_reclaimable_once_its_run_is_published(tmp_path, monkeyp
             "nowhere",
         )
 
-    # Held back while the rows exist only in staging — publishing is still owed.
-    assert bucket() == "skipped_run_ids"
-    assert (
-        CliRunner()
-        .invoke(cli, ["run", "compact", "--run-id", run_id, "--config", str(path)])
-        .exit_code
-        == 0
-    )
+    # The command publishes what it staged: no second `cne run compact` owed.
+    assert out["compact"]["status"] == "success"
     assert bucket() == "candidate_run_ids"

@@ -243,7 +243,7 @@ def test_index_constituents_backfill_empty_cni_is_retryable_warning(cfg, monkeyp
     )
 
 
-def test_index_constituents_backfill_rejects_thin_nonempty_index(cfg, monkeypatch):
+def test_index_constituents_backfill_delivers_thin_nonempty_index(cfg, monkeypatch):
     cfg._backfill = True
     cfg._backfill_start = date(2024, 1, 1)
     cfg._backfill_end = date(2024, 1, 31)
@@ -263,8 +263,13 @@ def test_index_constituents_backfill_rejects_thin_nonempty_index(cfg, monkeypatc
     monkeypatch.setattr(st, "fetch_cni_index_adjustments", lambda _: adjustment)
     monkeypatch.setattr(st, "expand_cni_constituents_as_of", lambda *_: thin)
 
-    with pytest.raises(RuntimeError, match="below the minimum 50"):
-        st.step_index_constituents(cfg, date(2024, 1, 31), "run-cni-thin", {})
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    with source_gap_scope(cfg) as gaps:
+        result = st.step_index_constituents(cfg, date(2024, 1, 31), "run-cni-thin", {})
+    assert result["rows_written"] == 2
+    assert result["status"] == "warning"
+    assert gaps[0]["dates"] == ["2024-01-31"]
 
 
 def test_industry_members_disabled(cfg):
@@ -335,7 +340,7 @@ def test_industry_members_backfill_already_present(cfg, monkeypatch):
     assert "already present" in result["note"]
 
 
-def test_industry_members_backfill_rejects_thin_month(cfg, monkeypatch):
+def test_industry_members_backfill_delivers_thin_month(cfg, monkeypatch):
     cfg._backfill = True
     cfg._backfill_start = date(2024, 1, 1)
     cfg._backfill_end = date(2024, 1, 31)
@@ -344,8 +349,7 @@ def test_industry_members_backfill_rejects_thin_month(cfg, monkeypatch):
     monkeypatch.setattr(st, "_existing_as_of_dates", lambda *a, **k: set())
     monkeypatch.setattr(st, "fetch_sw_industry_intervals", lambda: pl.DataFrame({"x": [1]}))
 
-    # Far fewer than the 1000-name floor must not be staged as a queryable
-    # partial snapshot.
+    # A small snapshot is queryable while its coverage remains incomplete.
     thin = pl.DataFrame(
         {
             "symbol": [f"{i:06d}.SH" for i in range(5)],
@@ -356,11 +360,16 @@ def test_industry_members_backfill_rejects_thin_month(cfg, monkeypatch):
         }
     )
     monkeypatch.setattr(st, "expand_sw_industry_as_of", lambda intervals, todo: thin)
-    with pytest.raises(RuntimeError, match="all requested Shenwan as-of snapshots"):
-        st.step_industry_members(cfg, date(2024, 1, 31), "run-thin", {})
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    with source_gap_scope(cfg) as gaps:
+        result = st.step_industry_members(cfg, date(2024, 1, 31), "run-thin", {})
+    assert result["rows_written"] == 5
+    assert result["status"] == "warning"
+    assert gaps[0]["dates"] == ["2024-01-31"]
 
 
-def test_industry_members_backfill_drops_thin_month_and_keeps_healthy_month(cfg, monkeypatch):
+def test_industry_members_backfill_keeps_both_thin_and_healthy_months(cfg, monkeypatch):
     cfg._backfill = True
     cfg._backfill_start = date(2024, 1, 1)
     cfg._backfill_end = date(2024, 2, 29)
@@ -390,9 +399,12 @@ def test_industry_members_backfill_drops_thin_month_and_keeps_healthy_month(cfg,
         st, "expand_sw_industry_as_of", lambda intervals, todo: pl.concat([thin, healthy])
     )
 
-    result = st.step_industry_members(cfg, date(2024, 2, 29), "run-mixed", {})
-    assert result["rows_written"] == 1000
-    assert result["as_of_dates"] == 1
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    with source_gap_scope(cfg):
+        result = st.step_industry_members(cfg, date(2024, 2, 29), "run-mixed", {})
+    assert result["rows_written"] == 1005
+    assert result["as_of_dates"] == 2
     assert result["status"] == "warning"
     finding = result["context_updates"]["audit_findings"][0]
     assert finding["code"] == "sw_industry_thin_months"

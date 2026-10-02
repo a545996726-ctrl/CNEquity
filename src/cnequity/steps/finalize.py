@@ -32,6 +32,8 @@ def _record_dataset_result(
     rows_written: int = 0,
     error_code: str | None = None,
     error_message: str | None = None,
+    coverage_status: str | None = None,
+    publication_status: str | None = None,
 ) -> None:
     """Persist a logical dataset receipt without coupling steps to the engine."""
     from cnequity.orchestrator.manifest import Manifest
@@ -46,6 +48,8 @@ def _record_dataset_result(
         rows_written=rows_written,
         error_code=error_code,
         error_message=error_message,
+        coverage_status=coverage_status,
+        publication_status=publication_status,
     )
 
 
@@ -119,12 +123,52 @@ def _layer_file_identity(root: Path) -> dict[str, tuple[int, str]]:
     }
 
 
+DERIVE_INPUTS = {
+    "adj_factors": ("daily_bars", "corporate_actions", "instruments"),
+    "industry_index": ("daily_bars", "industry_members", "adj_factors", "trading_calendar"),
+    "futures_continuous": ("futures_bars", "futures_contracts"),
+    "option_greeks": ("option_bars", "futures_bars", "option_contracts", "macro_indicators"),
+}
+
+
+def _capture_derive_inputs(config: Config, dataset: str) -> dict:
+    """Record immutable input identities and the available coverage evidence."""
+    from cnequity.storage.revisions import RevisionStore
+
+    store = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
+    state = StateStore(config.meta_root)
+    inputs = {}
+    for name in DERIVE_INPUTS.get(dataset, ()):
+        store.ensure_current(name)
+        pointer = store.current_pointer(name) or {}
+        gaps = state.get_payload(name)
+        metadata = {}
+        if pointer.get("receipt"):
+            metadata = json.loads((config.meta_root / pointer["receipt"]).read_text()).get(
+                "metadata", {}
+            )
+        inputs[name] = {
+            key: pointer.get(key) for key in ("revision", "revision_id", "content_digest")
+        }
+        inputs[name]["coverage_status"] = (
+            "partial"
+            if any(gaps.get(key) for key in ("missing_ranges", "missing_units", "outstanding_keys"))
+            or metadata.get("coverage_status") == "partial"
+            or metadata.get("coverage", {}).get("status") == "partial"
+            else "unknown"
+        )
+    return inputs
+
+
 def _publish_derived_revision(
     config: Config,
     dataset: str,
     run_id: str,
     trade_date: date,
     before: dict[str, tuple[int, str]],
+    *,
+    input_revisions: dict | None = None,
+    coverage_status: str = "unknown",
 ) -> dict | None:
     """Publish one immutable COW generation for a derived dataset."""
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
@@ -142,6 +186,22 @@ def _publish_derived_revision(
 
     revisions = RevisionStore(config.meta_root, config.curated_root, config.derived_root)
     with lake_mutation_lock(config.meta_root, blocking=True):
+        for name, identity in (input_revisions or {}).items():
+            current = revisions.current_pointer(name) or {}
+            if any(
+                current.get(key) != identity.get(key)
+                for key in ("revision", "revision_id", "content_digest")
+            ):
+                from cnequity.orchestrator.outcomes import InputUnavailableError
+
+                revisions.quarantine_candidate(
+                    dataset, run_id=run_id, reason="input_revision_changed"
+                )
+                raise InputUnavailableError(
+                    f"{dataset}: input {name} changed during calculation; re-run derive"
+                )
+        if any(row.get("coverage_status") == "partial" for row in (input_revisions or {}).values()):
+            coverage_status = "partial"
         publication = evaluate_publication(
             config, f"{run_id}-{dataset}", trade_date, {dataset: root}, {dataset: changed}
         )
@@ -160,20 +220,35 @@ def _publish_derived_revision(
             metadata={
                 "trade_date": trade_date.isoformat(),
                 "layer": "derived",
+                "input_revisions": input_revisions or {},
+                "coverage_status": coverage_status,
                 "publication_audit": {
                     key: publication.get(key) for key in ("mode", "blocked", "report_path")
                 },
-                "rows_written": len(changed),
+                "changed_files_count": len(changed),
             },
             _locked=True,
         )
     if revision is None:
         return None
+    _record_dataset_result(
+        config,
+        run_id,
+        dataset,
+        "publish_revision",
+        "success",
+        criticality=_dataset_criticality(dataset),
+        revision_id=revision.revision_id,
+        coverage_status=coverage_status,
+        publication_status="partial" if coverage_status == "partial" else "published",
+    )
     return {
         "revision": revision.revision,
         "revision_id": revision.revision_id,
         "content_digest": revision.content_digest,
         "changed_partitions": list(revision.changed_partitions),
+        "coverage_status": coverage_status,
+        "publication_status": "partial" if coverage_status == "partial" else "published",
     }
 
 
@@ -252,6 +327,10 @@ def _update_watermarks(
                 missing = {
                     date.fromisoformat(row["start"]) for row in payload.get("missing_ranges", [])
                 }
+                missing.update(
+                    date.fromisoformat(row["trade_date"])
+                    for row in payload.get("outstanding_keys", [])
+                )
                 if observed is not None:
                     payload["observed_max"] = observed.isoformat()
                 complete = max_dt
@@ -366,9 +445,10 @@ def step_compact(config: Config, trade_date: date, run_id: str, context: dict) -
 def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     from cnequity.domain.canonical import canonical_policy
     from cnequity.domain.contracts import contract_fingerprint, dataset_contract
-    from cnequity.orchestrator.compact_gate import compact_allowed
+    from cnequity.orchestrator.compact_gate import compact_allowed, publication_files
     from cnequity.orchestrator.manifest import Manifest
     from cnequity.provenance import runtime_lineage
+    from cnequity.storage.coverage import candidate_gaps, resolved_outstanding_keys
     from cnequity.storage.revisions import RevisionStore
 
     manifest = Manifest(config.manifest_path)
@@ -377,6 +457,10 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     total = 0
     compacted: set[str] = set()
     committed_revisions: dict[str, dict] = {}
+    partial_datasets: set[str] = set()
+    coverage_by_dataset: dict[str, dict] = {}
+    resolved_keys: dict[str, set[tuple[str, str]]] = {}
+    fully_selected: set[str] = set()
     pending: list[tuple] = []
     skipped: list[dict] = []
     audit_findings: list[dict] = []
@@ -416,6 +500,23 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
             )
             continue
 
+        selected_files = publication_files(manifest, run_id, ds, config.staging_root)
+        if not selected_files:
+            continue
+        full_staging = len(selected_files) == len(writer.list_run_files(ds, run_id))
+        if full_staging:
+            fully_selected.add(ds)
+        receipts = [r for r in manifest.get_dataset_results(run_id) if r["dataset"] == ds]
+        dataset_coverage = {r["coverage_status"] for r in receipts} - {"not_applicable"}
+        gaps = StateStore(config.meta_root).get_payload(ds)
+        if (
+            incomplete_count
+            or "partial" in dataset_coverage
+            or any(gaps.get(k) for k in ("missing_ranges", "missing_units", "outstanding_keys"))
+            or len(selected_files) < len(writer.list_run_files(ds, run_id))
+        ):
+            partial_datasets.add(ds)
+
         pcol = PARTITION_COLS[ds]
         changed_files: list[Path] = []
         change_log: list[dict] = []
@@ -436,6 +537,8 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 trade_date,
                 changed_files=changed_files,
                 base_root=committed_root,
+                staging_files=selected_files,
+                allow_delist_inference="partial" not in dataset_coverage,
             )
             if rows:
                 compacted.add(ds)
@@ -460,13 +563,17 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 # can only be checked where staged rows meet the committed lake.
                 from cnequity.storage.staged_contracts import enforce_daily_bar_contracts
 
-                staged_action_files = writer.list_run_files("corporate_actions", run_id)
-                staged_status_files = writer.list_run_files("trading_status", run_id)
+                staged_action_files = publication_files(
+                    manifest, run_id, "corporate_actions", config.staging_root
+                )
+                staged_status_files = publication_files(
+                    manifest, run_id, "trading_status", config.staging_root
+                )
                 audit_findings.extend(
                     enforce_daily_bar_contracts(
                         config,
                         run_id,
-                        writer.list_run_files(ds, run_id),
+                        selected_files,
                         committed_root=committed_root,
                         actions_root=revisions.current_root("corporate_actions"),
                         instruments_root=revisions.current_root("instruments"),
@@ -497,6 +604,11 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                         ),
                     )
                 )
+                selected_files = [f for f in selected_files if f.exists()]
+                if any(finding.get("rows_rejected") for finding in audit_findings):
+                    partial_datasets.add(ds)
+                if not selected_files:
+                    continue
             rows = compact_dataset(
                 config.staging_root,
                 config.curated_root,
@@ -506,6 +618,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 changed_files=changed_files,
                 base_root=committed_root,
                 change_log=change_log,
+                staging_files=selected_files,
             )
             if rows:
                 compacted.add(ds)
@@ -520,6 +633,38 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
             criticality=_dataset_criticality(ds),
             rows_written=rows,
         )
+
+        payload = StateStore(config.meta_root).get_payload(ds)
+        resolved_keys[ds] = resolved_outstanding_keys(
+            ds, config.curated_root / ds, payload.get("outstanding_keys", []), committed=False
+        )
+        remaining = candidate_gaps(payload, run_id, resolved_keys[ds], full_staging=full_staging)
+        is_partial = (
+            incomplete_count > 0
+            or not full_staging
+            or "partial" in dataset_coverage
+            or any(remaining.values())
+            or any(f.get("dataset") == ds and f.get("rows_rejected") for f in audit_findings)
+        )
+        if is_partial:
+            partial_datasets.add(ds)
+        else:
+            partial_datasets.discard(ds)
+        coverage_by_dataset[ds] = {
+            "status": "partial"
+            if is_partial
+            else "complete"
+            if "complete" in dataset_coverage
+            else "unknown",
+            "requested_scope": manifest.get_run_metadata(run_id).get("backfill_scope")
+            or {
+                "start": manifest.get_run_metadata(run_id).get("history_start"),
+                "end": trade_date.isoformat(),
+                "universe": config.ingest_universe,
+            },
+            "gaps": remaining,
+            "resolved_outstanding_keys": len(resolved_keys[ds]),
+        }
 
         if changed_files:
             # Run the optional independent-source gate against the complete
@@ -637,9 +782,16 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                     },
                     "validation": {
                         "schema": "passed",
-                        "batch_completeness": "passed",
+                        "staging_seals": "passed"
+                        if all(
+                            writer.is_sealed(f, ds, run_id)
+                            for f in publication_files(manifest, run_id, ds, config.staging_root)
+                        )
+                        else "legacy_batch_gate",
+                        "batch_completeness": "partial" if ds in partial_datasets else "passed",
                         "source_diff_gate": "passed" if gate_spec is not None else "not_configured",
                     },
+                    "coverage": coverage_by_dataset[ds],
                     **lineage,
                 },
                 # ``_compact_locked`` already holds the shared compact
@@ -682,6 +834,8 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 criticality=_dataset_criticality(ds),
                 revision_id=revision.revision_id,
                 rows_written=rows,
+                coverage_status=coverage_by_dataset[ds]["status"],
+                publication_status="partial" if ds in partial_datasets else "published",
             )
         else:
             _record_dataset_result(
@@ -695,8 +849,13 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
             )
     for published_dataset in compacted:
         published_state = StateStore(config.meta_root)
-        published_state.commit_staged_request_days(published_dataset, run_id)
-        published_state.commit_staged_units(published_dataset, run_id)
+        if published_dataset in fully_selected:
+            published_state.commit_staged_request_days(published_dataset, run_id)
+            published_state.commit_staged_units(published_dataset, run_id)
+        if resolved_keys.get(published_dataset):
+            published_state.clear_outstanding_keys(
+                published_dataset, resolved_keys[published_dataset]
+            )
         # Committing staged request days marks them covered; a partially
         # accepted batch must leave its rejected dates in the missing ledger.
         writer = StagingWriter(config.staging_root)
@@ -731,6 +890,10 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
         )
 
     result: dict = {"rows_read": total, "rows_written": total}
+    if partial_datasets:
+        result.update(
+            status="warning", coverage_status="partial", reason_code="source_scope_incomplete"
+        )
     if publication.get("report_path"):
         result["publication_audit"] = publication["report_path"]
     if skipped:
@@ -757,13 +920,10 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     group="finalize",
     parallelizable=False,
     depends_on=["daily_bars", "compact"],
+    input_datasets=("daily_bars",),
 )
 def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
-    from cnequity.derive.adj_factors import (
-        FAIL_RATIO_THRESHOLD,
-        AdjFactorsDeriveError,
-        compute_adj_factors,
-    )
+    from cnequity.derive.adj_factors import AdjFactorsDeriveError, compute_adj_factors
 
     rebackfill = context.get("symbols_to_rebackfill") or []
     from cnequity.storage.revisions import RevisionStore
@@ -781,6 +941,7 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
         derived_revisions.ensure_current("adj_factors")
         derived_revisions.materialize_current("adj_factors")
         before_files = _layer_file_identity(config.derived_root / "adj_factors")
+        input_revisions = _capture_derive_inputs(config, "adj_factors")
         result = compute_adj_factors(config, refresh_symbols=rebackfill)
         published_revision = _publish_derived_revision(
             config,
@@ -788,6 +949,8 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
             run_id,
             trade_date,
             before_files,
+            input_revisions=input_revisions,
+            coverage_status="partial" if result.failed else "unknown",
         )
     except Exception as exc:
         _record_dataset_result(
@@ -801,11 +964,19 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
             error_message=str(exc),
         )
         raise
-    out: dict = {"rows_read": result.rows, "rows_written": result.rows}
+    out: dict = {
+        "rows_read": result.rows,
+        "rows_written": result.rows,
+        "usable_result": bool(result.rows or not result.task_count),
+    }
     if result.findings:
         out["context_updates"] = {"audit_findings": result.findings}
     if published_revision is not None:
         out["dataset_revision"] = published_revision
+        if published_revision["coverage_status"] == "partial":
+            out.update(
+                status="warning", coverage_status="partial", reason_code="input_coverage_limited"
+            )
         _record_dataset_result(
             config,
             run_id,
@@ -815,19 +986,16 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
             criticality="research",
             revision_id=published_revision["revision_id"],
             rows_written=result.rows,
+            coverage_status=published_revision["coverage_status"],
+            publication_status=published_revision["publication_status"],
         )
     if result.failed:
-        # A small failure ratio is allowed to keep the rest of the market
-        # usable, but it is still retryable state and must not make the run
-        # appear completely successful.
+        # Publish valid independent symbols while keeping retry evidence.
         out["failed_tasks"] = len(result.failed)
         out["status"] = "warning"
-    if result.failed and result.fail_ratio > FAIL_RATIO_THRESHOLD:
+    if result.failed and result.rows == 0:
         exc = AdjFactorsDeriveError(
-            (
-                f"adj_factors: {len(result.failed)}/{result.task_count} symbol×type tasks "
-                f"failed uncached fetch (>{FAIL_RATIO_THRESHOLD:.0%} threshold)"
-            ),
+            "adj_factors: no usable requested results after source failures",
             findings=result.findings,
         )
         _record_dataset_result(
@@ -883,8 +1051,11 @@ def step_derive_futures_continuous(
     revisions.ensure_current("futures_continuous")
     revisions.materialize_current("futures_continuous")
     before = _layer_file_identity(config.derived_root / "futures_continuous")
+    inputs = _capture_derive_inputs(config, "futures_continuous")
     summary = derive_futures_continuous(config)
-    published = _publish_derived_revision(config, "futures_continuous", run_id, trade_date, before)
+    published = _publish_derived_revision(
+        config, "futures_continuous", run_id, trade_date, before, input_revisions=inputs
+    )
     rows = int(summary.get("rows") or 0)
     out: dict = {"rows_read": rows, "rows_written": rows}
     if published is not None:
@@ -916,8 +1087,11 @@ def step_derive_option_greeks(config: Config, trade_date: date, run_id: str, con
     revisions.ensure_current("option_greeks")
     revisions.materialize_current("option_greeks")
     before = _layer_file_identity(config.derived_root / "option_greeks")
+    inputs = _capture_derive_inputs(config, "option_greeks")
     summary = derive_option_greeks(config)
-    published = _publish_derived_revision(config, "option_greeks", run_id, trade_date, before)
+    published = _publish_derived_revision(
+        config, "option_greeks", run_id, trade_date, before, input_revisions=inputs
+    )
     rows = int(summary.get("rows") or 0)
     out: dict = {"rows_read": rows, "rows_written": rows}
     if published is not None:
@@ -932,6 +1106,7 @@ def step_derive_option_greeks(config: Config, trade_date: date, run_id: str, con
     group="finalize",
     parallelizable=False,
     depends_on=["derive_adj_factors"],
+    input_datasets=("daily_bars", "industry_members"),
 )
 def step_derive_industry_index(
     config: Config, trade_date: date, run_id: str, context: dict
@@ -948,6 +1123,7 @@ def step_derive_industry_index(
         derived_revisions.ensure_current("industry_index")
         derived_revisions.materialize_current("industry_index")
         before_files = _layer_file_identity(config.derived_root / "industry_index")
+        inputs = _capture_derive_inputs(config, "industry_index")
         summary = derive_industry_index(config)
         published_revision = _publish_derived_revision(
             config,
@@ -955,6 +1131,7 @@ def step_derive_industry_index(
             run_id,
             trade_date,
             before_files,
+            input_revisions=inputs,
         )
     except Exception as exc:
         _record_dataset_result(
@@ -972,6 +1149,10 @@ def step_derive_industry_index(
     out: dict = {"rows_read": rows, "rows_written": rows}
     if published_revision is not None:
         out["dataset_revision"] = published_revision
+        if published_revision["coverage_status"] == "partial":
+            out.update(
+                status="warning", coverage_status="partial", reason_code="input_coverage_limited"
+            )
         _record_dataset_result(
             config,
             run_id,
@@ -981,6 +1162,8 @@ def step_derive_industry_index(
             criticality="research",
             revision_id=published_revision["revision_id"],
             rows_written=rows,
+            coverage_status=published_revision["coverage_status"],
+            publication_status=published_revision["publication_status"],
         )
     note = str(summary.get("note") or "")
     if rows == 0 and "already current" not in note and "no 申万 membership rows" not in note:
@@ -1021,10 +1204,13 @@ def step_derive_industry_index(
 )
 def step_audit(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     from cnequity.quality.audit import run_audit
+    from cnequity.quality.publication import coverage_only
 
     findings = run_audit(config, run_id, trade_date, context)
     by_severity = context.get("audit_by_severity", {}) if isinstance(context, dict) else {}
     errors = int(by_severity.get("error", 0))
+    coverage_errors = sum(coverage_only(item) for item in context.get("audit_error_findings", []))
+    errors -= coverage_errors
 
     # This step depends on `compact`, so by the time it runs the rows are
     # already in curated: the audit has never been able to *prevent* anything,
@@ -1035,7 +1221,13 @@ def step_audit(config: Config, trade_date: date, run_id: str, context: dict) -> 
     # runs it would have stopped.
     gate = getattr(config, "audit_gate", "shadow")
     would_block = errors > 0
-    status = "failed" if (would_block and gate == "block") else "success"
+    status = (
+        "failed"
+        if (would_block and gate == "block")
+        else "warning"
+        if coverage_errors
+        else "success"
+    )
     if would_block and gate != "off":
         _record_audit_gate_verdict(config, run_id, trade_date, gate, by_severity)
         logger.warning(
@@ -1045,7 +1237,7 @@ def step_audit(config: Config, trade_date: date, run_id: str, context: dict) -> 
             " — failing this run" if gate == "block" else " would have failed this run",
         )
 
-    out = {"rows_read": findings, "rows_written": findings}
+    out = {"status": status, "rows_read": findings, "rows_written": findings}
     _record_dataset_result(
         config,
         run_id,

@@ -15,7 +15,9 @@ from cnequity.adapters.eastmoney.valuation import fetch_valuation_metrics
 from cnequity.config import Config
 from cnequity.domain.http_policy import SourceCoolingDown
 from cnequity.domain.symbols import is_all_a_symbol, parse_symbol
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
+from cnequity.orchestrator.source_gaps import record_source_gap
 from cnequity.progress import sweep_progress
 from cnequity.query.canonical import dedupe_lazy_by_primary_key
 from cnequity.steps.common import instrument_metadata, load_bar_universe, load_symbols
@@ -64,7 +66,9 @@ def _validate_valuation_history_batch(
         return df
     missing = [column for column in ("symbol", "trade_date") if column not in df.columns]
     if missing:
-        raise RuntimeError(f"valuation_metrics: baostock history response is missing {missing}")
+        raise SourcePayloadError(
+            f"valuation_metrics: baostock history response is missing {missing}"
+        )
 
     normalized = df.with_columns(
         pl.col("trade_date").cast(pl.Date, strict=False),
@@ -75,16 +79,16 @@ def _validate_valuation_history_batch(
         dates.is_null() | (dates < start).fill_null(False) | (dates > end).fill_null(False)
     )
     if normalized.filter(invalid_dates).height:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"valuation_metrics: baostock history returned row(s) outside "
             f"requested window {start.isoformat()}..{end.isoformat()}"
         )
     returned_symbols = normalized.get_column("symbol")
     if returned_symbols.null_count():
-        raise RuntimeError("valuation_metrics: baostock history returned null symbol")
+        raise SourcePayloadError("valuation_metrics: baostock history returned null symbol")
     unexpected = sorted(set(returned_symbols.to_list()) - set(symbols))
     if unexpected:
-        raise RuntimeError(
+        raise SourcePayloadError(
             "valuation_metrics: baostock history returned unexpected symbol(s): "
             + ", ".join(unexpected[:5])
         )
@@ -96,7 +100,7 @@ def step_valuation_metrics(config: Config, trade_date: date, run_id: str, contex
     if getattr(config, "_backfill", False):
         return _backfill_valuation_metrics(config, trade_date, run_id)
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("valuation_metrics: eastmoney source disabled in config")
+        raise SourceUnavailableError("valuation_metrics: eastmoney source disabled in config")
     # The EastMoney clist snapshot returns delisted / non-tradable names that
     # never have a price bar (audit: valuation_bars_orphan_symbol). Pin the daily
     # snapshot to the same universe daily_bars actually realises so PE/PB rows are
@@ -331,11 +335,12 @@ def _fill_em_outage_from_datacenter(
     missing = sorted(expected - got)
     if missing or df.is_empty():
         sample = ", ".join(f"{s}@{d.isoformat()}" for s, d in missing[:5])
-        raise RuntimeError(
+        record_source_gap(
+            "valuation_metrics",
             "valuation_metrics EastMoney-outage fill incomplete: datacenter lacks "
             f"{len(missing)} of {len(expected)} barred session(s) for {len(todo)} "
-            f"symbol(s){f' (e.g. {sample})' if sample else ''}; nothing will be "
-            "published — re-run the same command once datacenter has them"
+            f"symbol(s){f' (e.g. {sample})' if sample else ''}; retained rows require independent validation",
+            dates={day for _, day in missing},
         )
     df = _validate_valuation_history_batch(df, todo, start, end)
     written = write_fetched(
@@ -622,7 +627,9 @@ def step_financial_statement_items(
     config: Config, trade_date: date, run_id: str, context: dict
 ) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("financial_statement_items: eastmoney source disabled in config")
+        raise SourceUnavailableError(
+            "financial_statement_items: eastmoney source disabled in config"
+        )
     # Quarterly data: daily runs pick up same-day announcements; backfill walks
     # every report period from 2001 (CLI --start/--end clips the walk;
     # NOTICE_DATE incremental cannot reach history).
@@ -904,7 +911,7 @@ def _run_shareholder_step(
     from datetime import timedelta
 
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError(f"{dataset}: eastmoney source disabled in config")
+        raise SourceUnavailableError(f"{dataset}: eastmoney source disabled in config")
 
     symbols = getattr(config, "_backfill_symbols", None) if dataset == "share_structure" else None
     if getattr(config, "_backfill", False):

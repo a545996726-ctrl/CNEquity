@@ -160,13 +160,13 @@ for g in $GROUP_LIST; do
 done
 
 # Second attempt at whatever is still behind, before the health check so a
-# successful repair does not page anyone. `cne status --datasets` exits 1 when
+# successful repair does not page anyone. `cne status --datasets --gate` exits 1 when
 # something is STALE, which makes it the probe: on a clean day this costs one
 # directory walk and skips the sleep entirely.
 stale_retry_status="skipped"
 if [[ "$STALE_RETRY" == "1" ]]; then
   log "--- stale probe ---"
-  if "$CNE" status --datasets --groups "$GROUP_LIST" --config "$CONFIG" >>"$LOG" 2>&1; then
+  if "$CNE" status --datasets --gate --groups "$GROUP_LIST" --config "$CONFIG" >>"$LOG" 2>&1; then
     log "nothing stale — no retry needed"
     stale_retry_status="not needed"
   else

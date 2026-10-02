@@ -1,6 +1,6 @@
 # 取数、速度与源保护
 
-先用 `cne init --profile sample` 离线验证安装；真实小样用 `--profile demo`。全市场初始化和历史回填可能持续数小时。不要用全市场任务测试网络，也不要通过不断重试健康探测判断是否恢复。
+怀疑网络或安装问题时，先跑离线的 `cne doctor`，或用 `cne init --profile sample` 离线验证安装。全市场初始化和历史回填可能持续数小时。不要用全市场任务测试网络，也不要通过不断重试健康探测判断是否恢复。
 
 ```bash
 cne sources limits                               # 离线查看冷却、预算与续跑入口
@@ -119,7 +119,7 @@ HTTP、TDX 和 EM 日预算/熔断都读取这个变量。所有进程应使用�
 
 ## 操作顺序
 
-1. 离线 `doctor`、`config validate`、`config diff`；先确认配置与绝对 `data.root`，再看 `backfill --plan`。
+1. 离线 `doctor`、`config validate`、`config upgrade --dry-run`；先确认配置与绝对 `data.root`，再看 `backfill --plan`。
 2. 小范围验证可达性和数据口径；范围参数不能是空字符串。健康探测源名可用 `--list` 查询，拼错会报错。
 3. 日常用增量 `run daily` / `run events`；只为失败窗口回填。`verify --repair`、`--force`、`--refresh` 的成本不同，执行前看帮助。
 4. 被拒时保留日志、run ID 和 checkpoint，暂停同源任务。恢复后续跑缺口，避免重复初始化或全量扫描。

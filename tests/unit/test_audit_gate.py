@@ -102,3 +102,33 @@ def test_config_rejects_an_unknown_gate(tmp_path):
 
     cfg = Config(data_root=tmp_path / "data", audit_gate="maybe")
     assert any("audit_gate" in message for message in validate_config(cfg))
+
+
+def test_coverage_errors_do_not_fail_the_ingestion_audit(tmp_path, monkeypatch, recorded):
+    cfg = Config(data_root=tmp_path / "data", audit_gate="block")
+
+    def audit(config, run_id, trade_date, context):
+        context["audit_by_severity"] = {"error": 2}
+        context["audit_error_findings"] = [{"check": "exists"}, {"check": "non_empty"}]
+        return 2
+
+    monkeypatch.setattr("cnequity.quality.audit.run_audit", audit)
+    result = finalize.step_audit(cfg, date(2026, 1, 5), "run-1", {})
+    assert result["status"] == "warning"
+    assert recorded[-1]["status"] == "warning"
+    assert not _verdicts(cfg)
+
+
+def test_ingestion_audit_returns_a_real_integrity_failure_to_the_engine(tmp_path, monkeypatch):
+    from cnequity.orchestrator.engine import JobEngine
+
+    cfg = Config(data_root=tmp_path / "data", audit_gate="block")
+
+    def audit(config, run_id, trade_date, context):
+        context["audit_by_severity"] = {"error": 1}
+        context["audit_error_findings"] = [{"check": "duplicate_keys"}]
+        return 1
+
+    monkeypatch.setattr("cnequity.quality.audit.run_audit", audit)
+    result = JobEngine(cfg).run_job("backfill", date(2026, 1, 5), steps=["audit"])
+    assert result["status"] == "failed"

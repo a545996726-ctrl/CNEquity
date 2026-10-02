@@ -21,6 +21,7 @@ class StepEntry:
     description: str = ""
     parallelizable: bool = True
     requires_workers: bool = False
+    input_datasets: tuple[str, ...] = ()
 
 
 STEP_REGISTRY: OrderedDict[str, StepEntry] = OrderedDict()
@@ -34,6 +35,7 @@ def register_step(
     description: str = "",
     parallelizable: bool = True,
     requires_workers: bool = False,
+    input_datasets: tuple[str, ...] = (),
 ) -> Callable[[StepFn], StepFn]:
     def decorator(fn: StepFn) -> StepFn:
         STEP_REGISTRY[name] = StepEntry(
@@ -43,6 +45,7 @@ def register_step(
             description=description or fn.__doc__ or name,
             parallelizable=parallelizable,
             requires_workers=requires_workers,
+            input_datasets=input_datasets,
         )
         return fn
 

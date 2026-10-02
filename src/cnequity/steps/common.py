@@ -18,6 +18,13 @@ from cnequity.domain.datasets import DATASETS, calendar_scope_datasets, fetch_se
 from cnequity.domain.frames import with_columns_unless_blank
 from cnequity.domain.schemas import data_version_for, with_provenance
 from cnequity.domain.symbols import is_subscription_placeholder
+from cnequity.orchestrator.outcomes import (
+    CapabilityLimitError,
+    SourcePayloadError,
+    SourceUnavailableError,
+    error_kind,
+)
+from cnequity.orchestrator.source_gaps import source_gap_dates
 from cnequity.storage import StagingWriter
 from cnequity.storage.instrument_catalog import load_curated_instruments as load_curated_instruments
 from cnequity.storage.instrument_catalog import (
@@ -41,7 +48,7 @@ BACKFILL_START = date(2016, 1, 1)
 CALENDAR_DATE_DATASETS = calendar_scope_datasets()
 
 
-class SnapshotBackfillError(RuntimeError):
+class SnapshotBackfillError(CapabilityLimitError):
     """Raised when backfill is requested for a snapshot-only dataset."""
 
 
@@ -424,7 +431,7 @@ def _validate_trade_date(
         return
     if column not in df.columns:
         if date_col is not None:
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{dataset}: fetch for {trade_date.isoformat()} did not return "
                 f"the configured date column {date_col!r}"
             )
@@ -432,7 +439,7 @@ def _validate_trade_date(
     parsed_dates = df.get_column(column).cast(pl.Date, strict=False)
     mismatched = int((parsed_dates.is_null() | (parsed_dates != trade_date).fill_null(True)).sum())
     if mismatched:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"{dataset}: fetch for {trade_date.isoformat()} returned "
             f"{mismatched} row(s) with a different or invalid {column}"
         )
@@ -449,11 +456,14 @@ def fetch_incremental_daily(
     on_day: Callable[[date, pl.DataFrame], None] | None = None,
     recovered_days: dict[date, pl.DataFrame] | None = None,
     durable_day_checkpoints: bool = False,
+    snapshot_only: bool = False,
 ) -> tuple[pl.DataFrame, list[dict]]:
     """Fetch one or more trading days from watermark+1 through *trade_date*.
 
     Returns ``(dataframe, audit_findings)``. Snapshot datasets only fetch
     *trade_date*; missed days are reported as ``coverage_gap`` findings.
+    ``snapshot_only`` requests just the current observation, without asserting
+    earlier snapshot coverage (used by init).
     """
     semantics = fetch_semantics(dataset)
     if getattr(config, "_backfill", False):
@@ -468,16 +478,17 @@ def fetch_incremental_daily(
             and not allow_empty
             and not empty_day_is_expected(config, dataset, trade_date)
         ):
-            raise RuntimeError(f"{dataset}: no rows returned for {trade_date.isoformat()}")
+            raise SourceUnavailableError(
+                f"{dataset}: no rows returned for {trade_date.isoformat()}"
+            )
         _validate_trade_date(frame, dataset, trade_date, date_col=date_col)
         return frame, []
 
     spec = DATASETS.get(dataset)
-    if semantics == "snapshot" and spec is not None and not spec.watermark:
-        # Rolling live windows (for example share_unlock_schedule) are not
-        # incremental histories. Do not use a legacy state file to manufacture
-        # gap dates; the current snapshot is the only honest request and its
-        # future event dates must never become a watermark.
+    if semantics == "snapshot" and (snapshot_only or (spec is not None and not spec.watermark)):
+        # Init asks for a current observation, not a snapshot history. Rolling
+        # live windows (for example share_unlock_schedule) likewise must not
+        # use an old state file to manufacture gap dates.
         dates = [trade_date]
     else:
         dates = incremental_trade_dates(config, dataset, trade_date)
@@ -511,13 +522,29 @@ def fetch_incremental_daily(
     fetched_days = 0
     # One unreadable day used to discard the whole window, so a single bad day
     # inside a 30-day reconciliation tail blinded the dataset until it rolled
-    # out of that tail. Isolate the days from each other; the guard above keeps
-    # this to datasets whose own window comes back for the failure.
-    tolerate_failed_day = _reconciliation_window_retries(dataset) or durable_day_checkpoints
+    # out of that tail. Date-scoped gaps have durable repair receipts even
+    # when the normal incremental window has no reconciliation tail.
+    tolerate_failed_day = (
+        semantics == "by_date" or _reconciliation_window_retries(dataset) or durable_day_checkpoints
+    )
     for d in fetch_dates:
         try:
             part = recovered_days[d] if recovered_days and d in recovered_days else fetch_fn(d)
+            if (
+                part.is_empty()
+                and not allow_empty
+                and not empty_day_is_expected(config, dataset, d)
+            ):
+                raise SourceUnavailableError(f"{dataset}: no rows returned for {d.isoformat()}")
+            _validate_trade_date(part, dataset, d, date_col=date_col)
         except Exception as exc:  # noqa: BLE001 — re-raised below when total
+            if error_kind(exc) not in {
+                "source_transient",
+                "source_unavailable",
+                "source_payload_invalid",
+                "capability_limit",
+            }:
+                raise
             if semantics == "by_date":
                 StateStore(config.meta_root).record_missing_dates(dataset, [d], reason=str(exc))
             if not tolerate_failed_day:
@@ -539,7 +566,7 @@ def fetch_incremental_daily(
                     StateStore(config.meta_root).record_missing_dates(
                         dataset, [d], reason="unexpected empty response"
                     )
-                raise RuntimeError(f"{dataset}: no rows returned for {d.isoformat()}")
+                raise SourceUnavailableError(f"{dataset}: no rows returned for {d.isoformat()}")
             spec = DATASETS.get(dataset)
             if spec is not None and spec.coverage_mode == "session_dense":
                 empty_days.append(d)
@@ -548,7 +575,6 @@ def fetch_incremental_daily(
         # neighbouring session into the requested partition. Validate here
         # before diagonal concatenation; once several days are merged the
         # offending response can no longer be attributed to one request.
-        _validate_trade_date(part, dataset, d, date_col=date_col)
         if on_day is not None and not (recovered_days and d in recovered_days):
             on_day(d, part)
         frames.append(part)
@@ -560,7 +586,7 @@ def fetch_incremental_daily(
         findings.append(_dense_empty_day_finding(dataset, empty_days))
     if failed_days:
         findings.append(_fetch_failed_day_finding(dataset, failed_days))
-    elif depth in {"deep", "tail"}:
+    elif depth in {"deep", "tail"} and not source_gap_dates(dataset):
         # Only a clean sweep counts; a partial one is retried at the same depth.
         state = StateStore(config.meta_root)
         if depth == "deep":
@@ -1088,9 +1114,17 @@ def walk_day_backfill(
         if staged_dates.null_count():
             raise RuntimeError(f"{dataset}: staged backfill part has invalid {date_col}: {path}")
         have.update(staged_dates.to_list())
+    # Rows already present can still represent an incomplete or quarantined
+    # day. Every recorded date gap must remain eligible for a fresh request.
+    have.difference_update(StateStore(config.meta_root).get_missing_dates(dataset))
     todo = [d for d in days if d not in have]
     if not todo:
-        return {"rows_read": 0, "rows_written": 0, "days_skipped": len(days)}
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "days_skipped": len(days),
+            "already_covered": len(days),
+        }
 
     # Most historical callers use the plain writer.  Critical range-aware
     # adapters (CNINFO announcements/regulatory) supply ``publish_fn`` so the
@@ -1101,6 +1135,8 @@ def walk_day_backfill(
     frames: list[pl.DataFrame] = []
     rows_written = 0
     empty_days: list[date] = []
+    failed_days: list[tuple[date, str]] = []
+    first_failure: Exception | None = None
     n_parts = 0
     attempt_id = uuid.uuid4().hex
 
@@ -1121,10 +1157,14 @@ def walk_day_backfill(
             # The callback owns the complete staging boundary.  In particular
             # it must validate any source evidence before writing ``part``.
             publish_fn(part, batch_id)
+        StateStore(config.meta_root).mark_staged_request_days(
+            dataset, run_id, part.get_column(date_col).cast(pl.Date).unique().to_list()
+        )
         n_parts += 1
         rows_written += part.height
         frames = []
 
+    deferred_days: list[date] = []
     for i, d in enumerate(todo, 1):
         try:
             df = fetch_one(d)
@@ -1132,7 +1172,7 @@ def walk_day_backfill(
                 empty_days.append(d)
             else:
                 if date_col not in df.columns:
-                    raise RuntimeError(
+                    raise SourcePayloadError(
                         f"{dataset}: fetch for {d.isoformat()} did not return the "
                         f"configured date column {date_col!r}"
                     )
@@ -1141,19 +1181,41 @@ def walk_day_backfill(
                     (parsed_dates.is_null() | (parsed_dates != d).fill_null(True)).sum()
                 )
                 if mismatched:
-                    raise RuntimeError(
+                    raise SourcePayloadError(
                         f"{dataset}: fetch for {d.isoformat()} returned {mismatched} row(s) "
                         f"with a different or invalid {date_col}"
                     )
                 frames.append(df)
-        except Exception:
+        except Exception as exc:
+            kind = error_kind(exc)
+            if kind == "storage_failure":
+                raise
             # The docstring's "a kill costs only the unflushed chunk" promise
             # is empty if a raise skips this flush — measured in production:
             # announcement_index ran 9.6h and landed zero new days because the
             # failure hit mid-window, taking every already-fetched day with it.
             # Response validation errors must preserve the same checkpoint.
             flush()
-            raise
+            if kind not in {
+                "source_transient",
+                "source_unavailable",
+                "source_payload_invalid",
+                "capability_limit",
+            }:
+                raise
+            first_failure = first_failure or exc
+            logger.warning("%s backfill: %s unavailable: %s", dataset, d, exc)
+            from cnequity.domain.http_policy import SourceCoolingDown
+
+            if isinstance(exc, SourceCoolingDown):
+                deferred_days = todo[i - 1 :]
+                StateStore(config.meta_root).record_missing_dates(
+                    dataset, deferred_days, reason="source_cooling_down"
+                )
+                break
+            failed_days.append((d, str(exc)))
+            StateStore(config.meta_root).record_missing_dates(dataset, [d], reason=kind)
+            continue
         if i % flush_days == 0:
             flush()
             logger.info(
@@ -1165,6 +1227,19 @@ def walk_day_backfill(
                 rows_written,
             )
     flush()
+    if (
+        first_failure is not None
+        and not rows_written
+        and not have
+        and not (allow_empty_days and empty_days)
+    ):
+        raise first_failure
+    if empty_days and not allow_empty_days:
+        StateStore(config.meta_root).record_missing_dates(
+            dataset, empty_days, reason="source_empty"
+        )
+    if not rows_written and not have and not (allow_empty_days and empty_days):
+        raise SourceUnavailableError(f"{dataset}: no usable requested backfill results")
 
     if empty_days and not allow_empty_days:
         logger.warning(
@@ -1177,10 +1252,16 @@ def walk_day_backfill(
     result = {
         "rows_read": rows_written,
         "rows_written": rows_written,
-        "days_fetched": len(todo) if allow_empty_days else len(todo) - len(empty_days),
+        "days_fetched": len(todo)
+        - len(failed_days)
+        - len(deferred_days)
+        - (0 if allow_empty_days else len(empty_days)),
         "days_skipped": len(days) - len(todo),
         "days_empty": 0 if allow_empty_days else len(empty_days),
         "days_confirmed_empty": len(empty_days) if allow_empty_days else 0,
+        "failed_days": len(failed_days),
+        "days_deferred": len(deferred_days),
+        "usable_result": bool(rows_written or have or (allow_empty_days and empty_days)),
     }
     if empty_days and not allow_empty_days:
         # Keep direct step calls truthful as well as engine-managed calls. The
@@ -1191,6 +1272,17 @@ def walk_day_backfill(
         result["context_updates"] = {
             "audit_findings": [_backfill_empty_day_finding(dataset, empty_days)]
         }
+    if failed_days:
+        result["status"] = "warning"
+        result["coverage_status"] = "partial"
+        result["reason_code"] = "source_scope_incomplete"
+        result.setdefault("context_updates", {}).setdefault("audit_findings", []).append(
+            _fetch_failed_day_finding(dataset, failed_days)
+        )
+    if deferred_days:
+        result.update(
+            status="warning", coverage_status="partial", reason_code="source_cooling_down"
+        )
     return result
 
 

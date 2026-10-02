@@ -6,37 +6,31 @@
 
 [GitHub / English](https://github.com/rootSunc/CNEquity/blob/main/README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [更新日志](https://github.com/rootSunc/CNEquity/blob/main/CHANGELOG.md)
 
-## 先跑通一个查询
+## 一条命令初始化
 
-基础体验无需账号或 token，也不必克隆仓库：
+无需账号或 token，也不必克隆仓库。在准备长期存放数据的目录执行：
 
 ```bash
 pip install cnequity
-cne init --profile demo
+cne init
 ```
 
-默认抓取 5 只股票、最近约 30 个交易日的真实日线，写入独立的 `data/cnequity-demo/`，配置为 `configs/cnequity.demo.toml`。耗时依赖 TDX 可达性。
+第一次运行会生成 `configs/cnequity.toml`（数据放在当前目录的 `data/cnequity/`），然后建沪深京全市场最近 3 年的主干：证券、日历、公司行为、个股与指数日线、复权因子、行业指数；自动恢复窗口内已知退市股票的日线，获取当前交易状态并派生历史停牌，审计后发布为本地 Parquet。全市场初始化可能需要数小时，终端实时显示进度和 ETA。
+
+**中断了，或结果里有 `warning`？重跑同一条 `cne init`**，它会保留已成功的批次，只补剩下的部分。`warning` / `degraded` 表示数据已发布、部分来源暂时覆盖不足，命令返回 0 并记下缺口；只有程序、存储或完整性错误才失败。
+
+```bash
+cne status --datasets
+```
 
 ```python
 from cnequity.query import load
 
-bars = load("daily_bars", data_root="data/cnequity-demo")
+bars = load("daily_bars", symbols=["600519.SH"])
 print(bars.select("symbol", "trade_date", "close", "source").tail(10))
 ```
 
-```bash
-cne serve --config configs/cnequity.demo.toml
-# http://127.0.0.1:8787
-```
-
-无法连接数据源时，可使用独立的离线样例：
-
-```bash
-cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
-cne query --config configs/cnequity.sample.toml --sql "SELECT * FROM daily_bars LIMIT 5"
-```
-
-所有合成行标记为 `source=mock`，仅用于验证安装和读写链路，不能用于研究。
+更深历史用 `cne init --profile full`（日线从 2016-01-01 起）；全市场历史 ST 证据是可选的 `cne backfill trading_status`。`cne serve` 打开本地只读控制台（http://127.0.0.1:8787）。
 
 ## 数据与研究口径
 
@@ -47,20 +41,13 @@ cne query --config configs/cnequity.sample.toml --sql "SELECT * FROM daily_bars 
 - 原始价格与 hfq 因子分开保存，查询时复权；PIT 研究显式使用 `as_of` 与 `pit_mode="strict"`，当前回填不冒充过去已经观察到的版本。
 - 行级来源和不可变数据版本支持复查；严格股票池与复权查询会暴露证据缺口。
 
-## 建立长期数据湖
+## 初始化之后：每日更新
 
 ```bash
-cne config create
-cne config validate
-cne init
-cne run daily --all-groups
-cne run events
-cne status --datasets
+cne run daily
 ```
 
-默认 `init` 建沪深京全市场最近 3 年的主干；`--profile full` 加深历史，其中日线从 2016-01-01 起。初始化并不填满所有数据集。默认 400 只上限仅作用于 Baostock 历史 ST 扫描，后续用 `cne backfill trading_status` 继续；完整性仍需按市场与证据核验。
-
-日更和事件流是两个入口：`--all-groups` 遍历日更组，`run events` 更新公告和资讯，周末也可运行。裸 `run daily` 只跑核心 waves。范围、成本和恢复见[初始化指南](https://rootsunc.github.io/CNEquity/getting-started/initialization/)。
+每天（含周末）运行一次：交易日跑全部日更组，然后更新公告和资讯；非交易日只更新事件流。升级版本后运行 `cne config upgrade`，把新版本的调度 step 补进配置。初始化并不填满所有数据集，范围、成本和续跑见[初始化指南](https://rootsunc.github.io/CNEquity/getting-started/initialization/)。
 
 ## 继续使用
 
@@ -71,3 +58,5 @@ cne status --datasets
 代码 [Apache-2.0](https://github.com/rootSunc/CNEquity/blob/main/LICENSE)；数据另受[上游许可](https://rootsunc.github.io/CNEquity/legal-and-data-sources/)约束，本包不附带数据湖。
 
 如果它帮你省下重复搭建数据底座的时间，欢迎在 [GitHub 点一个 ⭐ Star](https://github.com/rootSunc/CNEquity)。
+
+命令执行与数据覆盖分别报告：有效部分结果可以发布，缺口继续保留。调度验收使用 `cne status --datasets --gate`；程序、存储和完整性错误仍会失败。

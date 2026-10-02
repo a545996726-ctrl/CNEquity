@@ -23,7 +23,7 @@ cne doctor
 
 一次安装包含全部运行时 Python 依赖，**无需 extras**。可选来源仍需配置开关、适用的凭证或外部运行环境；依赖装好不表示源可达或拥有访问权限。
 
-下一步直接进入[快速开始](quickstart.md)，运行 `cne init --profile demo`。无数据源网络时使用 `sample`。
+下一步直接进入[快速开始](quickstart.md)，运行 `cne init`。
 
 ### Windows 路径
 
@@ -31,7 +31,7 @@ PowerShell / cmd 下也使用 `cne`。例如正式湖放到 D 盘：
 
 ```powershell
 cne config create --data-root D:/cnequity
-cne config validate
+cne init
 ```
 
 生成器会处理 TOML 路径转义。PowerShell 5.1 不支持 `&&`，请逐行运行命令。
@@ -73,25 +73,24 @@ pip install -e . --group dev
 
 ## 生成正式配置
 
+`cne init` 在默认配置不存在时会自动生成，多数情况下不需要单独这一步。想在初始化前修改数据目录等设置时，先运行：
+
 ```bash
 cne config create
-cne config validate
 ```
 
 默认输出 `configs/cnequity.toml`，`data.root` 转为绝对路径；macOS / Windows 使用保守的 `workers=1`。也可首次创建时加 `--data-root /abs/path/to/lake`。
 
-直接复制模板不会执行路径解析和平台调整，因此优先使用生成命令。已有配置时用 `cne config diff` 审阅差异，再逐项合并。个人配置、凭证与数据目录不应提交到仓库。
+直接复制模板不会执行路径解析和平台调整，因此优先使用生成命令。已有配置升级时用 `cne config upgrade` 自动补上新的调度 step。个人配置、凭证与数据目录不应提交到仓库。
 
 ## 升级已有安装
 
 ```bash
 pip install --upgrade cnequity
-cne --version
-cne config diff --config configs/cnequity.toml
-cne config validate --config configs/cnequity.toml
+cne config upgrade
 ```
 
-先阅读目标版本的[更新日志](../changelog.md)和[升级与反馈](upgrading.md)，确认是否需要数据迁移。不要用 `config create --force` 代替配置合并。
+`cne config upgrade` 把新版本加入的调度 step 和调度组补进配置，先备份原文件，写完后校验。先阅读目标版本的[更新日志](../changelog.md)和[升级与反馈](upgrading.md)，确认是否需要数据迁移。不要用 `config create --force` 代替配置升级。
 
 旧版本的 `tdx` / `macro` / `nlp` 等 extras 已移除。历史版本的单位或 schema 迁移应按对应发布说明执行，不能把针对旧湖的脚本重复应用到新湖。当前 `httpx` 约束为 `>=0.25`；实际安装版本由环境解析，不能从安装命令推定一个固定版本。
 

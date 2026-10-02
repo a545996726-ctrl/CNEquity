@@ -40,26 +40,77 @@ from cnequity.storage.staging_cleanup import (
 
 @run.command("compact")
 @config_option
-@click.option("--run-id", default=None)
+@click.option("--run-id", default=None, help="只发布这一次 run；默认处理所有待发布的 run。")
 def compact(config_path: str, run_id: str | None):
-    """把这次 run 里 staging 的所有数据集 compact 进 curated。"""
-    cfg = _cfg(config_path)
-    manifest = Manifest(cfg.manifest_path)
-    if not run_id:
-        latest = manifest.latest_run()
-        if not latest:
-            raise click.ClickException("没有找到任何 run")
-        run_id = latest["run_id"]
+    """把 staging 里已经结束、但还没发布的 run compact 进 curated。
 
+    \b
+    不带 --run-id 时逐个处理所有这样的 run：进程已结束、有暂存文件、还没有成功的 compact。
+    正在跑的 run 和 init run（由 `cne init` 自己续跑）不动；每个数据集仍受 compact
+    门禁保护，有未完成批次的数据集留给 `cne run retry`。
+    """
+    cfg = _cfg(config_path)
     attach_log_file(cfg, "run-compact")
-    out = JobEngine(cfg).run_step("compact", shanghai_today(), run_id)
-    click.echo(
-        json.dumps(
-            {"run_id": run_id, "rows_written": out.get("rows_written", 0), **out},
-            indent=2,
-            default=str,
+    engine = JobEngine(cfg)
+    if run_id:
+        out = engine.run_step("compact", shanghai_today(), run_id)
+        click.echo(
+            json.dumps(
+                {"run_id": run_id, "rows_written": out.get("rows_written", 0), **out},
+                indent=2,
+                default=str,
+            )
         )
+        return
+
+    pending = _unpublished_runs(cfg, engine)
+    if not pending:
+        click.echo("没有待发布的 staging：所有已结束的 run 都已经 compact。")
+        return
+    results = []
+    worst = 0
+    for rid in pending:
+        out = engine.run_step("compact", shanghai_today(), rid)
+        status = str(out.get("status", "success"))
+        click.echo(f"compact {rid}：{status}", err=True)
+        results.append({"run_id": rid, "rows_written": out.get("rows_written", 0), **out})
+        exit_code = _run_status_exit_code(status)
+        if exit_code == 1 or worst == 0:
+            worst = exit_code
+    click.echo(json.dumps({"runs": results}, indent=2, default=str))
+    if worst:
+        raise SystemExit(worst)
+
+
+def _unpublished_runs(cfg, engine: JobEngine) -> list[str]:
+    """Finished runs with staged files and no successful compact, oldest first.
+
+    These used to be found by hand — the runbook said to look for stranded
+    runs and compact them one `--run-id` at a time, while a bare
+    `cne run compact` only ever touched the latest run.
+    """
+    from cnequity.storage.staging_cleanup import list_staging_run_ids
+
+    # A killed process leaves its row `running`; close those first so their
+    # staged facts are not mistaken for live work forever.
+    engine.manifest.reconcile_orphaned_runs(
+        stale_after_seconds=cfg.batch_stale_seconds, locks_root=cfg.meta_root
     )
+    staged = list_staging_run_ids(cfg.staging_root)
+    pending = []
+    for record in reversed(engine.manifest.list_runs()):
+        rid = str(record["run_id"])
+        # Name the in-flight states, not the terminal ones, so a new terminal
+        # status is never silently skipped. Init publishes through its phases.
+        if record["status"] in ("running", "stale") or record["job_name"] == "init":
+            continue
+        if rid not in staged:
+            continue
+        batches = engine.manifest.get_batches_for_run(rid)
+        if any(b["dataset"] == "compact" and b["status"] == "success" for b in batches):
+            continue
+        pending.append(rid)
+    return pending
 
 
 def _derive_trading_status(cfg, *, start: date | None, end: date | None) -> dict:
@@ -107,6 +158,7 @@ def _derive_trading_status(cfg, *, start: date | None, end: date | None) -> dict
     )
     persisted = engine.manifest.get_run(run_id)
     summary["status"] = str(persisted["status"]) if persisted is not None else status
+    summary.update(engine._public_outcome(run_id))
     return summary
 
 
@@ -114,8 +166,14 @@ def _derive_trading_status(cfg, *, start: date | None, end: date | None) -> dict
 def _published_derive(cfg, dataset: str):
     """Make CLI derives visible to revision-aware readers under the writer lock."""
     from cnequity.file_lock import lake_mutation_lock
+    from cnequity.orchestrator.outcomes import (
+        InputUnavailableError,
+        step_outcome,
+    )
     from cnequity.orchestrator.run_lock import run_lock
+    from cnequity.query.parquet_scan import dataset_has_parquet
     from cnequity.steps.finalize import (
+        _capture_derive_inputs,
         _layer_file_identity,
         _publish_derived_revision,
         _record_dataset_result,
@@ -131,8 +189,47 @@ def _published_derive(cfg, dataset: str):
             store.ensure_current(dataset)
             store.materialize_current(dataset)
             before = _layer_file_identity(cfg.derived_root / dataset)
+            inputs = _capture_derive_inputs(cfg, dataset)
+            required = {
+                "adj_factors": ("daily_bars",),
+                "industry_index": ("daily_bars", "industry_members"),
+                "futures_continuous": ("futures_bars",),
+                "option_greeks": ("option_bars", "futures_bars"),
+            }
+            missing = [
+                name
+                for name in required.get(dataset, ())
+                if not dataset_has_parquet(store.current_root(name))
+            ]
+            if missing:
+                raise InputUnavailableError(f"{dataset}: missing input {', '.join(missing)}")
             yield outcome
-            revision = _publish_derived_revision(cfg, dataset, run_id, shanghai_today(), before)
+            revision = _publish_derived_revision(
+                cfg,
+                dataset,
+                run_id,
+                shanghai_today(),
+                before,
+                input_revisions=inputs,
+                coverage_status="partial"
+                if outcome["status"] in {"warning", "degraded"}
+                else "unknown",
+            )
+            if revision:
+                if revision["coverage_status"] == "partial":
+                    outcome["status"] = "degraded"
+                _record_dataset_result(
+                    cfg,
+                    run_id,
+                    dataset,
+                    "publish_revision",
+                    "success",
+                    criticality="research",
+                    revision_id=revision["revision_id"],
+                    rows_written=outcome["rows_written"],
+                    coverage_status=revision["coverage_status"],
+                    publication_status=revision["publication_status"],
+                )
             _record_dataset_result(
                 cfg,
                 run_id,
@@ -144,7 +241,36 @@ def _published_derive(cfg, dataset: str):
                 rows_written=outcome["rows_written"],
             )
             manifest.finish_run(run_id, outcome["status"], rows_written=outcome["rows_written"])
+            row = manifest.get_run(run_id)
+            outcome.update(
+                {
+                    key: row[key]
+                    for key in (
+                        "status",
+                        "execution_status",
+                        "coverage_status",
+                        "publication_status",
+                        "result_schema_version",
+                    )
+                }
+            )
+            from cnequity.orchestrator.recovery import fallback_options
+
+            outcome.update(run_id=run_id, fallback=fallback_options(cfg, manifest, run_id))
     except Exception as exc:
+        axes = step_outcome("failed", error=exc)
+        fields = axes.to_dict()
+        fields.pop("result_schema_version")
+        manifest.record_dataset_result(
+            run_id,
+            dataset,
+            "derive",
+            "skipped" if axes.execution_status == "skipped" else "failed",
+            criticality="research",
+            error_code=type(exc).__name__,
+            error_message=str(exc),
+            **fields,
+        )
         manifest.finish_run(run_id, "failed", error_message=str(exc))
         raise
 
@@ -221,7 +347,7 @@ def derive(
                 f"警告：{len(result.failed)} 个 标的×类型 抓取失败（{result.fail_ratio:.1%}）",
                 err=True,
             )
-            raise SystemExit(1)
+            click.echo(json.dumps(outcome, indent=2, default=str, ensure_ascii=False))
     elif name == "adj_factor_source":
         from cnequity.derive.factor_arbitration import (
             arbitrate_factor_sources,
@@ -570,34 +696,48 @@ def _scan_curated_datasets(cfg) -> list[dict]:
 @click.option("--by-source", is_flag=True, help="改为按 source / data_version 分组。")
 @click.option("--json", "as_json", is_flag=True, help="输出机器可读的 JSON。")
 def stats_show(config_path: str, dataset: str | None, by_source: bool, as_json: bool):
-    """汇总统计表；如果还没有统计表，就直接扫 curated。
+    """汇总统计表；统计表过期时先自动重算。
 
     \b
-    这条读的表由 `cne stats rebuild` 生成。没有它们时，命令退回到现场数 curated 的 Parquet：
-    更慢，也更薄 —— 没有字节总量、没有来源构成、没有逐分区明细 ——
-    但它能在一个从没建过任何东西的克隆上回答「这个湖里有什么」。
-    这个退路就是从前的 `cne catalog`，`--json` 是它的输出。
+    统计表落后于最新一次采集时，先按 `cne stats rebuild --if-stale` 的规则重算再显示；
+    `--dataset` / `--by-source` 需要的统计表还没生成时，也会先生成。
+    其余情况下，从没建过统计表的湖退回到现场数 curated 的 Parquet：更薄 ——
+    没有字节总量、没有来源构成、没有逐分区明细 —— 但不用先建任何东西就能回答
+    「这个湖里有什么」。这个退路就是从前的 `cne catalog`，`--json` 是它的输出。
     """
     dataset = dataset.lower() if dataset else None
     from cnequity.storage.stats import (
         load_partition_stats,
         load_provenance_stats,
         load_summary,
+        refresh_stats_if_stale,
         stats_freshness,
     )
 
     cfg = _cfg(config_path)
     summary = load_summary(cfg)
+    # Refresh instead of telling the reader to: a stale table, or a missing one
+    # a detail view needs. A lake with no tables and a plain view keeps the
+    # cheap scan below, whose --json shape scripts already read.
+    if (summary is not None and stats_freshness(cfg).stale) or (
+        summary is None and (dataset or by_source)
+    ):
+        click.echo(
+            f"统计表{'过期' if summary is not None else '尚未生成'}，正在重算（耗时取决于湖的大小）…",
+            err=True,
+        )
+        refresh_stats_if_stale(cfg)
+        summary = load_summary(cfg)
     if summary is None:
         if dataset or by_source:
             raise click.ClickException(
-                "还没有统计表 —— `--dataset` / `--by-source` 需要先跑 `cne stats rebuild`"
+                "另一个统计重算正在进行 —— `--dataset` / `--by-source` 需要的统计表还没生成，稍后再试"
             )
         entries = _scan_curated_datasets(cfg)
         if as_json:
             click.echo(json.dumps(entries, indent=2))
             return
-        click.echo("没有统计表 —— 已直接扫 curated；其余内容请先跑 `cne stats rebuild`")
+        click.echo("没有统计表 —— 已直接扫 curated；加 --dataset 或 --by-source 会自动生成统计表")
         click.echo(
             pl.DataFrame(
                 entries, schema={"dataset": pl.String, "files": pl.Int64, "rows": pl.Int64}
@@ -627,10 +767,9 @@ def stats_show(config_path: str, dataset: str | None, by_source: bool, as_json: 
             pl.col("period_end").max(),
         )
 
+    # Still stale only when another rebuild held the lock just now.
     stale_note = (
-        f"  STALE — {freshness.reason}; run `cne stats rebuild --if-stale`"
-        if freshness.stale
-        else ""
+        f"  STALE — {freshness.reason}; another rebuild is in progress" if freshness.stale else ""
     )
     click.echo(
         f"生成于：{summary.get('generated_at')}  run：{summary.get('latest_run_id')}{stale_note}"

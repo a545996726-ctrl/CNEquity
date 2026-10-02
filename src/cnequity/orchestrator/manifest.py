@@ -5,13 +5,30 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from cnequity.orchestrator.outcomes import step_outcome
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _encode_run_metadata(metadata: dict[str, Any]) -> str:
+    """Encode metadata without changing the caller's runtime values.
+
+    Dates are ISO 8601 strings on disk; datetime offsets are preserved.
+    Other values must already be JSON-compatible, including nested values.
+    """
+
+    def encode_date(value: object) -> str:
+        if isinstance(value, date):  # datetime is also a date subclass.
+            return value.isoformat()
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    return json.dumps(metadata, default=encode_date)
 
 
 # How long an unlocked `running` row is given before it is treated as a corpse.
@@ -121,6 +138,12 @@ class DatasetResult:
     rows_written: int = 0
     error_code: str | None = None
     error_message: str | None = None
+    execution_status: str | None = None
+    coverage_status: str = "unknown"
+    publication_status: str = "none"
+    reason_code: str | None = None
+    result_schema_version: int = 2
+    usable_result: bool = False
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -223,6 +246,19 @@ class Manifest:
                 conn.execute(
                     "ALTER TABLE ingestion_batches ADD COLUMN request_retry_count INTEGER DEFAULT 0"
                 )
+            if "execution_status" not in cols:
+                conn.execute("ALTER TABLE ingestion_batches ADD COLUMN execution_status TEXT")
+            if "reason_code" not in cols:
+                conn.execute("ALTER TABLE ingestion_batches ADD COLUMN reason_code TEXT")
+            run_cols = {row[1] for row in conn.execute("PRAGMA table_info(ingestion_runs)")}
+            for name, definition in (
+                ("execution_status", "TEXT"),
+                ("coverage_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("publication_status", "TEXT NOT NULL DEFAULT 'none'"),
+                ("result_schema_version", "INTEGER NOT NULL DEFAULT 1"),
+            ):
+                if name not in run_cols:
+                    conn.execute(f"ALTER TABLE ingestion_runs ADD COLUMN {name} {definition}")
 
             # ``dataset_results`` was added after the original two-table
             # manifest.  Keep the migration deliberately additive: operators
@@ -241,6 +277,12 @@ class Manifest:
                 ("rows_written", "INTEGER DEFAULT 0"),
                 ("error_code", "TEXT"),
                 ("error_message", "TEXT"),
+                ("execution_status", "TEXT"),
+                ("coverage_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("publication_status", "TEXT NOT NULL DEFAULT 'none'"),
+                ("reason_code", "TEXT"),
+                ("result_schema_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("usable_result", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if name not in result_cols:
                     conn.execute(f"ALTER TABLE dataset_results ADD COLUMN {name} {definition}")
@@ -299,10 +341,12 @@ class Manifest:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO ingestion_runs (run_id, job_name, status, started_at, metadata_json)
-                VALUES (?, ?, 'running', ?, ?)
+                INSERT INTO ingestion_runs (
+                    run_id, job_name, status, started_at, metadata_json,
+                    execution_status, result_schema_version
+                ) VALUES (?, ?, 'running', ?, ?, 'running', 2)
                 """,
-                (run_id, job_name, _utcnow(), json.dumps(metadata or {})),
+                (run_id, job_name, _utcnow(), _encode_run_metadata(metadata or {})),
             )
         return run_id
 
@@ -317,10 +361,10 @@ class Manifest:
         # A caller may still pass the legacy ``warning`` spelling or may
         # finalize a run without first asking for its aggregate.  Once logical
         # receipts exist, make the persisted run status obey the same
-        # core/research policy as ``aggregate_run_status``.  Runs from before
+        # execution/coverage policy as ``aggregate_run_status``. Runs from before
         # this table was introduced retain their original status.
+        aggregate = self.aggregate_run_status(run_id)
         if status in {"success", "warning", "degraded", "failed"}:
-            aggregate = self.aggregate_run_status(run_id)
             if aggregate["results"]:
                 if aggregate["status"] == "failed" or status == "failed":
                     status = "failed"
@@ -332,10 +376,21 @@ class Manifest:
             conn.execute(
                 """
                 UPDATE ingestion_runs
-                SET status = ?, finished_at = ?, rows_read = ?, rows_written = ?, error_message = ?
+                SET status = ?, finished_at = ?, rows_read = ?, rows_written = ?, error_message = ?,
+                    execution_status = ?, coverage_status = ?, publication_status = ?
                 WHERE run_id = ?
                 """,
-                (status, _utcnow(), rows_read, rows_written, error_message, run_id),
+                (
+                    status,
+                    _utcnow(),
+                    rows_read,
+                    rows_written,
+                    error_message,
+                    "failed" if status == "failed" else aggregate["execution_status"],
+                    aggregate["coverage_status"],
+                    aggregate["publication_status"],
+                    run_id,
+                ),
             )
 
     def queue_batches(
@@ -407,12 +462,13 @@ class Manifest:
                 INSERT INTO ingestion_batches (
                     run_id, batch_id, task_id, dataset, status, symbols_json,
                     window_start, window_end, started_at, heartbeat_at, retry_count,
-                    request_retry_count, blocks_compaction
-                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, 0, 0, ?)
+                    request_retry_count, blocks_compaction, execution_status
+                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, 0, 0, ?, 'running')
                 ON CONFLICT(run_id, batch_id) DO UPDATE SET
                     task_id = excluded.task_id,
                     dataset = excluded.dataset,
                     status = 'running',
+                    execution_status = 'running',
                     symbols_json = excluded.symbols_json,
                     window_start = excluded.window_start,
                     window_end = excluded.window_end,
@@ -421,6 +477,7 @@ class Manifest:
                     started_at = excluded.started_at,
                     finished_at = NULL,
                     error_message = NULL,
+                    reason_code = NULL,
                     heartbeat_at = excluded.heartbeat_at,
                     blocks_compaction = excluded.blocks_compaction
                 WHERE ingestion_batches.status <> 'success'
@@ -485,6 +542,8 @@ class Manifest:
         error_message: str | None = None,
         retry_count: int | None = None,
         request_retry_count: int | None = None,
+        execution_status: str | None = None,
+        reason_code: str | None = None,
     ) -> None:
         if request_retry_count is not None:
             try:
@@ -503,6 +562,8 @@ class Manifest:
                         WHEN ? IS NULL THEN request_retry_count
                         ELSE MAX(COALESCE(request_retry_count, 0), ?)
                     END,
+                    execution_status = ?,
+                    reason_code = ?,
                     blocks_compaction = CASE
                         WHEN ? IN ('warning', 'failed', 'stale') THEN 1
                         ELSE blocks_compaction
@@ -518,6 +579,8 @@ class Manifest:
                     retry_count,
                     request_retry_count,
                     request_retry_count,
+                    execution_status or step_outcome(status).execution_status,
+                    reason_code,
                     status,
                     run_id,
                     batch_id,
@@ -540,7 +603,7 @@ class Manifest:
             batches = conn.execute(
                 f"""
                 UPDATE ingestion_batches
-                SET status = 'failed', finished_at = ?, error_message = ?,
+                SET status = 'failed', execution_status = 'interrupted', finished_at = ?, error_message = ?,
                     blocks_compaction = 1
                 WHERE run_id = ? AND status IN {_sql_tuple(ACTIVE_BATCH_STATUSES)}
                 """,
@@ -549,7 +612,7 @@ class Manifest:
             conn.execute(
                 """
                 UPDATE ingestion_runs
-                SET status = 'failed', finished_at = ?, error_message = ?
+                SET status = 'failed', execution_status = 'interrupted', finished_at = ?, error_message = ?
                 WHERE run_id = ? AND status = 'running'
                 """,
                 (now, error_message, run_id),
@@ -1119,28 +1182,48 @@ class Manifest:
         rows_written: int = 0,
         error_code: str | None = None,
         error_message: str | None = None,
+        execution_status: str | None = None,
+        coverage_status: str | None = None,
+        publication_status: str | None = None,
+        reason_code: str | None = None,
+        usable_result: bool | None = None,
     ) -> None:
-        """Upsert the public result for one dataset/stage.
-
-        ``dataset_results`` is intentionally independent of batch retries.
-        A retry updates the same logical receipt, while the detailed failed
-        attempt remains in ``ingestion_batches``.  Updating then inserting
-        (instead of relying only on ``ON CONFLICT``) also works with manifests
-        created by an early migration that had no primary key declaration.
-        """
+        """Upsert a versioned result, preserving detailed retry attempts."""
         if stage not in DATASET_RESULT_STAGES:
             raise ValueError(f"invalid dataset result stage: {stage!r}")
         if status not in DATASET_RESULT_STATUSES:
             raise ValueError(f"invalid dataset result status: {status!r}")
         if criticality not in DATASET_RESULT_CRITICALITIES:
             raise ValueError(f"invalid dataset result criticality: {criticality!r}")
-        try:
-            rows = int(rows_written)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("rows_written must be an integer") from exc
+        rows = int(rows_written)
         if rows < 0:
             raise ValueError("rows_written must be non-negative")
-
+        supplied = {
+            k: v
+            for k, v in {
+                "execution_status": execution_status,
+                "coverage_status": coverage_status,
+                "publication_status": publication_status,
+                "reason_code": reason_code,
+                "revision_id": revision_id,
+            }.items()
+            if v is not None
+        }
+        outcome = step_outcome(status, supplied, stage=stage)
+        columns = (
+            "status",
+            "criticality",
+            "revision_id",
+            "rows_written",
+            "error_code",
+            "error_message",
+            "execution_status",
+            "coverage_status",
+            "publication_status",
+            "reason_code",
+            "result_schema_version",
+            "usable_result",
+        )
         values = (
             status,
             criticality,
@@ -1148,54 +1231,27 @@ class Manifest:
             rows,
             error_code,
             error_message,
-            run_id,
-            dataset,
-            stage,
+            outcome.execution_status,
+            outcome.coverage_status,
+            outcome.publication_status,
+            outcome.reason_code,
+            outcome.result_schema_version,
+            int(rows > 0 if usable_result is None else usable_result),
         )
+        key = (run_id, dataset, stage)
+        assignments = ", ".join(f"{name} = ?" for name in columns)
         with self._connect() as conn:
-            cur = conn.execute(
-                """
-                UPDATE dataset_results
-                SET status = ?, criticality = ?, revision_id = ?, rows_written = ?,
-                    error_code = ?, error_message = ?
-                WHERE run_id = ? AND dataset = ? AND stage = ?
-                """,
-                values,
+            changed = conn.execute(
+                f"UPDATE dataset_results SET {assignments} "
+                "WHERE run_id = ? AND dataset = ? AND stage = ?",
+                (*values, *key),
             )
-            if cur.rowcount:
-                return
-            try:
+            if not changed.rowcount:
+                names = ", ".join((*columns, "run_id", "dataset", "stage"))
+                placeholders = ", ".join("?" for _ in (*values, *key))
                 conn.execute(
-                    """
-                    INSERT INTO dataset_results (
-                        run_id, dataset, stage, status, criticality, revision_id,
-                        rows_written, error_code, error_message
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        run_id,
-                        dataset,
-                        stage,
-                        status,
-                        criticality,
-                        revision_id,
-                        rows,
-                        error_code,
-                        error_message,
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                # Another worker may have inserted the same logical receipt
-                # between UPDATE and INSERT.  Finish with a deterministic
-                # update rather than leaking a transient UNIQUE failure.
-                conn.execute(
-                    """
-                    UPDATE dataset_results
-                    SET status = ?, criticality = ?, revision_id = ?, rows_written = ?,
-                        error_code = ?, error_message = ?
-                    WHERE run_id = ? AND dataset = ? AND stage = ?
-                    """,
-                    values,
+                    f"INSERT INTO dataset_results ({names}) VALUES ({placeholders})",
+                    (*values, *key),
                 )
 
     # Synonyms make the small API convenient for callers that describe this as
@@ -1223,9 +1279,7 @@ class Manifest:
         with self._connect() as conn:
             return conn.execute(
                 f"""
-                SELECT run_id, dataset, stage, status, criticality, revision_id,
-                       rows_written, error_code, error_message
-                FROM dataset_results
+                SELECT * FROM dataset_results
                 WHERE {where}
                 ORDER BY dataset, stage
                 """,
@@ -1242,37 +1296,81 @@ class Manifest:
     def aggregate_run_status(self, run_id: str) -> dict[str, Any]:
         """Aggregate logical dataset receipts into success/degraded/failed.
 
-        A core failure (including a blocked core gate) is a failed run.  A
-        research/advisory failure, or any warning/degraded result, leaves the
-        run usable but degraded.  Explicitly skipped optional stages do not
-        affect the aggregate.
+        Execution/integrity failures apply to every group. Source-limited
+        attempts finish degraded even when no new facts could be obtained.
+        Usability and coverage remain separate, truthful result fields.
         """
         rows = self.get_dataset_results(run_id)
         core_failures: list[dict[str, Any]] = []
         degraded_results: list[dict[str, Any]] = []
+        source_failures: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
         for row in rows:
             status = str(row["status"])
             counts[status] = counts.get(status, 0) + 1
-            if status == "skipped":
+            if status == "skipped" and row["reason_code"] != "input_unavailable":
                 continue
             item = dict(row)
             criticality = str(row["criticality"] or "core")
-            if criticality == "core" and status in {"failed", "blocked"}:
-                core_failures.append(item)
-            elif status in {"warning", "degraded", "failed", "blocked"}:
+            if (
+                row["result_schema_version"] >= 2
+                and row["execution_status"] == "completed"
+                and status == "failed"
+            ):
+                source_failures.append(item)
                 degraded_results.append(item)
+            elif (
+                row["result_schema_version"] >= 2
+                and row["execution_status"] in {"failed", "interrupted"}
+            ) or (criticality == "core" and status in {"failed", "blocked"}):
+                core_failures.append(item)
+            elif (
+                status in {"warning", "degraded", "failed", "blocked"}
+                or row["reason_code"] == "input_unavailable"
+            ):
+                degraded_results.append(item)
+        usable = any(
+            row["status"] in {"success", "warning", "degraded"}
+            and row["stage"] not in {"audit", "compact"}
+            and (row["usable_result"] or row["rows_written"] > 0)
+            for row in rows
+        )
         if core_failures:
             status = "failed"
         elif degraded_results:
             status = "degraded"
         else:
             status = "success"
+        coverage = {row["coverage_status"] for row in rows} - {"not_applicable"}
+        publications = {
+            row["publication_status"] for row in rows if row["stage"] == "publish_revision"
+        }
         return {
             "status": status,
+            "result_schema_version": 2,
+            "execution_status": "failed" if status == "failed" else "completed",
+            "coverage_status": "partial"
+            if "partial" in coverage
+            else "unknown"
+            if "unknown" in coverage
+            else "complete"
+            if coverage
+            else "not_applicable",
+            "publication_status": "partial"
+            if "partial" in publications
+            or ("published" in publications and "rejected" in publications)
+            else "published"
+            if "published" in publications
+            else "rejected"
+            if "rejected" in publications
+            else "unchanged"
+            if "unchanged" in publications
+            else "none",
+            "usable_result": usable,
             "counts": counts,
             "core_failures": core_failures,
             "degraded_results": degraded_results,
+            "source_failures": source_failures,
             "results": [dict(row) for row in rows],
         }
 
@@ -1324,6 +1422,11 @@ class Manifest:
             if not phases:
                 continue
             batches = self.get_batches_for_run(run["run_id"])
+            outcomes = meta.get("step_outcomes", {})
+            batches = list(batches) + [
+                {"dataset": name, "logical_step": True, **outcome}
+                for name, outcome in outcomes.items()
+            ]
             if init_run_complete(phases, batches):
                 continue
             if discharged_by_later_runs:
@@ -1379,6 +1482,16 @@ class Manifest:
         )
         return {
             "run": run_payload,
+            "result_schema_version": run_payload.get("result_schema_version", 1)
+            if run_payload
+            else 1,
+            "execution_status": run_payload.get("execution_status") if run_payload else None,
+            "coverage_status": run_payload.get("coverage_status", "unknown")
+            if run_payload
+            else "unknown",
+            "publication_status": run_payload.get("publication_status", "none")
+            if run_payload
+            else "none",
             "run_id": run_payload.get("run_id") if run_payload else run_id,
             "job_name": run_payload.get("job_name") if run_payload else None,
             "status": run_payload.get("status") if run_payload else None,
@@ -1390,10 +1503,11 @@ class Manifest:
         }
 
     def update_run_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
+        """Replace metadata, encoding dates as ISO strings only on disk."""
         with self._connect() as conn:
             conn.execute(
                 "UPDATE ingestion_runs SET metadata_json = ? WHERE run_id = ?",
-                (json.dumps(metadata), run_id),
+                (_encode_run_metadata(metadata), run_id),
             )
 
     def _mutate_run_metadata(
@@ -1429,7 +1543,7 @@ class Manifest:
             if row:
                 conn.execute(
                     "UPDATE ingestion_runs SET metadata_json = ? WHERE run_id = ?",
-                    (json.dumps(metadata), run_id),
+                    (_encode_run_metadata(metadata), run_id),
                 )
             return metadata
 
@@ -1444,6 +1558,9 @@ class Manifest:
         place or return a replacement mapping.  Use this for callers that
         would otherwise call ``get_run_metadata`` followed by
         ``update_run_metadata``.
+
+        Returns the in-memory mutation result. Newly added date objects are
+        retained there; reading persisted metadata returns ISO strings.
         """
         return self._mutate_run_metadata(
             run_id,
@@ -1475,6 +1592,7 @@ class Manifest:
         self._mutate_run_metadata(run_id, _record)
 
     def get_run_metadata(self, run_id: str) -> dict[str, Any]:
+        """Read JSON metadata; persisted dates remain ISO strings."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT metadata_json FROM ingestion_runs WHERE run_id = ?", (run_id,)

@@ -287,6 +287,8 @@ def test_a_derive_target_resolves_whatever_its_case(tmp_path, monkeypatch):
     """`cne derive` lower-cases its target before the registry lookup."""
     from cnequity.cli import maintain_cmds
 
+    monkeypatch.setattr("cnequity.query.parquet_scan.dataset_has_parquet", lambda *a, **kw: True)
+
     seen: list[str] = []
     monkeypatch.setattr(
         maintain_cmds,

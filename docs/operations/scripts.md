@@ -2,7 +2,7 @@
 
 路径：`scripts/`
 
-这些脚本需要源码 checkout，不随 PyPI 包安装。仅用安装包时，直接调度 `cne run daily --all-groups` 和 `cne run events`；仓库日更以 `daily_pipeline.sh` 为主入口。
+这些脚本需要源码 checkout，不随 PyPI 包安装。仅用安装包时，每天调度一次 `cne run daily`（含全部日更组与事件流）；仓库日更以 `daily_pipeline.sh` 为主入口。
 
 > 以下脚本面向 **自托管本机/VPS**（含 macOS launchd 与服务器回填）。开源贡献者只需
 > CLI（`cne init` / `run`）即可；调度与告警按需选用，并非唯一部署方式。
@@ -91,7 +91,7 @@ macOS 不带 `flock`，而 Python 那把 run lock 的作用域只有一次 `cne`
 ```bash
 # 平日
 cne audit                 # 只看本次 run 的活跃分区
-cne status --datasets --groups "$CNE_GROUPS"
+cne status --datasets --gate --groups "$CNE_GROUPS"
 # 每周一次（默认周六）
 cne audit --full          # 整湖结构扫描 + 刷新 health-latest.json
 ```
@@ -104,7 +104,7 @@ cne audit --full          # 整湖结构扫描 + 刷新 health-latest.json
 **环境变量**：`CNE_FULL_AUDIT_DOW`（默认 `6` = 周六，`1-7` 对应周一到周日；
 `0` 完全关闭整湖审计；`always` 恢复每天都跑的旧行为）。
 
-**为什么新鲜度门禁要按组收窄**：`CNE_GROUPS` 会原样传给 `cne status --datasets --groups`，
+**为什么新鲜度门禁要按组收窄**：`CNE_GROUPS` 会原样传给 `cne status --datasets --gate --groups`，
 也就是这台主机真正在跑的那些组。不收窄的话，只调度 `core` 的主机上有二十多个数据集
 **没有任何任务去抓**，会持续显示 STALE，掩盖真正的异常。
 门禁与调度共用同一个变量，两者就不会各说各话。无人调度的数据集仍然判失败：
@@ -151,8 +151,7 @@ group），和 `daily_pipeline.sh` 是同一类东西，所以放在这里而不
 历史初始化与续跑直接使用公开 CLI：
 
 ```bash
-cne init --profile full --since 2016-01-01
-cne init --resume --run-id <你的运行ID>
+cne init --profile full --since 2016-01-01   # 中断后重跑同一条命令即续跑
 ```
 
 源能力诊断先用 `cne sources probe --list` 选最小探测；回填前先看

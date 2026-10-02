@@ -11,6 +11,7 @@ from cnequity.adapters.baostock.corporate_actions import fetch_corporate_actions
 from cnequity.domain.action_evidence import clear_invalid_payment_evidence, valid_payment_expr
 from cnequity.domain.schemas import data_version_for, with_provenance
 from cnequity.domain.symbols import is_etf_symbol, parse_symbol
+from cnequity.orchestrator.source_gaps import record_source_gap
 from cnequity.query.reader import load
 from cnequity.steps.common import write_simple
 from cnequity.steps.http_common import verify_raw_archive, write_fetched
@@ -295,7 +296,10 @@ def repair_payment_dates(config, trade_date: date, run_id: str, context: dict):
     )
     if failed:
         # Avoid falsely acknowledging complete publication when a source query failed.
-        raise RuntimeError(f"payment date fetch failed for {len(failed)} symbols; see {report}")
+        record_source_gap(
+            "corporate_actions",
+            f"payment date fetch unavailable for {len(failed)} symbols; see {report}",
+        )
     result = {
         "rows_read": fetched.height
         + len(reviewed_keys)

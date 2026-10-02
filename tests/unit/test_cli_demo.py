@@ -492,6 +492,7 @@ def _minute_frame(symbols: list[str], day: date, bars: int = 240) -> pl.DataFram
 def test_cne_demo_intraday_offline(tmp_path, monkeypatch):
     """`cne init --profile demo --intraday` adds a 7th step and prints a real session."""
     symbols = ["600519.SH", "000001.SZ"]
+    monkeypatch.setattr("cnequity.orchestrator.engine.shanghai_today", lambda: date(2024, 6, 28))
     monkeypatch.setattr("cnequity.cli.demo._probe_tdx", lambda cfg: None)
     monkeypatch.setattr(
         "cnequity.adapters.tdx_protocol.client.fetch_instruments",
@@ -632,8 +633,164 @@ def test_run_intraday_demo_raises_when_no_rows_come_back(tmp_path, monkeypatch):
         _run_intraday_demo(cfg, SucceedingEngine(), ["600519.SH"], date(2024, 6, 28), days=5)
 
 
+def test_run_intraday_demo_retains_lake_when_source_cannot_serve_history(tmp_path, monkeypatch):
+    from cnequity.cli.demo import _run_intraday_demo
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "lake")
+
+    class LimitedEngine:
+        def run_job(self, *a, **k):
+            return {
+                "status": "degraded",
+                "execution_status": "completed",
+                "fallback": [{"reason_codes": ["capability_limit"]}],
+            }
+
+    monkeypatch.setattr("cnequity.query.reader.load", lambda *a, **k: pl.DataFrame())
+    result = _run_intraday_demo(cfg, LimitedEngine(), ["600519.SH"], date(2024, 6, 28), days=5)
+    assert result["execution_status"] == "completed"
+    assert result["rows"] == 0
+    assert result["fallback"] == [{"reason_codes": ["capability_limit"]}]
+
+
+def test_research_demo_keeps_bars_when_no_factor_source_is_available(monkeypatch):
+    from types import SimpleNamespace
+
+    from cnequity.cli.demo import _run_research_demo
+
+    monkeypatch.setattr(
+        "cnequity.derive.adj_factors.compute_adj_factors",
+        lambda *a, **k: SimpleNamespace(
+            failed=["600519.SH:hfq"],
+            findings=[{"severity": "error", "check": "adj_factor_fetch_failed"}],
+        ),
+    )
+    result = _run_research_demo(None, ["600519.SH"], date(2024, 6, 27), date(2024, 6, 28))
+    assert result["execution_status"] == "completed"
+    assert result["rows"] == 0
+    assert "未复权日线" in result["fallback"]
+
+
+def test_research_demo_does_not_hide_factor_integrity_errors(monkeypatch):
+    from types import SimpleNamespace
+
+    from cnequity.cli.demo import _run_research_demo
+
+    monkeypatch.setattr(
+        "cnequity.derive.adj_factors.compute_adj_factors",
+        lambda *a, **k: SimpleNamespace(
+            failed=[], findings=[{"severity": "error", "check": "adj_factor_continuity"}]
+        ),
+    )
+    with pytest.raises(click.ClickException, match="因子校验失败"):
+        _run_research_demo(None, ["600519.SH"], date(2024, 6, 27), date(2024, 6, 28))
+
+
+@pytest.mark.parametrize("missing", ["bars", "factors"])
+def test_research_demo_uses_a_later_symbol_with_exact_inputs(monkeypatch, missing):
+    from types import SimpleNamespace
+
+    from cnequity.cli.demo import _run_research_demo
+    from cnequity.query.reader import MissingAdjustmentError
+
+    monkeypatch.setattr(
+        "cnequity.derive.adj_factors.compute_adj_factors",
+        lambda *a, **k: SimpleNamespace(
+            failed=[],
+            findings=[
+                {
+                    "severity": "warning",
+                    "check": "adj_factor_source_unavailable",
+                    "symbol": "600519.SH",
+                }
+            ],
+        ),
+    )
+    raw = pl.DataFrame({"trade_date": [date(2024, 6, 28)], "close": [10.0]})
+    adjusted = raw.with_columns(pl.lit(20.0).alias("adj_close"), pl.lit(True).alias("adj_is_exact"))
+
+    def load(dataset, **kwargs):
+        if kwargs["symbols"] == ["600519.SH"]:
+            if missing == "bars":
+                return pl.DataFrame()
+            if kwargs.get("adjust"):
+                raise MissingAdjustmentError("missing factors for first symbol")
+        return adjusted if kwargs.get("adjust") else raw
+
+    monkeypatch.setattr("cnequity.query.reader.load", load)
+    result = _run_research_demo(
+        None, ["600519.SH", "000001.SZ"], date(2024, 6, 27), date(2024, 6, 28)
+    )
+    assert result["symbol"] == "000001.SZ"
+    assert result["exact"] is True
+
+
+def test_research_demo_finishes_when_derived_factors_do_not_cover_requested_bars(monkeypatch):
+    from types import SimpleNamespace
+
+    from cnequity.cli.demo import _run_research_demo
+    from cnequity.query.reader import MissingAdjustmentError
+
+    monkeypatch.setattr(
+        "cnequity.derive.adj_factors.compute_adj_factors",
+        lambda *a, **k: SimpleNamespace(failed=[], findings=[]),
+    )
+
+    def load(dataset, **kwargs):
+        if kwargs.get("adjust"):
+            raise MissingAdjustmentError("missing factors for requested dates")
+        return pl.DataFrame({"trade_date": [date(2024, 6, 28)], "close": [10.0]})
+
+    monkeypatch.setattr("cnequity.query.reader.load", load)
+    result = _run_research_demo(None, ["600519.SH"], date(2024, 6, 27), date(2024, 6, 28))
+    assert result["execution_status"] == "completed"
+    assert result["status"] == "degraded"
+    assert "未复权日线" in result["fallback"]
+
+
+def test_research_demo_does_not_hide_other_reader_errors(monkeypatch):
+    from types import SimpleNamespace
+
+    from cnequity.cli.demo import _run_research_demo
+    from cnequity.query.reader import ReaderError
+
+    monkeypatch.setattr(
+        "cnequity.derive.adj_factors.compute_adj_factors",
+        lambda *a, **k: SimpleNamespace(failed=[], findings=[]),
+    )
+
+    def load(dataset, **kwargs):
+        raise ReaderError("invalid adjustment dataset")
+
+    monkeypatch.setattr("cnequity.query.reader.load", load)
+    with pytest.raises(ReaderError, match="invalid adjustment dataset"):
+        _run_research_demo(None, ["600519.SH"], date(2024, 6, 27), date(2024, 6, 28))
+
+
+def test_run_intraday_demo_displays_an_available_symbol_from_partial_scope(tmp_path, monkeypatch):
+    from cnequity.cli.demo import _run_intraday_demo
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path / "lake")
+
+    class LimitedEngine:
+        def run_job(self, *a, **k):
+            return {"status": "degraded", "execution_status": "completed"}
+
+    monkeypatch.setattr(
+        "cnequity.query.reader.load",
+        lambda *a, **k: _minute_frame(["000001.SZ"], date(2024, 6, 28)),
+    )
+    result = _run_intraday_demo(
+        cfg, LimitedEngine(), ["600519.SH", "000001.SZ"], date(2024, 6, 28), days=5
+    )
+    assert result["rows"] == 240
+    assert result["full_sessions"] == 1
+
+
 def test_the_demo_window_stops_before_a_forming_bar(tmp_path, monkeypatch):
-    """`cne init --profile demo` is the first command in the README.
+    """`cne init --profile demo` is the quickest real-data trial.
 
     Run during a session it asked for today's bar, hit the finality guard, and
     died reporting a TDX connectivity problem that did not exist.

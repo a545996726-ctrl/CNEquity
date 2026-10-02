@@ -31,7 +31,15 @@ def _fake_row(d: date) -> dict:
 
 
 def _fake_rows(d: date, count: int = 50) -> pl.DataFrame:
-    return pl.DataFrame([{**_fake_row(d), "symbol": f"{600000 + i:06d}.SH"} for i in range(count)])
+    return pl.DataFrame(
+        [
+            {
+                **_fake_row(d),
+                "symbol": f"{600000 + i:06d}.SH" if i % 2 == 0 else f"{i:06d}.SZ",
+            }
+            for i in range(count)
+        ]
+    )
 
 
 def _setup(monkeypatch, cfg: Config, *, empty_days: set[date] = frozenset()):
@@ -71,6 +79,21 @@ def test_walks_range_and_stages_rows(tmp_path, monkeypatch):
     assert set(df["source"]) == {"eastmoney"}
 
 
+def test_default_worker_budget_survives_persisted_scope(tmp_path, monkeypatch):
+    from cnequity.orchestrator.backfill_scope import capture_backfill_scope, restore_backfill_scope
+
+    cfg = Config(data_root=tmp_path / "data", margin_trading_source="eastmoney")
+    cfg._backfill_start = cfg._backfill_end = date(2026, 6, 1)
+    fresh = Config(data_root=cfg.data_root)
+    restore_backfill_scope(fresh, capture_backfill_scope(cfg))
+    fetched = _setup(monkeypatch, fresh)
+
+    out = _backfill_margin_trading(fresh, date(2026, 6, 1), "retry-default-workers")
+
+    assert fetched == [date(2026, 6, 1)]
+    assert out["rows_written"] == 50
+
+
 def test_skips_dates_already_curated(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path / "data")
     cfg._backfill_start = date(2026, 6, 1)
@@ -79,9 +102,7 @@ def test_skips_dates_already_curated(tmp_path, monkeypatch):
 
     curated = cfg.curated_root / "margin_trading" / "trade_date=2026-06-02"
     curated.mkdir(parents=True)
-    pl.DataFrame(
-        [{**_fake_row(date(2026, 6, 2)), "symbol": f"{i:06d}.SH"} for i in range(50)]
-    ).write_parquet(curated / "part-0.parquet")
+    _fake_rows(date(2026, 6, 2)).write_parquet(curated / "part-0.parquet")
 
     out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-1")
 
@@ -90,7 +111,10 @@ def test_skips_dates_already_curated(tmp_path, monkeypatch):
     assert out["days_skipped"] == 1
 
 
-def test_partial_existing_day_is_not_considered_complete(tmp_path, monkeypatch):
+@pytest.mark.parametrize("count", [1, 60])
+def test_partial_existing_day_is_not_considered_complete(tmp_path, monkeypatch, count):
+    from cnequity.storage.state import StateStore
+
     cfg = Config(data_root=tmp_path / "data")
     cfg._backfill_start = date(2026, 6, 1)
     cfg._backfill_end = date(2026, 6, 2)
@@ -98,7 +122,11 @@ def test_partial_existing_day_is_not_considered_complete(tmp_path, monkeypatch):
 
     curated = cfg.curated_root / "margin_trading" / "trade_date=2026-06-02"
     curated.mkdir(parents=True)
-    pl.DataFrame([_fake_row(date(2026, 6, 2))]).write_parquet(curated / "partial.parquet")
+    _fake_rows(date(2026, 6, 2), count=count).write_parquet(curated / "partial.parquet")
+    if count >= 50:
+        StateStore(cfg.meta_root).record_missing_dates(
+            "margin_trading", [date(2026, 6, 2)], reason="source_scope_incomplete"
+        )
 
     out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-1")
 
@@ -125,7 +153,7 @@ def test_empty_days_reported_not_fatal(tmp_path, monkeypatch):
     assert finding["sample_dates"] == ["2026-06-01"]
 
 
-def test_partial_response_is_not_staged_and_is_retryable(tmp_path, monkeypatch):
+def test_partial_response_is_staged_and_still_retryable(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path / "data")
     cfg._backfill_start = date(2026, 6, 1)
     cfg._backfill_end = date(2026, 6, 1)
@@ -137,14 +165,17 @@ def test_partial_response_is_not_staged_and_is_retryable(tmp_path, monkeypatch):
     monkeypatch.setattr("cnequity.adapters.eastmoney.em_auth.EastMoneyClient", _DummyClient)
     monkeypatch.setattr(cfg, "rate_limit", lambda source: None)
 
-    out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-partial")
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    with source_gap_scope(cfg):
+        out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-partial")
 
     assert out["status"] == "warning"
     assert out["days_fetched"] == 0
     assert out["failed_days"] == 1
-    assert out["rows_written"] == 0
+    assert out["rows_written"] == 1
     assert not out.get("batch_settled")
-    assert not list(cfg.staging_root.glob("margin_trading/**/*.parquet"))
+    assert list(cfg.staging_root.glob("margin_trading/**/*.parquet"))
     finding = out["context_updates"]["audit_findings"][0]
     assert finding["check"] == "backfill_incomplete_days"
     assert finding["days"] == [{"trade_date": "2026-06-01", "symbols": 1}]
@@ -164,10 +195,13 @@ def test_empty_day_does_not_settle_a_batch_with_an_incomplete_day(tmp_path, monk
         return _fake_rows(d)
 
     monkeypatch.setattr("cnequity.steps.capital.fetch_margin_trading", fetch)
-    out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-mixed")
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    with source_gap_scope(cfg):
+        out = _backfill_margin_trading(cfg, date(2026, 7, 1), "run-mixed")
     assert out["days_empty"] == 1
     assert out["failed_days"] == 1
-    assert out["rows_written"] == 50
+    assert out["rows_written"] == 51
     assert out["status"] == "warning"
     assert not out.get("batch_settled")
 

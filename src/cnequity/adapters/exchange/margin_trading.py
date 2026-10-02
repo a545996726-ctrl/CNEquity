@@ -40,6 +40,8 @@ import polars as pl
 from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, is_all_a_symbol, is_etf_symbol
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
+from cnequity.orchestrator.source_gaps import record_source_gap
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,7 @@ def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
     seen: set[str] = set()
     total: int | None = None
     page_size = SSE_PAGE_SIZE
+    pagination_error: str | None = None
     try:
         for page_no in range(1, 101):
             url = SSE_URL.format(
@@ -165,6 +168,8 @@ def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
             codes = [str(item.get("stockCode") or "").strip() for item in batch]
             if len(set(codes)) != len(codes) or seen.intersection(codes):
                 raise ValueError("duplicate securities / repeated margin page")
+            if total is not None and len(data) + len(batch) > total:
+                raise ValueError("margin page exceeds the published total")
             seen.update(codes)
             data.extend(batch)
             if total is None or len(data) == total:
@@ -175,7 +180,7 @@ def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
             raise ValueError("margin pagination exceeded 100 pages")
     except Exception as exc:
         logger.warning("SSE margin detail unavailable for %s: %s", trade_date, exc)
-        return _EMPTY_MARGIN.clone()
+        pagination_error = str(exc)
 
     rows: list[dict] = []
     for item in data:
@@ -198,7 +203,21 @@ def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
         )
     if not rows and data:
         logger.warning("SSE margin detail returned no usable rows; format may have changed")
-    return _finish(rows)
+    frame = _finish(rows)
+    if pagination_error and not frame.is_empty():
+        try:
+            record_source_gap(
+                "margin_trading",
+                f"SSE margin pagination incomplete for {trade_date}: {pagination_error}; "
+                "validated preceding pages retained",
+                frame=frame,
+                dates=[trade_date],
+            )
+        except SourceUnavailableError:
+            # A strict caller has no command collector to distinguish these
+            # independently usable rows from a complete publisher snapshot.
+            return _EMPTY_MARGIN.clone()
+    return frame
 
 
 def fetch_szse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
@@ -267,7 +286,9 @@ def fetch_exchange_margin_trading(trade_date: date, *, config=None) -> ExchangeM
     ):
         try:
             fetched = fetch(trade_date, config=config)
-        except Exception as exc:  # noqa: BLE001 — record status for the caller
+        except (SourceUnavailableError, SourcePayloadError) as exc:
+            # Provider adapters handle their wire failures. Local storage or
+            # computation failures must still reach the command as failures.
             failures[exchange] = str(exc)
             logger.warning("%s margin detail unavailable for %s: %s", exchange, trade_date, exc)
             continue

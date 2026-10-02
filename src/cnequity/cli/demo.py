@@ -8,6 +8,7 @@ by a 5-symbol instruments file.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -19,6 +20,7 @@ from pathlib import Path
 import click
 import polars as pl
 
+from cnequity.cli._shared import _run_status_exit_code
 from cnequity.config import Config, WaveConfig
 from cnequity.domain.market_time import shanghai_today
 from cnequity.domain.schemas import validate_dataframe, with_provenance
@@ -305,7 +307,7 @@ def _run_research_demo(
 ) -> dict[str, object]:
     """Derive a small exact hfq series and show why query-time adjustment matters."""
     from cnequity.derive.adj_factors import compute_adj_factors
-    from cnequity.query.reader import load
+    from cnequity.query.reader import MissingAdjustmentError, load
 
     click.echo("正在用 Sina 为 demo 标的派生 hfq 复权因子…")
     result = compute_adj_factors(
@@ -325,12 +327,11 @@ def _run_research_demo(
             f"警告：Sina 没有返回这些的复权因子：{', '.join(sorted(result.failed))}",
             err=True,
         )
-    if not usable:
-        raise click.ClickException(
-            f"Sina 没有为任何一只 demo 标的返回复权因子：{', '.join(result.failed)}。"
-            "去掉 --research 跑 `cne init --profile demo`，可以只验证 TDX。"
-        )
-    errors = [finding for finding in result.findings if finding.get("severity") == "error"]
+    errors = [
+        finding
+        for finding in result.findings
+        if finding.get("severity") == "error" and finding.get("check") != "adj_factor_fetch_failed"
+    ]
     if errors:
         raise click.ClickException(
             "Sina 复权因子校验失败："
@@ -345,30 +346,47 @@ def _run_research_demo(
         err=True,
     )
 
-    sample_symbol = usable[0]
-    raw = load(
-        "daily_bars",
-        start=start,
-        end=end,
-        symbols=[sample_symbol],
-        config=cfg,
-    )
-    adjusted = load(
-        "daily_bars",
-        start=start,
-        end=end,
-        symbols=[sample_symbol],
-        adjust="hfq",
-        strict_adj=True,
-        config=cfg,
-    )
-    summary = _return_summary(raw, adjusted)
-    click.echo(
-        f"{sample_symbol}：未复权收益 {summary['raw_return']:+.2%} → "
-        f"hfq 复权收益 {summary['adjusted_return']:+.2%}"
-        f"（{summary['rows']} 行精确因子，{summary['start']}..{summary['end']}）"
-    )
-    return {"symbol": sample_symbol, **summary}
+    for sample_symbol in usable:
+        raw = load(
+            "daily_bars",
+            start=start,
+            end=end,
+            symbols=[sample_symbol],
+            config=cfg,
+        )
+        if raw.is_empty():
+            continue
+        try:
+            adjusted = load(
+                "daily_bars",
+                start=start,
+                end=end,
+                symbols=[sample_symbol],
+                adjust="hfq",
+                strict_adj=True,
+                config=cfg,
+            )
+        except MissingAdjustmentError:
+            continue
+        if adjusted.is_empty():
+            continue
+        summary = _return_summary(raw, adjusted)
+        click.echo(
+            f"{sample_symbol}：未复权收益 {summary['raw_return']:+.2%} → "
+            f"hfq 复权收益 {summary['adjusted_return']:+.2%}"
+            f"（{summary['rows']} 行精确因子，{summary['start']}..{summary['end']}）"
+        )
+        return {"symbol": sample_symbol, **summary}
+
+    click.echo("当前窗口没有可用的精确复权样例；研究样例已跳过，已获取的日线继续可读。")
+    return {
+        "status": "degraded",
+        "execution_status": "completed",
+        "coverage_status": "partial",
+        "reason_code": "source_unavailable",
+        "rows": 0,
+        "fallback": "先使用已验证的未复权日线；来源恢复后运行 cne derive adj_factors。",
+    }
 
 
 def _intraday_hint(summary: dict | None, cfg: Config, symbol: str) -> str:
@@ -409,13 +427,17 @@ def _run_intraday_demo(cfg: Config, engine, symbols: list[str], end: date, days:
         waves=[WaveConfig(name="intraday", parallel=False, steps=["minute_bars", "compact"])],
         backfill=True,
     )
-    if result.get("status") not in ("success", "warning"):
+    if _run_status_exit_code(result.get("status")):
         raise click.ClickException(f"minute_bars 失败：{result}")
 
     from cnequity.query.reader import load
 
     bars = load("minute_bars", symbols=symbols, config=cfg)
     if bars.is_empty():
+        if result.get("status") in {"warning", "degraded"}:
+            click.echo("分钟线来源受限；已保留 demo 湖中可用的数据。")
+            click.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return {**result, "rows": 0, "symbol_days": 0, "full_sessions": 0}
         raise click.ClickException("minute_bars 在 demo 窗口内没有返回任何行")
 
     expected = bars_per_session("1m")
@@ -429,11 +451,14 @@ def _run_intraday_demo(cfg: Config, engine, symbols: list[str], end: date, days:
         f"{bars.height} 根 1 分钟线，覆盖 {per_day.height} 个 标的×交易日；"
         f"其中 {full}/{per_day.height} 是完整的 {expected} 根/日"
     )
-    one = bars.filter(pl.col("symbol") == symbols[0]).sort("bar_time")
+    sample_symbol = symbols[0]
+    if sample_symbol not in set(bars.get_column("symbol")):
+        sample_symbol = bars.get_column("symbol")[0]
+    one = bars.filter(pl.col("symbol") == sample_symbol).sort("bar_time")
     session = one.filter(pl.col("trade_date") == one["trade_date"].max())
     with pl.Config(tbl_rows=6, tbl_cols=-1, fmt_str_lengths=24):
         click.echo(
-            f"\n{symbols[0]} —— {session['trade_date'][0]} 的头尾几根 K 线"
+            f"\n{sample_symbol} —— {session['trade_date'][0]} 的头尾几根 K 线"
             "（bar_time 是这一分钟的**收盘**时刻）：\n"
         )
         cols = ["symbol", "bar_time", "open", "high", "low", "close", "volume"]
@@ -666,7 +691,7 @@ def run_demo(
         waves=[WaveConfig(name="calendar", parallel=False, steps=["trading_calendar", "compact"])],
         backfill=True,
     )
-    if cal.get("status") not in ("success", "warning"):
+    if _run_status_exit_code(cal.get("status")):
         raise click.ClickException(f"trading_calendar 失败：{cal}")
     end = _last_trading_day(cfg, as_of)
     window_days = max(days, RESEARCH_MIN_DAYS) if research else days
@@ -694,7 +719,7 @@ def run_demo(
         waves=[WaveConfig(name="bars", parallel=False, steps=["daily_bars", "compact"])],
         backfill=True,
     )
-    if bars.get("status") not in ("success", "warning"):
+    if _run_status_exit_code(bars.get("status")):
         # Name the step's own reason rather than guessing one. This blamed TDX
         # connectivity for every failure, sending people to debug a network
         # that was fine.
@@ -717,12 +742,16 @@ def run_demo(
     except Exception as exc:
         raise click.ClickException(f"demo 写完之后查询失败：{exc}") from exc
     if sample.is_empty():
-        raise click.ClickException(
-            f"{sample_symbol} 在 {start.isoformat()}..{end.isoformat()} 内没有任何 daily_bars 行。"
-            "这个 step 报的是成功，所以这是源端窗口为空、而不是失败："
-            f"用 `cne status --run {bars.get('run_id')} --config {config_out}` "
-            "看这次 run 自己的 findings。"
-        )
+        if bars.get("status") in {"warning", "degraded"}:
+            click.echo("日线来源受限；样例标的没有可读行，已保留其他可用数据。")
+            click.echo(json.dumps(bars, ensure_ascii=False, indent=2, default=str))
+        else:
+            raise click.ClickException(
+                f"{sample_symbol} 在 {start.isoformat()}..{end.isoformat()} 内没有任何 daily_bars 行。"
+                "这个 step 报的是成功，所以这是源端窗口为空、而不是失败："
+                f"用 `cne status --run {bars.get('run_id')} --config {config_out}` "
+                "看这次 run 自己的 findings。"
+            )
     with pl.Config(tbl_rows=10, tbl_cols=-1, fmt_str_lengths=24):
         click.echo(f"\n{sample_symbol} —— 最近几行：\n")
         click.echo(
@@ -747,7 +776,13 @@ def run_demo(
     research_summary = None
     if research:
         _banner(f"7/{steps}", "研究口径：未复权 vs hfq 收益")
-        research_summary = _run_research_demo(cfg, kept, start, end)
+        from cnequity.query.parquet_scan import dataset_has_parquet
+        from cnequity.storage.read_context import read_root
+
+        if dataset_has_parquet(read_root(cfg, "daily_bars")):
+            research_summary = _run_research_demo(cfg, kept, start, end)
+        else:
+            click.echo("缺少日线输入；研究样例已跳过，数据湖与取数 fallback 已保留。")
 
     intraday_summary = None
     if intraday:
@@ -773,8 +808,7 @@ Python：
   from cnequity.query import load
   bars = load("daily_bars", symbols=["{sample_symbol}"], data_root="{cfg.data_root}")
 {_intraday_hint(intraday_summary, cfg, sample_symbol)}
-全市场回填（数小时到数天）是另一回事：先 `cne config create`，再
-`cne init --profile quick`。
+全市场初始化（数小时到数天）是另一回事：直接运行 `cne init`。
 不要把这个 demo 的 data_root 拿去跑生产。
 """
     )

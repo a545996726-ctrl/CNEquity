@@ -583,7 +583,7 @@ def test_compute_adj_factors_parallel_tracks_success_by_future_symbol(adj_config
 
     def fake_fetch(symbol, adjust_type, client=None):
         if symbol == "600519.SH":
-            raise RuntimeError("sina temporarily unavailable")
+            raise ConnectionError("sina temporarily unavailable")
         return pl.DataFrame({"trade_date": [date(2024, 6, 28)], "factor": [0.8]})
 
     monkeypatch.setattr(
@@ -828,7 +828,7 @@ def test_resolve_factors_raises_without_cache(adj_config, monkeypatch):
     from cnequity.derive.adj_factors import AdjFactorsFetchError, _resolve_factors
 
     def boom(*_a, **_kw):
-        raise RuntimeError("sina down")
+        raise ConnectionError("sina down")
 
     monkeypatch.setattr(
         "cnequity.derive.adj_factors.fetch_adj_factor_series",
@@ -851,7 +851,7 @@ def test_compute_adj_factors_fails_over_threshold(adj_config, monkeypatch):
     from cnequity.steps.finalize import step_derive_adj_factors
 
     def boom(*_a, **_kw):
-        raise RuntimeError("sina down")
+        raise ConnectionError("sina down")
 
     monkeypatch.setattr(
         "cnequity.derive.adj_factors.fetch_adj_factor_series",
@@ -874,7 +874,7 @@ def test_failed_symbol_is_retried_after_global_watermark_advances(adj_config, mo
 
     def flaky_fetch(symbol, adjust_type, client=None):
         if symbol == "600519.SH":
-            raise RuntimeError("sina temporarily unavailable")
+            raise ConnectionError("sina temporarily unavailable")
         return pl.DataFrame({"trade_date": [date(2024, 6, 28)], "factor": [0.8]})
 
     monkeypatch.setattr(

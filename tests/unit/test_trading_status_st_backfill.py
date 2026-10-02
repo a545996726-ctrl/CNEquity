@@ -134,15 +134,16 @@ def test_backfill_skips_provider_unsupported_bj_symbols(tmp_path, monkeypatch):
     assert result["unsupported_exchanges"] == ["BJ"]
 
 
-def test_explicit_bj_st_scope_fails_with_provider_capability_message(tmp_path):
+def test_explicit_bj_st_scope_finishes_with_provider_capability_gap(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     _write_instruments(cfg, ["920001.BJ"])
     cfg._backfill_symbols = ["920001.BJ"]
 
-    import pytest
-
-    with pytest.raises(ValueError, match="cannot query BJ symbols"):
-        _backfill_trading_status_st(cfg, date(2026, 7, 1), "run1")
+    result = _backfill_trading_status_st(cfg, date(2026, 7, 1), "run1")
+    assert result["status"] == "warning"
+    assert result["reason_code"] == "capability_limit"
+    assert result["unsupported_exchanges"] == ["BJ"]
+    assert result["rows_written"] == 0
 
 
 def test_new_run_rechecks_positive_rows_that_never_reached_storage(tmp_path, monkeypatch):
@@ -293,7 +294,7 @@ def test_receipt_is_published_only_after_successful_compact(tmp_path, monkeypatc
     assert st_evidence_coverage_report(cfg, date(2016, 1, 1), date(2026, 7, 1))["verified"] is True
 
 
-def test_partial_st_rows_do_not_compact_or_publish_coverage(tmp_path, monkeypatch):
+def test_partial_st_rows_publish_without_full_coverage_receipt(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path / "data")
     _write_instruments(cfg, ["600000.SH", "600001.SH"])
     monkeypatch.setattr(
@@ -322,6 +323,37 @@ def test_partial_st_rows_do_not_compact_or_publish_coverage(tmp_path, monkeypatc
 
     compact = engine.run_step("compact", date(2026, 7, 1), result["run_id"])
 
-    assert compact["rows_written"] == 0
-    assert "coverage_receipts" not in compact
+    assert compact["rows_written"] == 1
+    assert compact["publication_status"] == "none"  # physical receipts carry publication
+    published = engine.manifest.get_dataset_result(
+        result["run_id"], "trading_status", "publish_revision"
+    )
+    assert published["publication_status"] == "partial"
+    assert not compact.get("coverage_receipts")
     assert st_evidence_coverage_report(cfg, date(2016, 1, 1), date(2026, 7, 1))["verified"] is False
+
+
+def test_reused_published_st_evidence_is_a_usable_zero_row_result(tmp_path, monkeypatch):
+    cfg = Config(data_root=tmp_path / "data")
+    cfg._backfill_start = cfg._backfill_end = date(2020, 5, 6)
+    _write_instruments(cfg, ["600000.SH"])
+    calls = []
+
+    def fetch(*args, **kwargs):
+        calls.append(args)
+        return pl.DataFrame([_st_row("600000.SH", cfg._backfill_start)]), []
+
+    monkeypatch.setattr("cnequity.adapters.baostock.st_history.fetch_st_history", fetch)
+    first = JobEngine(cfg).run_job(
+        "backfill", date(2020, 5, 6), steps=["trading_status", "compact"], backfill=True
+    )
+    assert first["usable_result"] is True
+    again = JobEngine(cfg).run_job(
+        "backfill", date(2020, 5, 6), steps=["trading_status", "compact"], backfill=True
+    )
+
+    assert len(calls) == 1
+    assert again["rows_written"] == 0
+    assert again["status"] == "success"
+    assert again["execution_status"] == "completed"
+    assert again["usable_result"] is True

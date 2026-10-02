@@ -21,6 +21,7 @@ from cnequity.adapters.tdx_protocol.client import (
 from cnequity.adapters.tdx_protocol.minute_bars import pages_for_window
 from cnequity.config import Config
 from cnequity.domain.datasets import get_dataset, intraday_datasets
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.query.intraday_scope import MinuteBarsScopeError as MinuteBarsScopeError
 from cnequity.steps.common import incremental_window, instrument_metadata, load_symbols
@@ -52,7 +53,7 @@ def _validate_minute_batch(
     required = ("symbol", "trade_date", "frequency")
     missing = [column for column in required if column not in df.columns]
     if missing:
-        raise RuntimeError(f"{frequency}: minute response is missing {missing}")
+        raise SourcePayloadError(f"{frequency}: minute response is missing {missing}")
     normalized = df.with_columns(
         pl.col("symbol").cast(pl.Utf8, strict=False),
         pl.col("trade_date").cast(pl.Date, strict=False),
@@ -60,10 +61,10 @@ def _validate_minute_batch(
     )
     returned_symbols = normalized.get_column("symbol")
     if returned_symbols.null_count():
-        raise RuntimeError(f"{frequency}: minute response returned a null symbol")
+        raise SourcePayloadError(f"{frequency}: minute response returned a null symbol")
     unexpected = sorted(set(returned_symbols.to_list()) - set(symbols))
     if unexpected:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"{frequency}: minute response returned unexpected symbol(s): "
             + ", ".join(unexpected[:5])
         )
@@ -72,13 +73,13 @@ def _validate_minute_batch(
         dates.is_null() | (dates < start).fill_null(False) | (dates > end).fill_null(False)
     )
     if normalized.filter(invalid_dates).height:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"{frequency}: minute response returned row(s) outside "
             f"requested window {start.isoformat()}..{end.isoformat()}"
         )
     returned_frequencies = set(normalized.get_column("frequency").drop_nulls().to_list())
     if returned_frequencies != {frequency}:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"{frequency}: minute response returned unexpected frequency values "
             f"{sorted(returned_frequencies)}"
         )
@@ -349,7 +350,7 @@ def capture_intraday_bars(
         # the process's cached host indefinitely. Do not retry here or turn
         # empty responses into synthetic suspension evidence.
         reset_tdx_server_cache()
-        raise RuntimeError(
+        raise SourceUnavailableError(
             f"{dataset}: no rows for any of {len(symbols)} symbol(s) over {start}..{end} "
             "— check TDX reachability and that the window is inside the source horizon"
         )

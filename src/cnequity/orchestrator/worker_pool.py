@@ -15,6 +15,7 @@ from cnequity.config import Config, load_config
 from cnequity.domain.canonical import dedupe_by_primary_key
 from cnequity.domain.rate_limit import RateLimitSpec
 from cnequity.orchestrator.manifest import Manifest
+from cnequity.orchestrator.outcomes import SourcePayloadError, error_kind, step_outcome
 from cnequity.progress import hms as _hms
 from cnequity.steps.common import BACKFILL_START
 from cnequity.storage import StagingWriter
@@ -113,6 +114,8 @@ def _require_daily_bar_symbol_coverage(df, symbols: list[str]) -> None:
 class DailyBarCoverageError(RuntimeError):
     """TDX returned a partial symbol batch with an explicit missing scope."""
 
+    reason_code = "source_payload_invalid"
+
     def __init__(self, message: str, *, missing_symbols: list[str]):
         super().__init__(message)
         self.missing_symbols = tuple(missing_symbols)
@@ -133,12 +136,12 @@ def _require_daily_bar_date_coverage(df, start: date, end: date) -> None:
     if df.is_empty():
         return
     if "trade_date" not in df.columns:
-        raise RuntimeError("daily_bars: TDX response is missing the trade_date column")
+        raise SourcePayloadError("daily_bars: TDX response is missing the trade_date column")
     dates = df.get_column("trade_date").cast(pl.Date, strict=False)
     invalid = dates.is_null() | (dates < start).fill_null(False) | (dates > end).fill_null(False)
     count = int(invalid.sum())
     if count:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"daily_bars: TDX returned {count} row(s) outside requested window "
             f"{start.isoformat()}..{end.isoformat()}"
         )
@@ -294,6 +297,8 @@ def _worker_fetch_batch(args: tuple) -> dict[str, Any]:
                 batch_id,
                 "failed",
                 error_message=str(exc),
+                reason_code=error_kind(exc),
+                execution_status=step_outcome("failed", error=exc).execution_status,
                 request_retry_count=request_retries,
             )
         # Tip windows: step-level clist gap-fill. Multi-day: kline snapshot only
@@ -448,6 +453,8 @@ def fetch_daily_bars_parallel(
                 batch_id,
                 "failed",
                 error_message=str(exc),
+                reason_code=error_kind(exc),
+                execution_status=step_outcome("failed", error=exc).execution_status,
                 request_retry_count=prior_request_retries
                 + max(
                     0,
@@ -457,6 +464,18 @@ def fetch_daily_bars_parallel(
             raise
 
     def _outcome(had_error: bool) -> dict[str, Any]:
+        errors = [
+            b
+            for b in manifest.get_failed_batches(run_id)
+            if b["dataset"] == dataset and b["execution_status"] == "failed"
+        ]
+        if errors:
+            from cnequity.orchestrator.outcomes import WorkerExecutionError
+
+            raise WorkerExecutionError(
+                "worker execution failed: " + str(errors[0]["error_message"]),
+                errors[0]["reason_code"] or "execution_error",
+            )
         return {
             "rows_read": total_read,
             "rows_written": total_written,
@@ -620,6 +639,13 @@ def fetch_daily_bars_parallel(
                 failed_scope = _failed_symbols_for_error(exc, batch_symbols)
                 failed_symbols.extend(failed_scope)
                 _progress(batch_symbols, failed_scope)
+                if error_kind(exc) not in {
+                    "source_transient",
+                    "source_unavailable",
+                    "source_payload_invalid",
+                    "capability_limit",
+                }:
+                    raise
         return _outcome(had_error)
 
     def _task_for(batch: tuple) -> tuple:

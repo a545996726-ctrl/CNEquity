@@ -26,7 +26,7 @@ ABSENT_DELIST_CONFIRMATIONS = 2
 
 
 def _symbols_without_bars(curated_root: Path, symbols: list[str]) -> set[str]:
-    """Of *symbols*, those the lake holds no daily bar for.
+    """Of *symbols*, those the lake holds no evidence of actual trading for.
 
     Scoped to the handful of codes absent from one snapshot, so this is a
     targeted read rather than a scan of the bars dataset.
@@ -40,14 +40,13 @@ def _symbols_without_bars(curated_root: Path, symbols: list[str]) -> set[str]:
         # No bars at all (a fresh lake, or a fixture): absence proves nothing
         # either way, so fall back to the caller's existing streak logic.
         return set()
-    seen = (
-        scan_parquet_root(root, partition_col="trade_date", symbols=sorted(symbols))
-        .select("symbol")
-        .unique()
-        .collect()
-        .get_column("symbol")
-        .to_list()
-    )
+    bars = scan_parquet_root(root, partition_col="trade_date", symbols=sorted(symbols))
+    # TDX can publish a fixed-price, zero-volume quote during an IPO's
+    # subscription period. That is not evidence that trading has started.
+    # Retain compatibility with older bar files without a volume column.
+    if "volume" in bars.collect_schema():
+        bars = bars.filter(pl.col("volume") > 0)
+    seen = bars.select("symbol").unique().collect().get_column("symbol").to_list()
     return set(symbols) - set(seen)
 
 
@@ -110,10 +109,14 @@ def compact_instruments(
     trade_date: date,
     changed_files: list[Path] | None = None,
     base_root: Path | None = None,
+    staging_files: list[Path] | None = None,
+    allow_delist_inference: bool = True,
 ) -> tuple[int, list[dict]]:
     """Merge staging instruments into curated, retaining symbols missing from TDX."""
     staging = StagingWriter(staging_root)
-    files = staging.list_run_files("instruments", run_id)
+    files = (
+        staging.list_run_files("instruments", run_id) if staging_files is None else staging_files
+    )
     if not files:
         return 0, []
 
@@ -166,16 +169,18 @@ def compact_instruments(
         absent_count = absent_live.height
         expected_live_count = expected_live.height
         absent_ratio = absent_count / expected_live_count if expected_live_count else 0.0
-        if absent_count and absent_ratio > ABSENT_DELIST_THRESHOLD:
+        if absent_count and (not allow_delist_inference or absent_ratio > ABSENT_DELIST_THRESHOLD):
             findings.append(
                 {
                     "dataset": "instruments",
-                    "severity": "error",
+                    "severity": "error" if allow_delist_inference else "warning",
                     "check": "instruments_delist_suppressed",
                     "message": (
                         f"Refused to infer delist_date: {absent_count}/{expected_live_count} symbols "
                         f"({absent_ratio:.1%}) absent from snapshot (>{ABSENT_DELIST_THRESHOLD:.0%} "
                         "threshold); likely partial fetch"
+                        if allow_delist_inference
+                        else "Partial instrument snapshot; retained absent identities without delist inference"
                     ),
                     "absent_count": absent_count,
                     "existing_count": expected_live_count,
@@ -237,7 +242,7 @@ def compact_instruments(
                         "severity": "info",
                         "check": "instruments_delist_skipped_never_traded",
                         "message": (
-                            f"{skipped_never_traded} absent symbol(s) have no bar in the lake, "
+                            f"{skipped_never_traded} absent symbol(s) have no traded bar in the lake, "
                             "so absence is a pending listing rather than a delisting"
                         ),
                         "symbols": skipped_never_traded,

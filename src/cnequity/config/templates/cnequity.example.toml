@@ -543,13 +543,19 @@ run_at = "21:00"
 # next run); its snapshot datasets (fund_flow, hot_rank, trading_status, …)
 # still run every session, since a missed snapshot day is lost for good.
 # futures_minute_bars also runs every session: its rolling window expires.
+# `core` carries what the [[job.daily.waves]] spine fetches and derives, so the
+# group schedule loses nothing: `trading_status_derive` waits for daily_bars
+# through its declared dependency, and the finalize steps run in their fixed
+# order after compact. `audit` is not here: it reads the whole lake, so
+# `cne run daily` runs it once after every group has landed.
 [job.daily.groups.core]
 at = "16:00"
 parallel = true
 steps = [
   "instruments", "trading_calendar", "trading_status",
-  "corporate_actions", "daily_bars", "index_bars",
+  "corporate_actions", "daily_bars", "trading_status_derive", "index_bars",
   "compact", "derive_adj_factors", "derive_industry_index",
+  "ths_official_snapshot",
 ]
 
 [job.daily.groups.capital]

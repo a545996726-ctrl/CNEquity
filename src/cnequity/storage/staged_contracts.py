@@ -450,8 +450,15 @@ def _quarantine_limit_breaches(
             continue
         if kept.is_empty():
             path.unlink()
+            path.with_suffix(".sealed.json").unlink(missing_ok=True)
         else:
+            from cnequity.storage.parquet import StagingWriter
+
+            sealed = path.with_suffix(".sealed.json").exists()
+            path.with_suffix(".sealed.json").unlink(missing_ok=True)
             write_parquet_atomic(path, kept, compression="zstd")
+            if sealed:
+                StagingWriter(config.staging_root).seal_file(path, "daily_bars", run_id)
     days = sorted({d for d in breaches.get_column("trade_date").to_list()})
     from cnequity.storage.state import StateStore
 

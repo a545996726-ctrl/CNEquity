@@ -67,13 +67,19 @@ _cache_lock = threading.Lock()
 class FuturesDayUnavailable(RuntimeError):
     """The exchange has no file for this session (closed, or not yet published)."""
 
+    reason_code = "source_unavailable"
+
 
 class FuturesSourceBlocked(RuntimeError):
     """The exchange answered with an access challenge instead of data."""
 
+    reason_code = "source_transient"
+
 
 class FuturesPayloadError(RuntimeError):
     """The exchange answered, but not with a file this adapter understands."""
+
+    reason_code = "source_payload_invalid"
 
 
 @dataclass(frozen=True)

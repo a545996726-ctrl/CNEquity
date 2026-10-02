@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cnequity.orchestrator.outcomes import execution_settled
+
 INIT_PHASE_STEPS: dict[str, list[str]] = {
     "phase1_reference": ["instruments", "trading_calendar"],
     "phase2a_corporate_actions": ["corporate_actions"],
@@ -26,8 +28,8 @@ INIT_BACKFILL_PHASES = frozenset(
         "phase1_reference",
         "phase2a_corporate_actions",
         "phase2c_daily_bars_backfill",
-        # index_bars needs the same 2016+ history as daily_bars for market/beta
-        # factors. trading_status ignores backfill (single-day snapshot fetch).
+        # index_bars needs the same history as daily_bars. Init trading_status
+        # explicitly uses its current-snapshot path, including on legacy retry.
         "phase3_index_and_status",
         # Backfill is how the derive is told to reach past its daily tail.
         "phase5_derive_and_publish",
@@ -70,8 +72,10 @@ def step_backfill(step: str, phases: list[str]) -> bool:
         return "phase2c_daily_bars_backfill" in phases
     if step in ("instruments", "trading_calendar"):
         return "phase1_reference" in phases
-    if step in ("index_bars", "trading_status"):
+    if step == "index_bars":
         return "phase3_index_and_status" in phases
+    if step == "trading_status":
+        return False
     if step == "trading_status_derive":
         return "phase5_derive_and_publish" in phases
     return False
@@ -94,6 +98,17 @@ def step_succeeded(batches: list[Any], step: str) -> bool:
     return bool(rows) and all(r["status"] in RESOLVED_BATCH_STATUSES for r in rows)
 
 
+def step_completed(batches: list[Any], step: str) -> bool:
+    """Execution can close with a persisted coverage limitation."""
+    rows = step_batches(batches, step)
+    if any(row["status"] in {"queued", "running", "stale"} for row in rows):
+        return False
+    logical = [row for row in rows if dict(row).get("logical_step")]
+    if logical:
+        return execution_settled(logical[-1])
+    return bool(rows) and all(execution_settled(row) for row in rows)
+
+
 def step_incomplete(batches: list[Any], step: str) -> bool:
     rows = step_batches(batches, step)
     return bool(rows) and any(r["status"] not in RESOLVED_BATCH_STATUSES for r in rows)
@@ -106,8 +121,10 @@ def current_phase_statuses(phases: list[str], batches: list[Any]) -> dict[str, s
         steps = INIT_PHASE_STEPS.get(phase, [])
         if not steps:
             continue
-        if all(step_succeeded(batches, step) for step in steps):
-            out[phase] = "success"
+        if all(step_completed(batches, step) for step in steps):
+            out[phase] = (
+                "success" if all(step_succeeded(batches, step) for step in steps) else "degraded"
+            )
         elif any(step_incomplete(batches, step) for step in steps):
             out[phase] = "incomplete"
         else:
@@ -150,7 +167,7 @@ def missing_steps_within_phase_order(phases: list[str], batches: list[Any]) -> l
             if step not in present and step not in seen:
                 seen.add(step)
                 out.append(step)
-        if not all(step_succeeded(batches, step) for step in steps):
+        if not all(step_completed(batches, step) for step in steps):
             break
     return out
 
@@ -162,7 +179,7 @@ def pending_phases(phases: list[str], batches: list[Any]) -> list[str]:
         steps = INIT_PHASE_STEPS.get(phase, [])
         if not steps:
             continue
-        if all(step_succeeded(batches, step) for step in steps):
+        if all(step_completed(batches, step) for step in steps):
             continue
         out.append(phase)
     return out
@@ -184,7 +201,7 @@ def phases_never_started(phases: list[str], batches: list[Any]) -> list[str]:
 
 
 def init_run_complete(phases: list[str], batches: list[Any]) -> bool:
-    return all(step_succeeded(batches, step) for step in expected_steps(phases))
+    return all(step_completed(batches, step) for step in expected_steps(phases))
 
 
 def needs_finalize(phases: list[str], batches: list[Any]) -> bool:
@@ -195,4 +212,4 @@ def needs_finalize(phases: list[str], batches: list[Any]) -> bool:
         batches,
     ):
         return False
-    return not all(step_succeeded(batches, step) for step in FINALIZE_STEPS)
+    return not all(step_completed(batches, step) for step in FINALIZE_STEPS)

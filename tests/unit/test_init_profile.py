@@ -77,29 +77,22 @@ def test_ingest_scope_labels_do_not_overstate_the_configured_market(universe, la
     assert ingest_scope_label(universe) == label
 
 
-@pytest.mark.parametrize(
-    ("baostock_enabled", "budget", "expected"),
-    [
-        (True, 400, "400 只证券上限"),
-        (True, 200, "200 只证券上限"),
-        (True, 0, "未设置每轮证券数上限"),
-        (False, 400, "[sources.baostock] 未启用"),
-    ],
-)
-def test_init_plan_reports_the_effective_st_budget(capsys, baostock_enabled, budget, expected):
+@pytest.mark.parametrize("resume", [False, True])
+def test_init_plan_explains_optional_st_and_automatic_delisted_recovery(capsys, resume):
     _echo_init_plan(
         "quick",
         since_str=None,
         history_start=date(2023, 8, 2),
         trade_date=date(2026, 8, 2),
-        resume=False,
+        resume=resume,
         config_path="configs/cnequity.toml",
         ingest_universe="all_a",
-        st_history_budget=budget,
-        baostock_enabled=baostock_enabled,
     )
-
-    assert expected in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "窗口内退市日线自动恢复" in output
+    assert "全市场历史 ST 扫描不属于 init" in output
+    assert "cne backfill trading_status" in output
+    assert "400" not in output
 
 
 # --- the CLI wiring --------------------------------------------------------
@@ -126,8 +119,8 @@ def test_quick_profile_reaches_the_engine(tmp_path, monkeypatch):
     assert "2023-08-02" in output
     assert "沪深京全市场" in output
     assert "批次进度和 ETA" in output
-    assert "[sources.baostock] 未启用" in output
-    assert "只有 400 条数据" in output
+    assert "全市场历史 ST 扫描不属于 init" in output
+    assert "窗口内退市日线自动恢复" in output
     assert "cne backfill trading_status" in output
 
 

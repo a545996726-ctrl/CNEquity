@@ -31,45 +31,49 @@ The current development tree registers **52 datasets: 47 curated + 5 derived**, 
 
 Minutes, trade snapshots and futures/options are disabled by default. Check each source's historical horizon and actual coverage after opting in.
 
-## Start with real data
+## Initialize with one command
 
-Requires **Python 3.10+** on macOS, Linux or Windows. The basic demo needs no account or token.
+Requires **Python 3.10+** on macOS, Linux or Windows. No account or token is needed. Run this in the directory where the lake should live:
 
 ```bash
 pip install cnequity
-cne init --profile demo
+cne init
 ```
 
-This fetches **5 stocks over roughly 30 recent trading sessions**, writes a separate `data/cnequity-demo/` lake and creates `configs/cnequity.demo.toml`. Runtime depends on connectivity to TDX quote servers.
+`cne init` does all of the following; you do not need to create a config first:
 
-Read your first result:
+1. **Writes the config.** On the first run it creates `configs/cnequity.toml` and stores data in `data/cnequity/` under the current directory (recorded as an absolute path). An existing config is reused.
+2. **Builds the full-market backbone.** All Shanghai, Shenzhen and Beijing A-shares over the last **3 years**: securities, trading calendar, corporate actions, stock and index daily bars, adjustment factors and industry indices.
+3. **Recovers delisted bars and trading status.** Known delisted stocks in the window get their daily bars back, avoiding survivorship bias; current trading status is fetched and historical suspensions are derived from the bars.
+4. **Audits and publishes** the result to a local Parquet lake with ready-to-query views.
+
+A full-market init can take hours depending on your network and the sources; there is no fixed completion time. Batch progress and an ETA are printed as it runs.
+
+**Interrupted, or the result shows `warning`? Run the same `cne init` again.** It finds the unfinished initialization, keeps successful batches and fetches only what is left. `warning` / `degraded` means data was published but some sources were temporarily short of coverage; the command still exits 0 and records the gaps for the next run or daily update. Only programming, storage or integrity errors fail.
+
+When it finishes, check coverage and gaps, then read the data:
+
+```bash
+cne status --datasets
+```
 
 ```python
 from cnequity.query import load
 
-bars = load("daily_bars", data_root="data/cnequity-demo")
+bars = load("daily_bars", symbols=["600519.SH"])
 print(bars.select("symbol", "trade_date", "close", "volume", "source").tail(10))
 ```
 
-Or inspect it in the local dashboard:
+`cne serve` opens the local read-only dashboard at <http://127.0.0.1:8787>.
 
-```bash
-cne serve --config configs/cnequity.demo.toml
-# Open http://127.0.0.1:8787
-```
+| Need | Command |
+|---|---|
+| Deeper history from the start (daily bars from 2016-01-01) | `cne init --profile full` |
+| A custom history start | `cne init --since 2018-01-01` |
+| Full-market historical ST evidence (optional, per-security and slow) | `cne backfill trading_status` |
+| Earlier history for one dataset | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD` |
 
-<details>
-<summary>No source connectivity? Use an offline sample</summary>
-
-```bash
-cne doctor
-cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
-cne query --config configs/cnequity.sample.toml --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
-```
-
-The sample makes no data-source requests. Every synthetic row carries `source=mock`; use it to verify installation and querying, never for research. Separate paths let the sample and real demo coexist. See [troubleshooting](docs/operations/troubleshooting.md).
-
-</details>
+`init` is not a full-history download of every dataset: minutes, trade snapshots and contract-level futures/options are disabled by default, and snapshot-only feeds accumulate from activation; missing past snapshots cannot be invented. See [initialization and recovery](docs/getting-started/initialization.md) for scope, disk and resume details. If sources are unreachable, run `cne doctor` and see [troubleshooting](docs/operations/troubleshooting.md).
 
 ## Why keep a lake?
 
@@ -110,41 +114,24 @@ If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https:
 
 Adapters and batch orchestration collect data into staging; validated batches become curated or derived data. Quality checks, Python and SQL queries, the dashboard and MCP consume published data. The diagram explains responsibilities; see the [data flow](docs/architecture/data-flow.md) and [catalog](docs/datasets/catalog.md) for current source protocols and enabled datasets.
 
-## Build a lake you can keep updating
-
-Run these in your intended working directory:
+## After init: daily updates
 
 ```bash
-cne config create
-cne config validate
-cne init
-
-# Trading-day data and all enabled daily groups
-cne run daily --all-groups
-
-# Announcements, regulatory events and news, including weekends
-cne run events
-
-cne status --datasets
+cne run daily
 ```
 
-The generated configuration uses a separate production lake by default. `init` builds the full Shanghai/Shenzhen/Beijing initialization backbone over the last **3 years**. It does not download every dataset's entire history, and there is no fixed completion time.
+Schedule this one command every day, weekends included: on trading days it runs every enabled daily group, then updates announcements, regulatory events and news; on other days it runs only the event stream. For scheduled acceptance use `cne status --datasets --gate`, which exits non-zero on gaps or failures.
 
-| Need | Command |
-|---|---|
-| Small real-data trial | `cne init --profile demo` |
-| Recent full-market backbone | `cne init` (the default `quick` profile) |
-| Deeper backbone | `cne init --profile full`; daily bars default to 2016-01-01 onward |
-| Earlier history for one dataset | `cne backfill DATASET --start YYYY-MM-DD --end YYYY-MM-DD --plan`; review, then remove `--plan` |
-| Finish historical ST scanning | `cne backfill trading_status`; market and source limits still apply |
+When you upgrade:
 
-Three defaults matter:
+```bash
+pip install -U cnequity
+cne config upgrade
+```
 
-- Bare `cne run daily` runs only core waves. `--all-groups` covers daily groups, **not `run events`**.
-- The **400-symbol** initialization limit applies to Baostock historical ST scanning, not the daily-bar universe.
-- Minutes, trade snapshots and contract-level futures/options are disabled by default. Snapshot-only feeds accumulate from activation; missing past snapshots cannot be invented.
+`cne config upgrade` adds the schedule steps a new release introduced to your config and keeps a backup of the original.
 
-Continue with [quickstart](docs/getting-started/quickstart.md), [initialization and recovery](docs/getting-started/initialization.md), then the [runbook](docs/operations/runbook.md). Detailed documentation is primarily in Chinese.
+Continue with [initialization and recovery](docs/getting-started/initialization.md), then the [runbook](docs/operations/runbook.md). Detailed documentation is primarily in Chinese.
 
 ## One lake for Python, SQL and AI agents
 

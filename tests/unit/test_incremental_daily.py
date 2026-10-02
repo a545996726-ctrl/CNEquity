@@ -384,19 +384,21 @@ def test_fetch_incremental_daily_rejects_rows_from_a_different_trade_date(tmp_pa
     cfg = Config(data_root=tmp_path / "data")
     _seed_trading_calendar(cfg, date(2024, 6, 28), date(2024, 6, 28))
 
-    with pytest.raises(RuntimeError, match="different or invalid trade_date"):
-        fetch_incremental_daily(
-            cfg,
-            "margin_trading",
-            date(2024, 6, 28),
-            lambda d: pl.DataFrame(
-                {
-                    "trade_date": [date(2024, 6, 27)],
-                    "symbol": ["600519.SH"],
-                    "value": [1.0],
-                }
-            ),
-        )
+    df, findings = fetch_incremental_daily(
+        cfg,
+        "margin_trading",
+        date(2024, 6, 28),
+        lambda d: pl.DataFrame(
+            {
+                "trade_date": [date(2024, 6, 27)],
+                "symbol": ["600519.SH"],
+                "value": [1.0],
+            }
+        ),
+    )
+
+    assert date(2024, 6, 28) not in df["trade_date"].to_list()
+    assert any(f["check"] == "fetch_failed_days" for f in findings)
 
 
 def test_fetch_incremental_daily_validates_explicit_non_trade_date_column(tmp_path):
@@ -642,7 +644,7 @@ def test_one_unreadable_day_no_longer_discards_the_rest_of_the_window(tmp_path):
 
     def _fetch(day: date) -> pl.DataFrame:
         if day == broken:
-            raise RuntimeError("CNINFO announcement pagination failed for szse page 1")
+            raise ConnectionError("CNINFO announcement pagination failed for szse page 1")
         return _announcement_row(day)
 
     df, findings = fetch_incremental_daily(
@@ -663,7 +665,7 @@ def test_a_failed_day_publishes_the_others_and_reports_degraded(tmp_path):
 
     def _fetch(day: date) -> pl.DataFrame:
         if day == date(2024, 6, 26):
-            raise RuntimeError("source refused the day")
+            raise ConnectionError("source refused the day")
         return _announcement_row(day)
 
     result = http_common.run_incremental_fetched(
@@ -697,19 +699,21 @@ def test_a_window_that_fails_entirely_still_fails_loud(tmp_path):
         )
 
 
-def test_a_dataset_without_a_reconciliation_tail_keeps_failing_loud(tmp_path):
-    """Nothing would come back for the hole, so the window stays all-or-nothing."""
+def test_source_gap_without_reconciliation_tail_is_durable(tmp_path):
+    """Every source gap is retained for explicit repair, including session feeds."""
     cfg = Config(data_root=tmp_path / "data")
     _seed_trading_calendar(cfg, date(2024, 6, 24), date(2024, 6, 28))
     StateStore(cfg.meta_root).set_date("margin_trading", date(2024, 6, 25))
 
     def _fetch(day: date) -> pl.DataFrame:
         if day == date(2024, 6, 27):
-            raise RuntimeError("source refused the day")
+            raise ConnectionError("source refused the day")
         return pl.DataFrame({"trade_date": [day], "symbol": ["600519.SH"], "value": [1.0]})
 
-    with pytest.raises(RuntimeError, match="source refused the day"):
-        fetch_incremental_daily(cfg, "margin_trading", date(2024, 6, 28), _fetch)
+    df, findings = fetch_incremental_daily(cfg, "margin_trading", date(2024, 6, 28), _fetch)
+    assert df["trade_date"].to_list() == [date(2024, 6, 26), date(2024, 6, 28)]
+    assert findings
+    assert StateStore(cfg.meta_root).get_payload("margin_trading")["missing_ranges"]
 
 
 def test_failed_incremental_day_keeps_prior_staging_and_retries_only_the_gap(tmp_path):
@@ -790,7 +794,7 @@ def test_a_closed_day_with_no_disclosures_is_not_a_failed_fetch(tmp_path):
     assert findings == []
 
 
-def test_a_session_with_no_disclosures_still_fails_loud(tmp_path):
+def test_empty_session_preserves_other_disclosures_and_gap(tmp_path):
     """The empty-day gate stays where it catches a broken source."""
     cfg = Config(data_root=tmp_path / "data")
     _seed_trading_calendar(cfg, date(2024, 6, 24), date(2024, 6, 28))
@@ -799,10 +803,13 @@ def test_a_session_with_no_disclosures_still_fails_loud(tmp_path):
     def _fetch(day: date) -> pl.DataFrame:
         return pl.DataFrame() if day == date(2024, 6, 27) else _announcement_row(day)
 
-    with pytest.raises(RuntimeError, match="no rows returned for 2024-06-27"):
-        fetch_incremental_daily(
-            cfg, "announcement_index", date(2024, 6, 28), _fetch, date_col="announce_date"
-        )
+    df, findings = fetch_incremental_daily(
+        cfg, "announcement_index", date(2024, 6, 28), _fetch, date_col="announce_date"
+    )
+    assert date(2024, 6, 28) in df["announce_date"].to_list()
+    assert date(2024, 6, 27) not in df["announce_date"].to_list()
+    assert findings
+    assert StateStore(cfg.meta_root).get_payload("announcement_index")["missing_ranges"]
 
 
 def test_a_session_scoped_dataset_never_tolerates_an_empty_day(tmp_path):
@@ -839,3 +846,37 @@ def test_a_live_page_that_comes_back_empty_still_fails_loud(tmp_path):
             lambda day: pl.DataFrame(),
             date_col="publish_date",
         )
+
+
+@pytest.mark.parametrize("snapshot_only", [False, True])
+def test_init_snapshot_does_not_owe_preinitialization_days(tmp_path, snapshot_only):
+    cfg = Config(data_root=tmp_path / "data")
+    on = date(2024, 6, 28)
+    _seed_trading_calendar(cfg, date(2024, 6, 24), on)
+    calls = []
+
+    def fetch(day):
+        calls.append(day)
+        return pl.DataFrame({"symbol": ["600001.SH"], "trade_date": [day]})
+
+    frame, findings = fetch_incremental_daily(
+        cfg, "trading_status", on, fetch, snapshot_only=snapshot_only
+    )
+    assert calls == [on]
+    assert frame.height == 1
+    gaps = [finding for finding in findings if finding["check"] == "coverage_gap"]
+    assert bool(gaps) is not snapshot_only
+
+
+@pytest.mark.parametrize("wrong_date", [False, True])
+def test_init_snapshot_still_rejects_empty_or_misdated_response(tmp_path, wrong_date):
+    cfg = Config(data_root=tmp_path / "data")
+    on = date(2024, 6, 28)
+
+    def fetch(day):
+        if wrong_date:
+            return pl.DataFrame({"symbol": ["600001.SH"], "trade_date": [date(2024, 6, 27)]})
+        return pl.DataFrame()
+
+    with pytest.raises((RuntimeError, ValueError)):
+        fetch_incremental_daily(cfg, "trading_status", on, fetch, snapshot_only=True)

@@ -148,3 +148,32 @@ def test_resolve_config_missing_suggests_config_init(tmp_path, monkeypatch):
     result = runner.invoke(cli, ["config", "validate"])
     assert result.exit_code != 0
     assert "cne config create" in result.output
+
+
+def test_first_init_creates_the_default_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CNE_CONFIG", raising=False)
+    result = CliRunner().invoke(cli, ["init", "--layout-only"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "configs" / "cnequity.toml").is_file()
+    assert "已按默认值生成" in result.output
+
+    again = CliRunner().invoke(cli, ["init", "--layout-only"])
+    assert again.exit_code == 0, again.output
+    assert "已按默认值生成" not in again.output
+
+
+@pytest.mark.parametrize("via_env", [False, True])
+def test_init_never_creates_an_explicitly_named_missing_config(tmp_path, monkeypatch, via_env):
+    monkeypatch.chdir(tmp_path)
+    missing = tmp_path / "typo.toml"
+    args = ["init", "--layout-only"]
+    if via_env:
+        monkeypatch.setenv("CNE_CONFIG", str(missing))
+    else:
+        monkeypatch.delenv("CNE_CONFIG", raising=False)
+        args += ["--config", str(missing)]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code != 0
+    assert not missing.exists()
+    assert not (tmp_path / "configs").exists()

@@ -47,6 +47,7 @@ from cnequity.adapters.futures_exchange.registry import (
 )
 from cnequity.config import Config
 from cnequity.domain.datasets import is_dataset_enabled
+from cnequity.orchestrator.outcomes import SourceUnavailableError, error_kind
 from cnequity.orchestrator.registry import register_step
 from cnequity.steps.common import walk_day_backfill
 from cnequity.steps.http_common import run_incremental_fetched, write_fetched
@@ -167,6 +168,13 @@ def fetch_session(
             failures.append((exchange, f"not published: {exc}"))
             continue
         except Exception as exc:  # noqa: BLE001 — one exchange must not sink the rest
+            if error_kind(exc) not in {
+                "source_transient",
+                "source_unavailable",
+                "source_payload_invalid",
+                "capability_limit",
+            }:
+                raise
             failures.append((exchange, f"{type(exc).__name__}: {exc}"))
             continue
         frame = result.futures if kind == "futures" else result.options
@@ -198,7 +206,7 @@ def fetch_session(
         )
     if not frames:
         if exchanges and raise_when_empty:
-            raise RuntimeError(
+            raise SourceUnavailableError(
                 f"{dataset}: no exchange published {day.isoformat()} "
                 f"({'; '.join(f'{e}: {m}' for e, m in failures)})"
             )
@@ -392,6 +400,13 @@ def _reference(config: Config, bars: pl.LazyFrame, findings: list[dict], dataset
         except Exception as exc:  # noqa: BLE001 — observed dates still stand
             from cnequity.adapters.futures_exchange.common import FuturesSourceBlocked
 
+            if error_kind(exc) not in {
+                "source_transient",
+                "source_unavailable",
+                "source_payload_invalid",
+                "capability_limit",
+            }:
+                raise
             if isinstance(exc, FuturesSourceBlocked):
                 blocked.add(exchange)
             findings.append(
@@ -553,7 +568,7 @@ def step_futures_minute_bars(config: Config, trade_date: date, run_id: str, cont
         )
     if frame.is_empty():
         if failures and len(failures) == len(symbols):
-            raise RuntimeError(f"{dataset}: no contract returned bars ({failures})")
+            raise SourceUnavailableError(f"{dataset}: no contract returned bars ({failures})")
         return _with_findings({"rows_read": 0, "rows_written": 0}, findings)
     frame = _quarantine(frame, dataset, "SINA", trade_date, findings, config)
     result = write_fetched(config, run_id, dataset, frame, source="sina")

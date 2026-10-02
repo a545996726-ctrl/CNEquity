@@ -24,6 +24,7 @@ import polars as pl
 from cnequity.adapters.tdx_protocol.client import fetch_trade_ticks_batch, normalize_with_source
 from cnequity.config import Config
 from cnequity.domain.datasets import get_dataset
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.steps.common import incremental_window
 from cnequity.storage import StagingWriter
@@ -46,23 +47,25 @@ def _validate_tick_batch(
     required = ("symbol", "trade_date")
     missing = [column for column in required if column not in df.columns]
     if missing:
-        raise RuntimeError(f"{DATASET}: tick response is missing {missing}")
+        raise SourcePayloadError(f"{DATASET}: tick response is missing {missing}")
     normalized = df.with_columns(
         pl.col("symbol").cast(pl.Utf8, strict=False),
         pl.col("trade_date").cast(pl.Date, strict=False),
     )
     returned_symbols = normalized.get_column("symbol")
     if returned_symbols.null_count():
-        raise RuntimeError(f"{DATASET}: tick response returned a null symbol")
+        raise SourcePayloadError(f"{DATASET}: tick response returned a null symbol")
     unexpected = sorted(set(returned_symbols.to_list()) - set(symbols))
     if unexpected:
-        raise RuntimeError(
+        raise SourcePayloadError(
             f"{DATASET}: tick response returned unexpected symbol(s): " + ", ".join(unexpected[:5])
         )
     dates = normalized.get_column("trade_date")
     invalid_dates = dates.is_null() | ~dates.is_in(sessions).fill_null(False)
     if normalized.filter(invalid_dates).height:
-        raise RuntimeError(f"{DATASET}: tick response returned row(s) outside requested sessions")
+        raise SourcePayloadError(
+            f"{DATASET}: tick response returned row(s) outside requested sessions"
+        )
     return normalized
 
 
@@ -244,7 +247,7 @@ def capture_trade_ticks(config: Config, trade_date: date, run_id: str) -> dict:
             ]
         }
     if written == 0 and symbols:
-        raise RuntimeError(
+        raise SourceUnavailableError(
             f"{DATASET}: no rows for any of {len(symbols)} symbol(s) over "
             f"{len(sessions)} session(s) — check TDX reachability and that the "
             "window is inside the source's history floor"

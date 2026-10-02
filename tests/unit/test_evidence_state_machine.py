@@ -129,12 +129,12 @@ def test_warning_retry_does_not_supersede_prior_failure(tmp_path, monkeypatch):
 
     result = engine._retry_run_locked(run_id, date(2024, 6, 28), auto_finalize=False)
 
-    assert result["status"] == "failed"
+    assert result["status"] == "degraded"
     assert manifest.get_batch(run_id, "failed-1")["status"] == "failed"
     assert len(manifest.get_retryable_batches(run_id)) == 2
 
 
-def test_init_retry_restores_the_failed_steps_backfill_mode(tmp_path, monkeypatch):
+def test_init_retry_uses_current_status_in_the_historical_index_phase(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path / "data")
     init_data_layout(cfg)
     manifest = Manifest(cfg.manifest_path)
@@ -164,4 +164,4 @@ def test_init_retry_restores_the_failed_steps_backfill_mode(tmp_path, monkeypatc
     result = engine._retry_run_locked(run_id, date(2024, 6, 28), auto_finalize=False)
 
     assert result["status"] == "success"
-    assert observed == [True]
+    assert observed == [False]

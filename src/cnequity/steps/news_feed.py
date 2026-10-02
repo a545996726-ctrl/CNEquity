@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from cnequity.config import Config
+from cnequity.orchestrator.outcomes import SourceUnavailableError
 
 logger = logging.getLogger(__name__)
 CST = ZoneInfo("Asia/Shanghai")
@@ -128,7 +129,7 @@ def _stage_news_locked(config: Config, trade_date: date, run_id: str, dataset: s
     from cnequity.storage import StagingWriter
 
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError(f"{dataset}: eastmoney source disabled in config")
+        raise SourceUnavailableError(f"{dataset}: eastmoney source disabled in config")
     if dataset not in {"news_headlines", "flash_news_wire"}:
         raise ValueError(f"unsupported news dataset {dataset!r}")
     canonical = "news_headlines"
@@ -159,7 +160,9 @@ def _stage_news_locked(config: Config, trade_date: date, run_id: str, dataset: s
         ):
             # A first capture that finds nothing must not look like a clean start
             # (an empty success once left the dataset unregistered in curated).
-            raise RuntimeError(f"{dataset}: no fast news returned and the lake holds none")
+            raise SourceUnavailableError(
+                f"{dataset}: no fast news returned and the lake holds none"
+            )
         return {"rows_read": 0, "rows_written": 0, "pages": len(pages), "dataset": canonical}
     evidence = (
         verify_raw_archive(config, canonical, run_id, source="eastmoney", request_scope=scope)

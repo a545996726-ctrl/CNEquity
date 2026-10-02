@@ -73,7 +73,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(autouse=True)
-def _no_outbound_network(request):
+def _no_outbound_network(request, monkeypatch):
     """Refuse an outbound connection from a test that never declared one.
 
     `-m 'not network'` only skips the tests that *say* they need the network.
@@ -134,6 +134,26 @@ def _no_outbound_network(request):
 
     socket.socket.connect = lambda self, address: _refuse(self, address, _real=connect)
     socket.socket.connect_ex = lambda self, address: _refuse(self, address, _real=connect_ex)
+    # Native libcurl does not call Python's socket.connect. Keep AkShare's
+    # curl_cffi transport inside the same offline boundary as Python clients.
+    try:
+        from curl_cffi.requests import Session
+    except ImportError:
+        pass
+    else:
+        from urllib.parse import urlparse
+
+        real_request = Session.request
+
+        def guarded_request(self, method, url, *args, **kwargs):
+            parsed = urlparse(url)
+            if _is_local((parsed.hostname, parsed.port)):
+                return real_request(self, method, url, *args, **kwargs)
+            raise AssertionError(
+                f"{request.node.nodeid} attempted native outbound HTTP; stub the adapter"
+            )
+
+        monkeypatch.setattr(Session, "request", guarded_request)
     try:
         yield
     finally:

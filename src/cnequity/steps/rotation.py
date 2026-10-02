@@ -13,7 +13,9 @@ from cnequity.adapters.eastmoney.rotation import (
     fetch_sector_fund_flow,
 )
 from cnequity.config import Config
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
+from cnequity.orchestrator.source_gaps import record_source_gap
 from cnequity.steps.http_common import (
     call_with_run_id,
     run_incremental_fetched,
@@ -36,7 +38,7 @@ def _validate_sector_fund_flow_snapshot(df):
     required = {"sector_code", "board_type", "trade_date"}
     missing = sorted(required - set(df.columns))
     if missing:
-        raise RuntimeError(
+        raise SourcePayloadError(
             "sector_fund_flow: response is missing required column(s): " + ", ".join(missing)
         )
     observed = set(df.get_column("board_type").drop_nulls().to_list())
@@ -57,7 +59,11 @@ def _validate_sector_fund_flow_snapshot(df):
             f"{board_type}={count} (minimum {_MIN_SECTOR_FLOW_ROWS_BY_TYPE[board_type]})"
             for board_type, count in sorted(thin_types.items())
         )
-        raise RuntimeError("sector_fund_flow: incomplete daily snapshot; " + "; ".join(details))
+        record_source_gap(
+            "sector_fund_flow",
+            "sector_fund_flow: incomplete daily snapshot; " + "; ".join(details),
+            frame=df,
+        )
     return df
 
 
@@ -72,7 +78,7 @@ def _run_rotation_step(
     date_col: str | None = None,
 ) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError(f"{dataset}: eastmoney source disabled in config")
+        raise SourceUnavailableError(f"{dataset}: eastmoney source disabled in config")
 
     def _bound(d: date):
         return call_with_run_id(
@@ -152,7 +158,7 @@ def step_sector_bars(config: Config, trade_date: date, run_id: str, context: dic
     endpoint = getattr(config, "_backfill_end", None) or trade_date
     _reject_unfinished_daily_bar_window(config, endpoint)
     if not config.sources.get("ths", True):
-        raise RuntimeError("sector_bars: ths source disabled in config")
+        raise SourceUnavailableError("sector_bars: ths source disabled in config")
     if getattr(config, "_backfill", False):
         return _backfill_sector_bars(config, trade_date, run_id)
     return _sweep_sector_bars(

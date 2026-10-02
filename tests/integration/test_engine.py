@@ -37,12 +37,11 @@ def test_daily_job_mock(config):
     engine = JobEngine(config)
     result = engine.run_job("daily", date(2024, 6, 28))
     assert result["run_id"]
-    assert result["status"] in ("success", "failed")
+    assert result["status"] in ("success", "degraded", "failed")
 
 
-def test_daily_job_fails_loudly_without_allow_mock(config, monkeypatch):
-    """With allow_mock off, an unreachable TDX source must fail the batch —
-    never silently fall back to fabricated data."""
+def test_daily_job_source_outage_finishes_without_fabricated_data(config, monkeypatch):
+    """An unreachable TDX source completes with explicit gaps and fallback."""
     from cnequity.adapters.tdx_protocol import client as tdx
 
     def _boom(_config=None):
@@ -55,9 +54,12 @@ def test_daily_job_fails_loudly_without_allow_mock(config, monkeypatch):
     engine = JobEngine(config)
     result = engine.run_job("daily", date(2024, 6, 28))
 
-    assert result["status"] == "failed"
+    assert result["status"] == "degraded"
+    assert result["execution_status"] == "completed"
+    assert result["coverage_status"] == "partial"
+    assert result["fallback"]
     fetch_results = {r["step"]: r for r in result["results"] if r["step"] == "instruments"}
-    assert fetch_results["instruments"]["status"] == "failed"
+    assert fetch_results["instruments"]["status"] == "warning"
     # Nothing fabricated may reach staging.
     staged = list(config.staging_root.glob("instruments/**/*.parquet"))
     assert staged == []

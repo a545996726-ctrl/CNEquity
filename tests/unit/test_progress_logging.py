@@ -66,7 +66,7 @@ def test_a_failed_batch_still_advances_the_counter(caplog, config, monkeypatch):
     from cnequity.orchestrator import worker_pool
 
     def _boom(*a, **k):
-        raise RuntimeError("source down")
+        raise ConnectionError("source down")
 
     monkeypatch.setattr(worker_pool, "fetch_daily_bars", _boom)
     config.workers = 1

@@ -36,7 +36,9 @@ from cnequity.domain.datasets import get_dataset
 from cnequity.domain.schemas import with_provenance
 from cnequity.domain.symbols import filter_ingest_universe
 from cnequity.orchestrator.manifest import Manifest
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
+from cnequity.orchestrator.source_gaps import record_source_gap
 from cnequity.progress import sweep_progress
 from cnequity.quality.ex_events import (
     EX_EVENT_LOOKBACK_SESSIONS,
@@ -492,7 +494,7 @@ def _validate_earnings_schedule_snapshot(df: pl.DataFrame) -> pl.DataFrame:
     required = {"symbol", "report_period"}
     missing = sorted(required - set(df.columns))
     if missing:
-        raise RuntimeError(
+        raise SourcePayloadError(
             "earnings_disclosure_schedule: response is missing required column(s): "
             + ", ".join(missing)
         )
@@ -506,10 +508,14 @@ def _validate_earnings_schedule_snapshot(df: pl.DataFrame) -> pl.DataFrame:
         details = ", ".join(
             f"{row['report_period']}={row['_symbol_count']}" for row in counts.iter_rows(named=True)
         )
-        raise RuntimeError(
-            "earnings_disclosure_schedule: incomplete report-period snapshot; each "
-            f"observed period needs at least {_MIN_EARNINGS_SCHEDULE_SYMBOLS_PER_PERIOD} "
-            f"unique symbol(s) ({details})"
+        record_source_gap(
+            "earnings_disclosure_schedule",
+            (
+                "earnings_disclosure_schedule: incomplete report-period snapshot; each "
+                f"observed period needs at least {_MIN_EARNINGS_SCHEDULE_SYMBOLS_PER_PERIOD} "
+                f"unique symbol(s) ({details})"
+            ),
+            frame=df,
         )
     return df
 
@@ -1165,7 +1171,9 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
         canonical_source = _CANONICAL_BACKFILL
     else:
         if not config.sources.get("eastmoney", True):
-            raise RuntimeError("corporate_actions daily: eastmoney source disabled in config")
+            raise SourceUnavailableError(
+                "corporate_actions daily: eastmoney source disabled in config"
+            )
         df, findings = fetch_incremental_daily(
             config,
             "corporate_actions",
@@ -1241,7 +1249,7 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
         start = getattr(config, "_backfill_start", None) or CORPORATE_ACTIONS_BACKFILL_START
         end = getattr(config, "_backfill_end", None) or trade_date
         if "ex_date" not in df.columns:
-            raise RuntimeError("corporate_actions: backfill response has no ex_date column")
+            raise SourcePayloadError("corporate_actions: backfill response has no ex_date column")
         parsed_dates = df.get_column("ex_date").cast(pl.Date, strict=False)
         invalid = (
             parsed_dates.is_null()
@@ -1249,7 +1257,7 @@ def step_corporate_actions(config: Config, trade_date: date, run_id: str, contex
             | (parsed_dates > end).fill_null(False)
         )
         if int(invalid.sum()):
-            raise RuntimeError(
+            raise SourcePayloadError(
                 "corporate_actions: backfill response returned row(s) outside "
                 f"requested window {start.isoformat()}..{end.isoformat()}"
             )
@@ -1335,7 +1343,9 @@ def step_earnings_disclosure_schedule(
     config: Config, trade_date: date, run_id: str, context: dict
 ) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("earnings_disclosure_schedule: eastmoney source disabled in config")
+        raise SourceUnavailableError(
+            "earnings_disclosure_schedule: eastmoney source disabled in config"
+        )
     # Period-keyed like financial_statement_items (watermark=False): daily runs
     # refresh the open disclosure windows; backfill walks every period 2016+.
     backfill = getattr(config, "_backfill", False)
@@ -1391,7 +1401,7 @@ def step_earnings_disclosure_schedule(
 @register_step("announcement_index", group="capital", depends_on=["instruments"])
 def step_announcement_index(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if not config.sources.get("cninfo", True):
-        raise RuntimeError("announcement_index: cninfo source disabled in config")
+        raise SourceUnavailableError("announcement_index: cninfo source disabled in config")
     if getattr(config, "_backfill", False):
         return _cninfo_range_backfill(
             config,

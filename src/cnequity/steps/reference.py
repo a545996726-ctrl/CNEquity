@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import copy
 from datetime import date, timedelta
 
 import polars as pl
@@ -32,6 +33,13 @@ from cnequity.domain.trading_status import (
     STATUS_SUSPENDED,
 )
 from cnequity.orchestrator.manifest import Manifest
+from cnequity.orchestrator.outcomes import (
+    SOURCE_LIMIT_REASONS,
+    SourcePayloadError,
+    SourceUnavailableError,
+    error_kind,
+    result_is_usable,
+)
 from cnequity.orchestrator.registry import register_step
 from cnequity.quality.failover import snapshot_trading_status_exchange
 from cnequity.quality.st_coverage import (
@@ -84,16 +92,37 @@ def step_instruments(config: Config, trade_date: date, run_id: str, context: dic
     # been discovered and then never fetched.
     df = _merge_bse_instruments(config, df, trade_date)
     df = _merge_untdxable_instruments(config, df)
-    _require_beijing_instrument_scope(config, df, trade_date)
+    findings = []
+    beijing_gap = _require_beijing_instrument_scope(config, df, trade_date)
+    if beijing_gap:
+        findings.append(beijing_gap)
     df = enrich_instrument_list_dates(config, df)
     df = _enrich_etf_list_dates_from_profiles(config, df, trade_date)
     if getattr(config, "_backfill", False):
-        df = _merge_delisted_instruments(config, df)
+        try:
+            df = _merge_delisted_instruments(config, df)
+        except Exception as exc:
+            if error_kind(exc) not in SOURCE_LIMIT_REASONS:
+                raise
+            logger.warning("instruments: historical directory unavailable: %s", exc)
+            findings.append(
+                {
+                    "dataset": "instruments",
+                    "severity": "warning",
+                    "check": "instruments_history_incomplete",
+                    "message": str(exc),
+                }
+            )
     df = _carry_lake_facts(config, df)
     result = write_simple(config, run_id, "instruments", df)
     new = new_instrument_rows(config, df)
     if new:
         result["context_updates"] = {"new_instruments": new}
+    if findings:
+        result.update(
+            status="warning", coverage_status="partial", reason_code="source_scope_incomplete"
+        )
+        result.setdefault("context_updates", {})["audit_findings"] = findings
     return result
 
 
@@ -175,16 +204,17 @@ def _with_new_instruments(symbols: list[str], context: dict) -> list[str]:
 
 def _require_beijing_instrument_scope(
     config: Config, frame: pl.DataFrame, trade_date: date
-) -> None:
-    """Fail a new all-market lake before an absent Beijing leg becomes truth."""
+) -> dict | None:
+    """Keep missing Beijing coverage explicit while allowing partial delivery."""
     if config.ingest_universe not in {"all_a", "all_instruments"} or trade_date < BSE_FIRST_SESSION:
         return
     if not config.sources.get("bse", True):
-        raise RuntimeError(
-            "instruments: [universe].ingest 包含北交所，但 [sources.bse] 已禁用，"
-            "无法发现新上市 BJ 证券。请启用 [sources.bse]，或将 "
-            "[universe].ingest 明确设为 all_a_sh_sz。"
-        )
+        return {
+            "dataset": "instruments",
+            "severity": "warning",
+            "check": "instruments_beijing_coverage",
+            "message": "[sources.bse] 已禁用；保留已取得的目录，北交所新上市身份仍待补。",
+        }
     if "symbol" in frame.columns and frame["symbol"].str.ends_with(".BJ").any():
         return
 
@@ -203,13 +233,19 @@ def _require_beijing_instrument_scope(
                 "instruments: BSE snapshot unavailable; carrying %d existing active BJ row(s)",
                 beijing.height,
             )
-            return
+            return {
+                "dataset": "instruments",
+                "severity": "warning",
+                "check": "instruments_beijing_coverage",
+                "message": "BSE 当前目录不可用；复用已有 BJ 身份，不视作最新完整目录。",
+            }
 
-    raise RuntimeError(
-        "instruments: 配置范围包含北交所，但没有取得任何 active BJ 证券，"
-        "拒绝把沪深子集发布成全市场。检查 BSE 板块接口后重试；"
-        "若只需要沪深，请将 [universe].ingest 设为 all_a_sh_sz。"
-    )
+    return {
+        "dataset": "instruments",
+        "severity": "warning",
+        "check": "instruments_beijing_coverage",
+        "message": "未取得 active BJ 证券；交付已取得的沪深目录，北交所覆盖继续保留为缺口。",
+    }
 
 
 def _carry_lake_facts(config: Config, df: pl.DataFrame) -> pl.DataFrame:
@@ -379,7 +415,7 @@ def _merge_delisted_instruments(config: Config, df: pl.DataFrame) -> pl.DataFram
 
     basics = fetch_instrument_basics(config=config)
     if basics.is_empty():
-        raise RuntimeError(
+        raise SourceUnavailableError(
             "baostock query_stock_basic returned no rows; refusing to write a "
             "survivors-only instrument list under --backfill"
         )
@@ -685,6 +721,11 @@ def _delisted_status_rows(
 
 @register_step("trading_status", group="core", depends_on=["instruments"])
 def step_trading_status(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
+    if context.get("_init"):
+        # Index history shares this phase's backfill flag. Init status is a
+        # current snapshot; explicit backfill retains the historical ST path.
+        config = copy(config)
+        config._backfill = False
     if getattr(config, "_backfill", False):
         return _backfill_trading_status_st(
             config,
@@ -881,9 +922,9 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
                 config=config,
             )
             if frame.is_empty():
-                raise RuntimeError("trading_status: no rows returned")
+                raise SourceUnavailableError("trading_status: no rows returned")
             if "symbol" not in frame.columns:
-                raise RuntimeError("trading_status: response is missing the symbol column")
+                raise SourcePayloadError("trading_status: response is missing the symbol column")
             observed_symbols = set(frame.get_column("symbol").drop_nulls().to_list())
             missing = sorted(expected_symbols - observed_symbols)
             unexpected = sorted(observed_symbols - expected_symbols)
@@ -956,6 +997,7 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
         trade_date,
         _fetch,
         allow_empty=False,
+        snapshot_only=bool(context.get("_init")),
     )
     # Two requests and about three seconds, once per session, whatever the
     # vendor path did. The exchange reading is only reachable today when
@@ -1019,7 +1061,12 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
 DERIVE_TAIL_DAYS = 90
 
 
-@register_step("trading_status_derive", group="core", depends_on=["daily_bars"])
+@register_step(
+    "trading_status_derive",
+    group="core",
+    depends_on=["daily_bars"],
+    input_datasets=("daily_bars", "instruments", "trading_calendar"),
+)
 def step_trading_status_derive(
     config: Config, trade_date: date, run_id: str, context: dict
 ) -> dict:
@@ -1040,6 +1087,7 @@ def step_trading_status_derive(
     the whole bar history is reconstructed in one pass.
     """
     from cnequity.derive.trading_status_history import derive_suspension_history
+    from cnequity.storage.state import StateStore
 
     start = context.get("derive_start")
     end = context.get("derive_end")
@@ -1057,7 +1105,16 @@ def step_trading_status_derive(
         # staging file overwrite the other.
         batch_id=str(context.get("_batch_id") or "derive-0"),
     )
-    return {"rows_read": rows, "rows_written": rows}
+    gaps = StateStore(config.meta_root).get_payload("daily_bars")
+    partial = any(gaps.get(key) for key in ("missing_ranges", "missing_units", "outstanding_keys"))
+    return {
+        "rows_read": rows,
+        "rows_written": rows,
+        "usable_result": True,
+        "coverage_status": "partial" if partial else "unknown",
+        "status": "warning" if partial else "success",
+        "reason_code": "input_coverage_limited" if partial else None,
+    }
 
 
 def _is_all_a(symbol: str) -> bool:
@@ -1069,10 +1126,19 @@ def _is_all_a(symbol: str) -> bool:
 
 
 def _resolve_explicit_st_symbols(config: Config, raw: list[str]) -> list[str]:
-    instruments = set(load_symbols(config))
+    instruments: set[str] | None = None
     resolved: list[str] = []
     for value in raw:
         symbol = str(value).strip().upper()
+        if (
+            "." in symbol
+            and _is_all_a(symbol)
+            and symbol.rsplit(".", 1)[1] in ST_EVIDENCE_UNSUPPORTED_EXCHANGES
+        ):
+            resolved.append(symbol)
+            continue
+        if instruments is None:
+            instruments = set(load_symbols(config))
         if "." in symbol:
             candidates = [symbol] if symbol in instruments else []
         else:
@@ -1143,6 +1209,7 @@ def _backfill_trading_status_st_source(
             "completed_symbols": len(completed),
             "expected_symbols": len(universe),
             "note": "all symbols already have ST evidence for this exact scope",
+            "usable_result": True,
         }
 
     # Bounded per run so a fresh `cne init` is not held for ten hours behind a
@@ -1230,12 +1297,15 @@ def _backfill_trading_status_st_source(
         "completed_symbols": len(completed),
         "expected_symbols": len(universe),
         "source": source,
+        "usable_result": bool(completed) or rows_written > 0,
+        "coverage_status": "complete" if complete else "partial",
     }
     if complete:
         result["coverage_pending_compact"] = True
     else:
         result["status"] = "warning"
         result["failed_symbols"] = len(unresolved)
+        result["reason_code"] = "scope_not_swept" if deferred else "source_unavailable"
         # Deferred and unresolved mean different things and must not be summed:
         # one is a symbol this run did not reach, the other one the source would
         # not answer for. Reporting "N unresolved" for a paused sweep would send
@@ -1270,7 +1340,6 @@ def _backfill_trading_status_st(
 ) -> dict:
     start = getattr(config, "_backfill_start", None) or BACKFILL_START
     end = getattr(config, "_backfill_end", None) or trade_date
-    explicit = getattr(config, "_backfill_symbols", None)
     universe, universe_name = _resolve_st_backfill_universe(config, start, end)
 
     # Baostock has no BJ historical ST series. Do not spend a full retry cycle
@@ -1282,12 +1351,6 @@ def _backfill_trading_status_st(
         start=start,
         end=end,
     )
-    if explicit is not None and unsupported_symbols:
-        preview = ", ".join(unsupported_symbols[:10])
-        suffix = "..." if len(unsupported_symbols) > 10 else ""
-        raise ValueError(
-            f"trading_status ST backfill cannot query BJ symbols with Baostock: {preview}{suffix}"
-        )
     results: list[dict] = []
     for source in ("baostock", "tushare"):
         source_symbols = st_evidence_source_symbols(
@@ -1311,17 +1374,35 @@ def _backfill_trading_status_st(
             )
         )
     if not results:
-        raise RuntimeError("trading_status ST backfill has no configured historical source")
+        if unsupported_symbols:
+            return {
+                "status": "warning",
+                "rows_read": 0,
+                "rows_written": 0,
+                "coverage_status": "partial",
+                "reason_code": "capability_limit",
+                "unsupported_symbols": len(unsupported_symbols),
+                "unsupported_exchanges": sorted(ST_EVIDENCE_UNSUPPORTED_EXCHANGES),
+                "completed_symbols": 0,
+                "expected_symbols": len(universe),
+            }
+        raise SourceUnavailableError(
+            "trading_status ST backfill has no configured historical source"
+        )
     result: dict = {
         "rows_read": sum(int(item.get("rows_read", 0)) for item in results),
         "rows_written": sum(int(item.get("rows_written", 0)) for item in results),
         "completed_symbols": sum(int(item.get("completed_symbols", 0)) for item in results),
         "expected_symbols": sum(int(item.get("expected_symbols", 0)) for item in results),
         "source_results": results,
+        "usable_result": any(result_is_usable(item) for item in results),
     }
     if unsupported_symbols:
         result["unsupported_symbols"] = len(unsupported_symbols)
         result["unsupported_exchanges"] = sorted(ST_EVIDENCE_UNSUPPORTED_EXCHANGES)
+        result["coverage_status"] = "partial"
+        result["reason_code"] = "capability_limit"
+        result["status"] = "warning"
     if any(item.get("status") == "warning" for item in results):
         result["status"] = "warning"
         result["failed_symbols"] = sum(int(item.get("failed_symbols", 0)) for item in results)

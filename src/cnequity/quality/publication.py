@@ -20,6 +20,30 @@ from cnequity.domain.datasets import DATASETS
 from cnequity.storage.atomic import write_json_atomic
 from cnequity.storage.read_context import read_root
 
+# These checks describe absent observations, rather than contradictions in
+# the candidate's facts. They remain audit findings and explicit quality
+# gates may reject them; they do not invalidate independent publishable rows.
+_COVERAGE_CHECKS = frozenset(
+    {
+        "exists",
+        "non_empty",
+        "source_scope_incomplete",
+        "daily_bars_calendar_missing_day",
+        "valuation_bars_no_shared_date",
+        "valuation_bars_low_coverage",
+        "adj_factor_source_unavailable",
+        "adj_factor_coverage",
+        "close_crosscheck_unavailable",
+        "untraded_instruments",
+        "industry_index_missing_groups",
+    }
+)
+
+
+def coverage_only(finding: dict) -> bool:
+    """Absent observations do not invalidate independently validated facts."""
+    return finding.get("check") in _COVERAGE_CHECKS
+
 
 def _link_read_only(source: str, target: str) -> str:
     # The audit never writes Parquet. Metadata is copied separately; no link
@@ -41,7 +65,9 @@ def _errors(
         config, _collect_lake_findings(config, day, full=True, offline=True, scope=scope)
     )
     findings.extend(run_source_diffs(config, "publication-view", day))
-    return [item for item in findings if item.get("severity") == "error"]
+    return [
+        item for item in findings if item.get("severity") == "error" and not coverage_only(item)
+    ]
 
 
 def _factor_action_errors(config: Config, symbols: frozenset[str]) -> list[dict]:

@@ -1,9 +1,9 @@
 """The scheduled path, and the way back from a failed run: `run daily`,
 `run events`, `run retry`.
 
-`run daily --all-groups` composes one day's schedule groups, because the shell
-pipeline that used to be the only way to run them all is not installed by the
-package. Everything around a day — health check, source probe, metadata backup,
+A bare `run daily` composes one day's schedule groups and then the event
+stream, because the shell pipelines that used to be the only way to run them
+all are not installed by the package. Everything around a day — health check, source probe, metadata backup,
 the late stale-only pass — still lives in `scripts/daily_pipeline.sh`.
 """
 
@@ -255,7 +255,39 @@ def _group_is_runnable(cfg, group) -> bool:
     return group_is_runnable(cfg, group)
 
 
-def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, repairs: list):
+def _warn_schedule_drift(config_path: str) -> None:
+    """One stderr line when this config schedules less than the installed release.
+
+    A release that adds a step to a group cannot reach a config written by an
+    older one; the day still "succeeds" without it. Advisory only: a config
+    that cannot be compared must not stop the day.
+    """
+    from cnequity.cli._shared import resolve_config_path
+    from cnequity.config.drift import config_drift
+
+    try:
+        drift = config_drift(resolve_config_path(config_path))
+    except Exception:  # noqa: BLE001 — never block the run on the advisory
+        return
+    missing = set(drift.unscheduled_steps).union(*drift.group_steps.values())
+    if missing:
+        click.echo(
+            f"提示：配置比当前版本少 {len(missing)} 个调度 step（{', '.join(sorted(missing))}），"
+            "这次不会运行。执行 `cne config upgrade` 自动补上。",
+            err=True,
+        )
+
+
+def _run_all_groups(
+    cfg,
+    engine: JobEngine,
+    td: date | None,
+    *,
+    backfill: bool,
+    repairs: list,
+    include_events: bool = False,
+    audit_after: bool = False,
+):
     """Run every schedule group in config order, one at a time.
 
     A day's ingestion is six groups, and until now the only thing that ran all
@@ -267,6 +299,12 @@ def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, 
     One group failing does not stop the rest, exactly as the script does it:
     the point is to get as much of the day as the sources will give. The exit
     code is the worst of them.
+
+    With *audit_after* the lake audit runs once after the groups — it reads
+    the whole lake, so inside any one group it would judge data the later
+    groups had not landed yet. With *include_events* the natural-calendar
+    event stream runs last, so one command covers the whole day — on a weekend
+    the groups skip and the events still run.
     """
     if not cfg.schedule_groups:
         raise click.ClickException(
@@ -313,14 +351,51 @@ def _run_all_groups(cfg, engine: JobEngine, td: date | None, *, backfill: bool, 
             worst = 1
             continue
         status = result["status"]
-        results.append({"group": name, "run_id": result["run_id"], "status": status})
+        results.append({"group": name, **result})
         click.echo(f"调度组 {name}：{status}", err=True)
         exit_code = _run_status_exit_code(status)
         # Exit 1 is a terminal/core failure; 2 is usable but degraded.
         # Numeric max would hide a core failure behind a later advisory one.
         if exit_code == 1 or worst == 0:
             worst = exit_code
-    click.echo(json.dumps({"groups": results, "repairs": repairs}, indent=2))
+    payload: dict = {"groups": results, "repairs": repairs}
+    ran = [r for r in results if not str(r.get("status", "")).startswith("skipped")]
+    if audit_after and ran:
+        try:
+            audit = engine.run_job(
+                "daily:audit",
+                trade_date=td,
+                waves=[WaveConfig(name="audit", parallel=False, steps=["audit"])],
+                backfill=backfill,
+            )
+        except RunLockError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — the groups already ran
+            click.echo(f"审计：{type(exc).__name__}: {exc}", err=True)
+            audit = {"status": "failed", "error": str(exc)}
+        payload["audit"] = audit
+        click.echo(f"审计：{audit['status']}", err=True)
+        exit_code = _run_status_exit_code(audit["status"])
+        if exit_code == 1 or worst == 0:
+            worst = exit_code
+    if include_events and cfg.events_groups:
+        try:
+            events = _run_events_job(cfg, engine, td)
+        except RunLockError as exc:
+            # A separately scheduled `cne run events` is already covering it.
+            click.echo(f"事件流：跳过（{exc}）", err=True)
+            events = {"status": "skipped_locked", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 — the groups already ran
+            click.echo(f"事件流：{type(exc).__name__}: {exc}", err=True)
+            events = {"status": "failed", "error": str(exc)}
+        payload["events"] = events
+        click.echo(f"事件流：{events['status']}", err=True)
+        exit_code = (
+            0 if events["status"] == "skipped_locked" else _run_status_exit_code(events["status"])
+        )
+        if exit_code == 1 or worst == 0:
+            worst = exit_code
+    click.echo(json.dumps(payload, indent=2, default=str))
     if worst:
         raise SystemExit(worst)
 
@@ -475,9 +550,21 @@ def datasets_outside_the_daily_waves(cfg) -> list[str]:
     "all_groups",
     is_flag=True,
     help=(
-        "按配置顺序串行跑完全部调度组，某个组失败也继续往下跑。一条命令跑完一天，"
-        "给没有仓库里 scripts/daily_pipeline.sh 的人用。数据集全部关闭的组会跳过。"
+        "只跑全部调度组，不含事件流。给已经单独调度 `cne run events` 的旧定时任务保留；"
+        "不带参数的 `cne run daily` 已经包含全部调度组和事件流。"
     ),
+)
+@click.option(
+    "--core-only",
+    "core_only",
+    is_flag=True,
+    help="只跑 [[job.daily.waves]] 核心骨架（旧版不带参数时的行为）。",
+)
+@click.option(
+    "--no-events",
+    "no_events",
+    is_flag=True,
+    help="不带参数运行时不跑事件流（公告、监管事件、资讯）。",
 )
 @click.option(
     "--trade-date",
@@ -522,8 +609,16 @@ def run_daily(
     quiet: bool,
     stale_groups: str | None = None,
     snapshots_only: bool = False,
+    core_only: bool = False,
+    no_events: bool = False,
 ):
-    """跑日更采集（Wave DAG 或指定调度组）。"""
+    """跑一天的更新：全部日更调度组，再跑事件流。
+
+    \b
+    不带参数时按配置顺序跑完全部已启用的调度组（某组失败也继续），对整个湖审计一次，然后跑事件流
+    （公告、监管事件、资讯；周末和节假日照常）。非交易日调度组自动跳过，事件流仍会运行。
+    `--group` 只跑一个组，`--core-only` 只跑核心骨架，`--no-events` 不跑事件流。
+    """
     _progress_logging(quiet)
     try:
         cfg = _cfg(config_path)
@@ -543,6 +638,14 @@ def run_daily(
         raise click.ClickException("--groups 只能配合 --stale-only；普通的一次 run 请用 --group")
     if all_groups and group_name:
         raise click.ClickException("--all-groups 会跑全部调度组，请去掉 --group。")
+    if core_only and (group_name or all_groups or stale_only):
+        raise click.ClickException(
+            "--core-only 只跑核心骨架，不能和 --group / --all-groups / --stale-only 同用。"
+        )
+    if no_events and (group_name or all_groups or stale_only or core_only):
+        raise click.ClickException(
+            "--no-events 只用于不带 --group / --all-groups / --stale-only / --core-only 的完整日更。"
+        )
     if all_groups and stale_only:
         raise click.ClickException("--stale-only 自己挑要跑的 step，请去掉 --all-groups。")
     if stale_only:
@@ -568,6 +671,20 @@ def run_daily(
         repairs = _auto_repair_gaps(cfg, _last_trading_day(cfg, td or shanghai_today()))
     if all_groups:
         _run_all_groups(cfg, engine, td, backfill=backfill, repairs=repairs)
+        return
+    if not group_name and not core_only and cfg.schedule_groups:
+        _warn_schedule_drift(config_path)
+        _run_all_groups(
+            cfg,
+            engine,
+            td,
+            backfill=backfill,
+            repairs=repairs,
+            # A --backfill replay re-fetches one trading day; the event stream
+            # follows the natural calendar and has no such replay.
+            include_events=not (no_events or backfill),
+            audit_after=True,
+        )
         return
     try:
         if group_name:
@@ -620,12 +737,12 @@ def run_daily(
                 # new user got by pointing `cne run daily` at the demo config.
                 groups = ", ".join(sorted(cfg.schedule_groups))
                 remedy = (
-                    f"改跑调度组：`cne run daily --group <名字>`（有 {groups}）。"
+                    f"不带 --core-only 运行，或改跑调度组：`cne run daily --group <名字>`（有 {groups}）。"
                     if groups
                     else "`cne config create` 生成的配置两者都有。"
                 )
                 raise click.ClickException(
-                    f"{config_path} 里没有 [[job.daily.waves]]：不带参数的 `cne run daily` "
+                    f"{config_path} 里没有 [[job.daily.waves]]：没有调度组时 `cne run daily` "
                     f"跑的就是这张 wave DAG，而这份配置一条都没定义，"
                     f"跑起来会一行数据都没抓却报成功。{remedy}"
                 )
@@ -643,16 +760,17 @@ def run_daily(
                 click.echo(
                     f"提示：这一趟只跑了核心骨架；还有 {len(uncovered)} 个已启用的数据集属于"
                     f"调度组，这次没有更新：{preview}{suffix}。"
-                    f"用 `cne run daily --group <名字>` 跑它们"
-                    f"（有 {', '.join(sorted(cfg.schedule_groups))}）。",
+                    f"去掉 --core-only 即可一并更新"
+                    f"（调度组：{', '.join(sorted(cfg.schedule_groups))}）。",
                     err=True,
                 )
     except RunLockError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
-            {"run_id": result["run_id"], "status": result["status"], "repairs": repairs},
+            {**result, "repairs": repairs},
             indent=2,
+            default=str,
         )
     )
     # Exit non-zero on failure so schedulers (launchd/cron) and the daily
@@ -683,6 +801,7 @@ def run_events(config_path: str, group_name: str | None, trade_date_str: str | N
     \b
     这些源在周末和节假日照常发布，所以这个 job 不受交易日门禁约束，并且拿自己的采集锁：
     它既不等晚间批次，也不会因为休市而被跳过。每个组通过自带的 `compact` 发布它 staging 的数据。
+    不带参数的 `cne run daily` 末尾已经包含这一步；单独运行用于更高频地刷新某个组。
     """
     _progress_logging(quiet)
     try:
@@ -699,32 +818,37 @@ def run_events(config_path: str, group_name: str | None, trade_date_str: str | N
         known = ", ".join(sorted(cfg.events_groups))
         raise click.ClickException(f"未知 events 调度组：{group_name}（配置里有：{known}）")
 
+    engine = JobEngine(cfg)
+    td = parse_date_option(trade_date_str, "--trade-date")
+    try:
+        result = _run_events_job(cfg, engine, td, group_name)
+    except RunLockError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2, default=str))
+    exit_code = _run_status_exit_code(result["status"])
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
+def _run_events_job(cfg, engine: JobEngine, td: date | None, group_name: str | None = None) -> dict:
+    """One events run over *group_name*, or every events group in config order."""
     selected = (
         [(group_name, cfg.events_groups[group_name])]
         if group_name
         else list(cfg.events_groups.items())
     )
-    engine = JobEngine(cfg)
-    td = parse_date_option(trade_date_str, "--trade-date")
-    try:
-        result = engine.run_job(
-            f"events:{group_name}" if group_name else "events",
-            trade_date=td,
-            waves=[
-                WaveConfig(
-                    name=f"events:{name}",
-                    parallel=getattr(group, "parallel", True),
-                    steps=group.steps,
-                )
-                for name, group in selected
-            ],
-        )
-    except RunLockError as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(json.dumps({"run_id": result["run_id"], "status": result["status"]}, indent=2))
-    exit_code = _run_status_exit_code(result["status"])
-    if exit_code:
-        raise SystemExit(exit_code)
+    return engine.run_job(
+        f"events:{group_name}" if group_name else "events",
+        trade_date=td,
+        waves=[
+            WaveConfig(
+                name=f"events:{name}",
+                parallel=getattr(group, "parallel", True),
+                steps=group.steps,
+            )
+            for name, group in selected
+        ],
+    )
 
 
 def _retry_single_run(engine: JobEngine, run_id: str) -> dict:

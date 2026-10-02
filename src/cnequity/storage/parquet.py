@@ -71,8 +71,50 @@ class StagingWriter:
         out_dir = self.staging_root / dataset / f"run_id={run_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"part-{batch_id}.parquet"
+        # A crash during replacement must leave an unsealed file, never the
+        # previous attempt's seal attached to different bytes.
+        path.with_suffix(".sealed.json").unlink(missing_ok=True)
         write_parquet_atomic(path, df, compression="zstd")
+        self._write_seal(path, dataset, run_id, batch_id=batch_id, rows=df.height)
         return path
+
+    def seal_file(
+        self, path: Path, dataset: str, run_id: str, *, batch_id: str | None = None
+    ) -> None:
+        """Seal only readable schema-valid bytes, including filtered candidates."""
+        frame = validate_dataframe(pl.read_parquet(path), dataset)
+        self._write_seal(path, dataset, run_id, batch_id=batch_id, rows=frame.height)
+
+    @staticmethod
+    def _write_seal(
+        path: Path, dataset: str, run_id: str, *, batch_id: str | None, rows: int
+    ) -> None:
+        write_json_atomic(
+            path.with_suffix(".sealed.json"),
+            {
+                "result_schema_version": 2,
+                "dataset": dataset,
+                "run_id": run_id,
+                "batch_id": batch_id or path.stem.removeprefix("part-"),
+                "sha256": sha256_file(path),
+                "rows": rows,
+            },
+        )
+
+    def is_sealed(self, path: Path, dataset: str, run_id: str) -> bool:
+        """A validation seal names the exact atomically written bytes."""
+        receipt = path.with_suffix(".sealed.json")
+        if not receipt.exists():
+            return False
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        if (
+            payload.get("result_schema_version") != 2
+            or payload.get("dataset") != dataset
+            or payload.get("run_id") != run_id
+            or payload.get("sha256") != sha256_file(path)
+        ):
+            raise ValueError(f"staging seal does not match validated bytes: {path}")
+        return True
 
     def write_usable_batch(
         self,
@@ -260,6 +302,7 @@ def compact_dataset(
     changed_files: list[Path] | None = None,
     base_root: Path | None = None,
     change_log: list[dict] | None = None,
+    staging_files: list[Path] | None = None,
 ) -> int:
     """Merge staging batches into curated partitions, dedupe by PK.
 
@@ -276,7 +319,7 @@ def compact_dataset(
     # finalize passes it so a retry after a crash cannot merge from a half-
     # rewritten mutable compatibility directory.
     read_root = Path(base_root) if base_root is not None else curated_root / dataset
-    files = staging.list_run_files(dataset, run_id)
+    files = staging.list_run_files(dataset, run_id) if staging_files is None else staging_files
     if not files:
         return 0
 

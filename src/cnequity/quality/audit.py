@@ -426,10 +426,16 @@ def _collect_lake_findings(
                     f"; historical ST source does not cover {unsupported_symbols} "
                     f"current symbol(s) ({exchange_detail or 'exchange unknown'})"
                 )
+        optional_for_init = bool(context.get("_init")) and not evidence["verified"]
+        if optional_for_init:
+            message = (
+                "Historical ST evidence is an optional backfill outside init; "
+                "use cne backfill trading_status for historical ST research. " + message
+            )
         findings.append(
             {
                 "dataset": "trading_status",
-                "severity": "info" if evidence["verified"] else "warning",
+                "severity": "info" if evidence["verified"] or optional_for_init else "warning",
                 "check": "trading_status_coverage_start",
                 "message": message,
                 "coverage_start": ts_start.isoformat(),

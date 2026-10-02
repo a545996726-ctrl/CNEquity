@@ -4,7 +4,7 @@
 
 | 任务 | 入口 |
 |---|---|
-| 仅使用 PyPI 包 | `cne run daily --all-groups` 与独立的 `cne run events`，由系统调度器分别调用 |
+| 仅使用 PyPI 包 | 系统调度器每天（含周末）调用一次 `cne run daily`：交易日跑全部日更组，每天跑事件流 |
 | 使用仓库运维脚本 | 下方安装调度；脚本额外处理门禁、通知和元数据备份 |
 | 临时失败 | [排障](troubleshooting.md)，先确定失败 run / 批次，再按范围重试 |
 | 扩大历史 | [初始化与续跑](../getting-started/initialization.md)，回填先审阅 `--plan` |
@@ -101,26 +101,16 @@ scripts/uninstall_scheduler.sh
 **Windows 任务计划程序**（原生 Win10/11；`daily_pipeline.sh` 不适用于 PowerShell）：
 
 1. 先确认 `cne doctor` 与 `cne config validate` 通过，`data.root` 用短绝对路径（如 `D:\lake`）。
-2. 打开「任务计划程序」→ 创建基本任务 → 每天 16:05（或收盘后任一时刻）。
+2. 打开「任务计划程序」→ 创建基本任务 → 每天 16:05（或收盘后任一时刻，周末也触发）。
 3. 操作选「启动程序」：
 
 | 字段 | 示例 |
 |------|------|
 | 程序/脚本 | `C:\path\to\.venv\Scripts\cne.exe` |
-| 添加参数 | `run daily --all-groups --config C:\path\to\configs\cnequity.toml` |
+| 添加参数 | `run daily --config C:\path\to\configs\cnequity.toml` |
 | 起始于 | `C:\path\to`（仓库或配置所在目录） |
 
-`run events` 另建每日任务（包括周末）。Windows 任务计划程序和普通 cron 的时间是本机时间；只有使用仓库 scheduler gate 的任务才按配置的北京时间判断。也可在 `.ps1` 中顺序调用并保留失败退出码：
-
-```powershell
-$cne = "C:\path\to\.venv\Scripts\cne.exe"
-$cfg = "C:\path\to\configs\cnequity.toml"
-& $cne run daily --all-groups --config $cfg
-$dailyExit = $LASTEXITCODE
-& $cne run events --config $cfg
-$eventsExit = $LASTEXITCODE
-exit ([Math]::Max($dailyExit, $eventsExit))
-```
+这一条已包含事件流（公告、监管事件、资讯），不需要再为 `run events` 另建任务；非交易日日更组自动跳过，事件流照常运行。Windows 任务计划程序和普通 cron 的时间是本机时间；只有使用仓库 scheduler gate 的任务才按配置的北京时间判断。想让事件流更频繁时，可以另外调度 `cne run events --group news_wire`；它与日更同时运行时，日更里的事件流段记为 `skipped_locked`，不算失败。
 
 > 控制台中文乱码时：`chcp 65001`，或设置用户环境变量 `PYTHONUTF8=1`。
 
@@ -155,7 +145,7 @@ core → capital → signals → fundamentals → macro_risk → research
 ## 日常巡检命令
 
 ```bash
-cne status --datasets                 # 新鲜度；STALE 时退出 1
+cne status --datasets --gate                 # 新鲜度；STALE 时退出 1
 cne audit --full                      # 湖级健康；UNHEALTHY 退出 1
 cne stats show                        # 行数概览
 cne sources slo --enforce             # 30 日关键源可用性（缺历史也 fail-closed）
@@ -168,9 +158,9 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 1. 查看 `daily-*.log` 定位失败组
 2. 重跑单组：`cne run daily --group <name>`
 3. 批级失败：`cne status` → `cne run retry --run-id <id>`
-4. 复核：`cne audit --full` + `cne status --datasets`
+4. 复核：`cne audit --full` + `cne status --datasets --gate`
 
-`degraded` / 退出码 2 也需要查看失败步骤：成功发布的表仍可读取，但不代表组内全部数据到齐。
+`degraded` 表示覆盖受限；写命令返回 0，显式质量门禁可返回 2，仍需要查看缺口步骤：成功发布的表仍可读取，但不代表组内全部数据到齐。
 例如暂停 push2 后，资金流会尝试把同花顺口径写入 `fund_flow_ths` / `sector_fund_flow_ths`；
 原东财表仍报告缺失，不能把备援表当作同口径替换。指定 `--run-id` 可重试该降级 run 的失败批次。
 跨日补跑应使用原 run 的重试入口；实时快照仍受可观测时间窗限制，不能补造过去的快照。
@@ -183,7 +173,7 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 |------|------|
 | 日更成功率 | 两周内 ≥99% 交易日 pipeline 退出 0 |
 | 告警时效 | 失败当次 run 结束分钟内通知 |
-| 新鲜度 | T+1 `status --datasets` 无 STALE（季频数据集按 `max_staleness_days`） |
+| 新鲜度 | T+1 `status --datasets --gate` 无 STALE（季频数据集按 `max_staleness_days`） |
 
 ## 备份与恢复
 
@@ -221,7 +211,7 @@ cne snapshot verify research-20260828
 cne snapshot restore research-20260828 /new/empty/cnequity-restore
 cne config create --config configs/cnequity.restore.toml \
   --data-root /new/empty/cnequity-restore
-cne status --datasets --config configs/cnequity.restore.toml
+cne status --datasets --gate --config configs/cnequity.restore.toml
 ```
 
 恢复命令只接受新目录或空目录，拒绝活动湖根目录，也不会覆盖已有文件。验收时
@@ -278,11 +268,11 @@ cne status --datasets --config configs/cnequity.restore.toml
 | `macro_risk` | 宏观指标、市场宽度、解禁日程、商品行情 |
 | `research` | ETF 档案、机构持仓、分析师预期、热度、板块行情与资金流、情绪评分 |
 
-`cne run daily --all-groups` 顺序运行这些组，单组失败后仍继续后续组。
+`cne run daily` 顺序运行这些组，单组失败后仍继续后续组，最后跑事件流。
 失败优先返回 1；没有失败但有降级时返回 2；全部成功或正常跳过时返回 0。
 配置为周更的组按交易日历运行历史数据步骤，快照步骤仍每日运行。
 北向等数据遵循上游实际披露频率，组每天运行不表示每张表都有新日期。
-情绪评分依赖已落盘的资讯；公告、监管事件与新闻另用 `cne run events` 更新。
+情绪评分依赖已落盘的资讯；公告、监管事件与新闻由同一条命令末尾的事件流更新（也可单独 `cne run events`）。
 前十大股东不在默认日更组中，按需使用 `cne backfill top_holders`。
 
 ```cron
@@ -333,7 +323,7 @@ cne status --datasets --config configs/cnequity.restore.toml
 配套的可见性：
 
 ```bash
-cne status --datasets # 有 STALE 退出 1
+cne status --datasets --gate # 有 STALE 退出 1
 cne serve             # 面板首屏就列出 STALE 数据集
 ```
 

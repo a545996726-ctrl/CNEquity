@@ -12,6 +12,7 @@ from cnequity.adapters.eastmoney.commodity_bars import (
     fetch_commodity_bars_range,
 )
 from cnequity.config import Config
+from cnequity.orchestrator.outcomes import SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.steps.http_common import run_incremental_fetched, write_fetched
 
@@ -31,7 +32,7 @@ def _backfill_range(config: Config, trade_date: date, run_id: str) -> dict:
         return {"rows_read": 0, "rows_written": 0}
     df = fetch_commodity_bars_range(start, end, config=config, strict=True)
     if df.is_empty():
-        raise RuntimeError(
+        raise SourceUnavailableError(
             f"commodity_bars: no rows returned for {start.isoformat()}..{end.isoformat()}"
         )
     dates = df.get_column("trade_date").cast(pl.Date, strict=False)
@@ -49,7 +50,7 @@ def step_commodity_bars(config: Config, trade_date: date, run_id: str, context: 
     em = bool(config.sources.get("eastmoney", True))
     sina = bool(config.sources.get("sina", True))
     if not em and not sina:
-        raise RuntimeError("commodity_bars: both eastmoney and sina sources disabled")
+        raise SourceUnavailableError("commodity_bars: both eastmoney and sina sources disabled")
     if getattr(config, "_backfill", False):
         return _backfill_range(config, trade_date, run_id)
     return run_incremental_fetched(

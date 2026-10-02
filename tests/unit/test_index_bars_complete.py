@@ -1,4 +1,4 @@
-"""index_bars must fail-loud on a partial symbol set (no watermark poison)."""
+"""Partial index facts are deliverable without certifying missing series."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from cnequity.config import Config
 from cnequity.steps.bars import _validate_index_bar_coverage, step_index_bars
 
 
-def test_fetch_index_bars_rejects_partial_symbol_set(monkeypatch):
-    """One surviving index must not advance daily coverage for the other seven."""
+@pytest.mark.parametrize("allow_partial", [False, True])
+def test_fetch_index_bars_preserves_partial_rows_when_requested(monkeypatch, allow_partial):
+    """Command callers retain the surviving series; strict callers can reject it."""
 
     def fake_paginated(client, sym, start, end, **kwargs):
         if sym == "000852.SH":
@@ -54,8 +55,14 @@ def test_fetch_index_bars_rejects_partial_symbol_set(monkeypatch):
         1,
     )
 
-    with pytest.raises(TdxSourceError, match="000001.SH"):
-        fetch_index_bars(date(2026, 7, 10), date(2026, 7, 10), allow_mock=False)
+    if allow_partial:
+        frame = fetch_index_bars(
+            date(2026, 7, 10), date(2026, 7, 10), allow_partial=True, backfill=True
+        )
+        assert frame["symbol"].to_list() == ["000852.SH"]
+    else:
+        with pytest.raises(TdxSourceError, match="000001.SH"):
+            fetch_index_bars(date(2026, 7, 10), date(2026, 7, 10), allow_mock=False)
 
 
 def test_index_bar_coverage_rejects_interior_symbol_session_gap(tmp_path):

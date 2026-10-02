@@ -344,7 +344,7 @@ def test_an_outage_fill_reads_datacenter_including_beijing(tmp_path, monkeypatch
     assert set(frame["source"]) == {"eastmoney_datacenter"}
 
 
-def test_an_incomplete_outage_fill_publishes_nothing(tmp_path, monkeypatch):
+def test_an_incomplete_outage_fill_retains_valid_rows_and_gap(tmp_path, monkeypatch):
     from cnequity.steps import fundamentals
 
     symbols = ["600000.SH", "920571.BJ"]
@@ -361,12 +361,20 @@ def test_an_incomplete_outage_fill_publishes_nothing(tmp_path, monkeypatch):
         "cnequity.adapters.eastmoney.valuation_datacenter.fetch_valuation_datacenter",
         lambda *a, **k: partial,
     )
-    monkeypatch.setattr(
-        fundamentals, "write_fetched", lambda *a, **k: pytest.fail("nothing may be staged")
-    )
+    written = []
 
-    with pytest.raises(RuntimeError, match=r"920571\.BJ@2026-09-24.*nothing will be published"):
-        fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-dc")
+    def write(config, run, dataset, frame, **kwargs):
+        written.append(frame)
+        return {"rows_read": frame.height, "rows_written": frame.height}
+
+    monkeypatch.setattr(fundamentals, "write_fetched", write)
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    with source_gap_scope(cfg) as gaps:
+        result = fundamentals._backfill_valuation_metrics_locked(cfg, date(2026, 9, 26), "run-dc")
+    assert result["rows_written"] == 5
+    assert written[0].height == 5
+    assert gaps[0]["dates"] == ["2026-09-24"]
 
 
 def test_the_ordinary_backfill_does_not_ask_baostock_for_beijing_names(tmp_path, monkeypatch):

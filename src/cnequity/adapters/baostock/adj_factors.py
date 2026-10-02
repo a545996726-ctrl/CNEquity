@@ -44,6 +44,8 @@ _FIELDS = "date,close"
 class BaostockAdjFactorUnavailableError(RuntimeError):
     """Baostock has no usable adjusted series for this symbol."""
 
+    reason_code = "capability_limit"
+
 
 def _closes(bs, symbol: str, start: date, end: date, flag: str, *, config) -> dict[date, float]:
     with source_request(config, SOURCE):

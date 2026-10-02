@@ -53,6 +53,8 @@ _MAX_PAGE_NUMBER = 100
 class EastMoneyDatacenterError(RuntimeError):
     """Raised when datacenter pagination fails after partial or zero results."""
 
+    reason_code = "source_payload_invalid"
+
 
 class _TransientEmptyPage(Exception):
     """Empty response on a page the first page's `pages` field says must exist."""

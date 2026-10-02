@@ -103,15 +103,9 @@ class Config:
     # baostock free-API pacing (full-market history sweeps).
     baostock_batch_size: int = 20
     baostock_batch_rest_seconds: float = 120.0
-    # How many symbols one run may sweep for historical ST evidence. The pacing
-    # above is deliberate — exceeding baostock's free limits blacklists the IP —
-    # but it makes the whole-market sweep a ~10.7h step, and on a fresh lake
-    # there is no ST signal to narrow the universe with, so `cne init` inherited
-    # all 5,557 of them: a measured first init spent 1.8h reaching it and would
-    # have spent 10.4h more inside it. The sweep already checkpoints per chunk
-    # and resumes, so a bound costs nothing but the wait. `0` removes it, which
-    # is what an operator running `cne backfill trading_status` on purpose
-    # wants.
+    # Bound direct historical ST step calls. Init uses current snapshots;
+    # explicit `cne backfill trading_status` removes this bound and checkpoints
+    # the full sweep while retaining the provider pacing above.
     st_history_symbols_per_run: int = 400
     # Optional Tushare Pro token for historical BJ ST evidence.  The token is
     # read from [sources.tushare].token or TUSHARE_TOKEN and is never written
@@ -206,21 +200,10 @@ class Config:
     # decisions by an order of magnitude: enabling 1m for an index is ~2MB a
     # day, enabling ticks for the whole market is ~60MB a day and ~20 minutes
     # of wire time. One switch must not turn on both.
-    # Fraction of the expected universe whose keys may stay unresolved after
-    # every source has been tried, without failing the run. A whole-market
-    # sweep that loses a fraction of a percent to a vendor's transient outage
-    # used to refuse the checkpoint and take the rest of `cne init` down with
-    # it — two hours of work discarded over 0.25% of the market. Above this the
-    # refusal stands: a snapshot missing a real slice of the market should not
-    # be stamped complete. Below it the run carries a warning naming the keys
-    # and the command that repairs them, and `cne verify` still reports the
-    # hole until it is filled.
+    # Coverage warning thresholds retained for existing configurations. They
+    # measure unresolved scope; they do not forbid independent validated facts
+    # from publishing or turn a partial scope into complete evidence.
     daily_bars_unresolved_tolerance: float = 0.01
-    # The same fraction means something else on a single session. 1% of a
-    # three-year backfill is 41k keys scattered thin; 1% of one trading day is
-    # 55 symbols missing *today*, which reads as an upstream outage rather than
-    # a residue. The daily job also reruns cheaply, so it can afford to be
-    # stricter than a sweep that costs two hours to repeat.
     daily_bars_tip_unresolved_tolerance: float = 0.002
     trade_ticks_enabled: bool = False
     # No 'all'. The guard is `trade_ticks_max_symbols` below, and a scope that

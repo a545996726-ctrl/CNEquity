@@ -74,6 +74,31 @@ def test_skips_dates_already_curated(tmp_path):
     assert out["days_skipped"] == 1
 
 
+@pytest.mark.parametrize("reason", ["quarantined_rows", "source_unavailable"])
+def test_existing_rows_do_not_hide_a_date_gap_or_clear_it_before_publication(tmp_path, reason):
+    from cnequity.storage.state import StateStore
+
+    cfg = Config(data_root=tmp_path / "data")
+    day = date(2026, 6, 2)
+    cfg._backfill_start = cfg._backfill_end = day
+    root = cfg.curated_root / "market_breadth" / f"trade_date={day}"
+    root.mkdir(parents=True)
+    pl.DataFrame([_fake_row(day, "trade_date")]).write_parquet(root / "part-0.parquet")
+    state = StateStore(cfg.meta_root)
+    state.record_missing_dates("market_breadth", [day], reason=reason)
+    calls = []
+
+    def fetch(d):
+        calls.append(d)
+        return pl.DataFrame([_fake_row(d, "trade_date")])
+
+    result = walk_day_backfill(cfg, day, "repair", "market_breadth", fetch, source="derived")
+    assert calls == [day]
+    assert result["days_skipped"] == 0
+    assert result["rows_written"] == 1
+    assert state.get_missing_dates("market_breadth") == {day}
+
+
 def test_resume_check_uses_the_configured_date_column(tmp_path):
     """regulatory_events keys on event_date, not trade_date — the resume-skip
     check has to read the same column the schema actually stores, or every
@@ -148,15 +173,11 @@ def test_rejects_rows_from_a_different_requested_date(tmp_path):
             [_fake_row(d if d == date(2026, 6, 1) else d + timedelta(days=1), "trade_date")]
         )
 
-    with pytest.raises(RuntimeError, match="different or invalid trade_date"):
-        walk_day_backfill(
-            cfg,
-            date(2026, 7, 1),
-            "run-1",
-            "market_breadth",
-            fetch_one,
-            source="derived",
-        )
+    result = walk_day_backfill(
+        cfg, date(2026, 7, 1), "run-1", "market_breadth", fetch_one, source="derived"
+    )
+    assert result["status"] == "warning"
+    assert result["failed_days"] == 1
 
     staged = list((cfg.staging_root / "market_breadth").glob("**/*.parquet"))
     assert len(staged) == 1
@@ -243,10 +264,10 @@ def test_same_run_retry_keeps_earlier_successful_chunks(tmp_path):
             raise ConnectionError("first interruption")
         return pl.DataFrame([_fake_row(d, "trade_date")])
 
-    with pytest.raises(ConnectionError):
-        walk_day_backfill(
-            cfg, date(2026, 6, 5), "same-run", "market_breadth", first, source="derived"
-        )
+    result = walk_day_backfill(
+        cfg, date(2026, 6, 5), "same-run", "market_breadth", first, source="derived"
+    )
+    assert result["status"] == "warning"
 
     def second(d: date) -> pl.DataFrame:
         calls.append(d)
@@ -254,16 +275,16 @@ def test_same_run_retry_keeps_earlier_successful_chunks(tmp_path):
             raise ConnectionError("second interruption")
         return pl.DataFrame([_fake_row(d, "trade_date")])
 
-    with pytest.raises(ConnectionError):
-        walk_day_backfill(
-            cfg, date(2026, 6, 5), "same-run", "market_breadth", second, source="derived"
-        )
+    result = walk_day_backfill(
+        cfg, date(2026, 6, 5), "same-run", "market_breadth", second, source="derived"
+    )
+    assert result.get("status", "success") == "success"
 
-    assert calls == [date(2026, 6, 4), date(2026, 6, 5)]
+    assert calls == [date(2026, 6, 4)]
     staged = list((cfg.staging_root / "market_breadth").glob("**/*.parquet"))
-    assert len(staged) == 2
+    assert len(staged) == 3
     assert {d for path in staged for d in pl.read_parquet(path)["trade_date"].to_list()} == {
-        date(2026, 6, d) for d in (1, 2, 3, 4)
+        date(2026, 6, d) for d in (1, 2, 3, 4, 5)
     }
 
 

@@ -334,7 +334,8 @@ def audit(
     """跑质量审计；加 --full 则给出当前整个湖的健康快照。
 
     \b
-    按 run 的审计本来就是日更 `finalize` wave 的最后一步，所以在这里跑等于把已经审过的 run 再审一遍。
+    不带参数的 `cne run daily` 在全部调度组之后已经审计一次（`--core-only` 则是 `finalize` wave 的最后一步），
+    所以在这里跑等于把已经审过的数据再审一遍；仓库的 health_notify.sh 不经 `run daily`，由它自己审计一次。
     没有被调度的是 `--full`：它判的是此刻这个湖的状态，而不是某一次 run 写了什么，
     健康检查和面板读的也是它。
     """
@@ -474,7 +475,7 @@ def audit(
             click.echo(
                 f"sample 湖：每一行都是刻意生成的合成数据（source=mock），其中 {expected} 条"
                 "「伪造行」findings 已降级为预期 info，不代表安装失败。"
-                "要建真数据的湖，用 `cne init --profile demo`（或 `cne config create` + `cne init`）。"
+                "要建真数据的湖，运行 `cne init`。"
             )
         if errors:
             click.echo(
@@ -799,6 +800,7 @@ def verify(
 
     click.echo(f"\n修复 {len(repairable)} 个缺口…")
     failed: list[str] = []
+    empty_upstream: set[str] = set()
     for gap in repairable:
         click.echo(f"  → {gap.dataset} ({_GAP_LABELS.get(gap.kind, gap.kind)})")
         try:
@@ -819,13 +821,29 @@ def verify(
             # Succeeded and wrote nothing: the window is genuinely empty
             # upstream, so re-running will not change it. Say so rather than
             # claiming a repair.
+            empty_upstream.add(gap.dataset)
             click.echo("    源在该区间没有数据，缺口未变（重跑也不会变）")
         else:
             click.echo(f"    写入 {written:,} 行")
     if failed:
         click.echo(f"\n{len(failed)} 个未能修复：{', '.join(failed)}", err=True)
+
+    # Re-check here rather than asking for a second `cne verify`: a backfill that
+    # reported success is a claim about the fetch, not about the coverage.
+    rechecked = verify_lake(cfg, anchor=anchor, datasets=sorted({g.dataset for g in repairable}))
+    if wanted:
+        rechecked = [g for g in rechecked if g.kind in wanted]
+    # An upstream that has nothing for the window keeps its gap whatever we do;
+    # it was already reported above and must not fail every later run.
+    left = [g for g in rechecked if g.repairable and g.dataset not in empty_upstream]
+    if left:
+        click.echo(f"\n复查：还有 {len(left)} 个可修复缺口没有补上：")
+        for gap in left:
+            click.echo(f"  [{_GAP_LABELS.get(gap.kind, gap.kind)}] {gap.dataset:28} {gap.detail}")
+    else:
+        click.echo("\n复查：修复过的数据集已没有可修复缺口。")
+    if failed or left:
         raise SystemExit(1)
-    click.echo("\n修复流程结束。再跑一次 `cne verify` 确认。")
 
 
 @cli.command()
@@ -868,6 +886,7 @@ def verify(
         "instruments 和 trading_status，比单纯看水位贵；--no-scope 让这条命令回到纯元数据。"
     ),
 )
+@click.option("--gate", is_flag=True, help="按所选范围和新鲜度执行门禁；默认只报告。")
 def status(
     config_path: str,
     run_selector: str | None,
@@ -875,11 +894,12 @@ def status(
     all_columns: bool,
     gate_groups: str | None,
     scope: bool,
+    gate: bool,
 ):
     """查看最近一次 run 的状态；加 --datasets 则看逐数据集的新鲜度。
 
     \b
-    --datasets 的退出码：0 正常；1 确实不合格（数据集 STALE、截面缺标的、init 没跑完）；
+    --gate 的退出码：0 正常；1 确实不合格（数据集 STALE、截面缺标的、init 没跑完）；
     2 证明不了（instruments 缺失、证据读不出来）。后者是装配问题，不是数据缺口。
     """
     cfg = _cfg(config_path)
@@ -1101,16 +1121,17 @@ def status(
                         f"门禁只看 {', '.join(sorted(wanted))}："
                         f"其中 {len(gating)} 个 stale，另有 {skipped} 个属于这台机器不跑的组。"
                     )
-                if gating:
+                if gating and gate:
                     raise SystemExit(1)
             else:
-                raise SystemExit(1)
+                if gate:
+                    raise SystemExit(1)
         code = _scope_exit_code(
             incomplete_init is not None,
             scope_incomplete=scope_incomplete,
             scope_unverified=scope_unverified,
         )
-        if code:
+        if code and gate:
             raise SystemExit(code)
         return
 
@@ -1147,9 +1168,9 @@ def status(
         )
     click.echo(json.dumps(summary, indent=2, default=str))
     run_status = str(summary.get("dataset_status") or summary.get("status") or "success")
-    if run_status == "degraded":
+    if gate and run_status == "degraded":
         raise SystemExit(2)
-    if run_status == "failed":
+    if gate and run_status == "failed":
         raise SystemExit(1)
 
 

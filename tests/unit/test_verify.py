@@ -511,6 +511,65 @@ def test_cli_repair_says_so_when_the_window_is_genuinely_empty(tmp_path, monkeyp
     assert "源在该区间没有数据" in res.output
 
 
+def test_cli_repair_rechecks_the_coverage_itself(tmp_path, monkeypatch):
+    """No second `cne verify`: the repair run says whether the gap is closed."""
+    from click.testing import CliRunner
+
+    from cnequity.cli import quality_cmds
+    from cnequity.cli.main import cli
+
+    cfg_path = _cli_lake(tmp_path)
+
+    def fill(cfg, ds, start, end):
+        _write_days(cfg, "daily_bars", [date(2026, 8, 5)])
+        return {"status": "success", "rows_written": 1}
+
+    monkeypatch.setattr(quality_cmds, "_run_backfill", fill)
+    res = CliRunner().invoke(
+        cli,
+        [
+            "verify",
+            "--config",
+            str(cfg_path),
+            "--dataset",
+            "daily_bars",
+            "--kind",
+            "interior",
+            "--repair",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert "复查：修复过的数据集已没有可修复缺口" in res.output
+
+
+def test_cli_repair_fails_when_a_reported_success_left_the_gap(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from cnequity.cli import quality_cmds
+    from cnequity.cli.main import cli
+
+    monkeypatch.setattr(
+        quality_cmds,
+        "_run_backfill",
+        lambda cfg, ds, start, end: {"status": "success", "rows_written": 5},
+    )
+    res = CliRunner().invoke(
+        cli,
+        [
+            "verify",
+            "--config",
+            str(_cli_lake(tmp_path)),
+            "--dataset",
+            "daily_bars",
+            "--kind",
+            "interior",
+            "--repair",
+        ],
+    )
+    assert res.exit_code == 1
+    assert "复查：还有 1 个可修复缺口" in res.output
+
+
 # --- demo lakes ---------------------------------------------------------------
 # `cne init --profile demo|sample` builds a handful of symbols and two or three
 # datasets on purpose. Measured against the whole registry, the first health

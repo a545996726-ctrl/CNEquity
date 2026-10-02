@@ -6,7 +6,7 @@
 |---|---|---|
 | `cne audit` | 条件 | 读取湖、输出审计；启用外部对照时访问源 |
 | `cne backfill` | 执行时 | 补历史并写暂存与发布数据；--plan 仅读配置和状态 |
-| `cne config` | 无 | create 写个人配置；validate/diff 仅读 |
+| `cne config` | 无 | create 写个人配置；upgrade 备份后补调度 step；validate/diff 仅读 |
 | `cne contract diff` | 无 | 读取契约并输出差异 |
 | `cne contract show` | 无 | 读取契约；指定输出路径时写文件 |
 | `cne contract validate` | 无 | 校验契约 |
@@ -21,11 +21,14 @@
 | `cne profile list` | 无 | 列出内置范围 |
 | `cne profile show` | 无 | 显示内置范围 |
 | `cne query` | 条件 | SQL 读湖；按需数据缓存未命中或刷新时取数 |
+| `cne repair corporate-action-gaps` | --apply 时 | 默认离线预览；--apply 按缺口查询 Baostock 与巨潮资讯，核验后发布新版本并保留旧版本 |
 | `cne repair layout` | 无 | 默认只预览；--apply 发布新版本，保留旧版本和重复观察证据 |
+| `cne repair orphan-symbols` | 无 | 默认预览，可能登记旧湖基线版本；--apply 移除无日线证券的因子和公司行为行，发布新版本并保留旧版本 |
+| `cne repair stale-suspensions` | 无 | 默认预览，可能登记旧湖基线版本；--apply 移除成交日线否定的推断停牌，发布新版本并保留旧版本 |
 | `cne repair valuation-basis` | 无 | 默认只预览；--apply 发布新版本并保留旧版本 |
 | `cne run clean` | 无 | 仅预览过期文件；显式 --reconcile-runs 可修改运行状态 |
-| `cne run compact` | 无 | 将暂存数据发布到湖 |
-| `cne run daily` | 执行时 | 增量取数并写湖 |
+| `cne run compact` | 无 | 将已结束、未发布的暂存数据发布到湖 |
+| `cne run daily` | 执行时 | 增量取数并写湖；默认含全部调度组与事件流 |
 | `cne run events` | 执行时 | 事件取数并写湖 |
 | `cne run retry` | 执行时 | 重试失败范围并写湖 |
 | `cne serve` | 无 | 启动湖面板；存储页检查、确认后可标记或删除历史数据 |
@@ -44,7 +47,7 @@
 | `cne sources slo` | 无 | 读取探测历史并写统计 |
 | `cne sources substitutes` | 条件 | 默认读报告；--probe 访问源 |
 | `cne stats rebuild` | 无 | 重建本地统计 |
-| `cne stats show` | 无 | 读取本地统计；可能补建缺失摘要 |
+| `cne stats show` | 无 | 读取本地统计；过期或明细视图需要时自动重算 |
 | `cne status` | 无 | 读取运行状态与数据集覆盖 |
 | `cne storage apply` | 无 | 复核版本计划并 mark；CLI purge 禁用，删除须在 serve 网页确认 |
 | `cne storage archive` | 无 | 复制已登记试验、逐文件校验并登记封存工件；保留源目录 |

@@ -49,3 +49,21 @@ if os.environ.get("CNE_TEST_NO_NETWORK") == "1":
 
     socket.socket.connect = _guard(_connect)
     socket.socket.connect_ex = _guard(_connect_ex)
+
+    # libcurl opens sockets in native code, bypassing Python's socket guard.
+    try:
+        from curl_cffi.requests import Session
+    except ImportError:
+        pass
+    else:
+        from urllib.parse import urlsplit
+
+        _curl_request = Session.request
+
+        def _guard_curl(self, method, url, *args, **kwargs):
+            host = urlsplit(str(url)).hostname or ""
+            if host in {"localhost", "::1"} or host.startswith("127."):
+                return _curl_request(self, method, url, *args, **kwargs)
+            raise AssertionError(f"outbound libcurl request from test subprocess: {host}")
+
+        Session.request = _guard_curl

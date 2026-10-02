@@ -218,7 +218,10 @@ class StateStore:
 
     def mark_staged_request_days(self, dataset: str, run_id: str, days: Iterable[date]) -> None:
         """Remember validated requests until their staging reaches a revision."""
-        incoming = {day.isoformat() for day in days}
+        from cnequity.orchestrator.source_gaps import source_gap_dates
+
+        incomplete = source_gap_dates(dataset)
+        incoming = {day.isoformat() for day in days if day not in incomplete}
         if not incoming:
             return
         with self.transaction(dataset) as payload:
@@ -356,16 +359,22 @@ class StateStore:
                     if isinstance(row, dict) and row.get("symbol") and row.get("trade_date"):
                         merged[(row["symbol"], row["trade_date"])] = row
             for symbol, day in sorted(incoming):
-                merged.setdefault(
-                    (symbol, day),
-                    {
-                        "symbol": symbol,
-                        "trade_date": day,
-                        "reason": reason,
-                        "run_id": run_id,
-                        "recorded_at": stamp,
-                    },
-                )
+                previous = merged.get((symbol, day), {})
+                merged[(symbol, day)] = {
+                    **previous,
+                    "symbol": symbol,
+                    "trade_date": day,
+                    "reason": previous.get("reason", reason),
+                    "run_id": previous.get("run_id", run_id),
+                    "last_reason": reason,
+                    "latest_run_id": run_id,
+                    "recorded_at": previous.get("recorded_at", stamp),
+                    "last_source_attempt_at": stamp,
+                    "next_retry_at": stamp,
+                    "retryable": reason
+                    not in {"capability_limit", "unsupported_market", "permission_missing"},
+                    "source_attempts": int(previous.get("source_attempts", 0)) + 1,
+                }
             payload["outstanding_keys"] = [merged[k] for k in sorted(merged)]
             payload["updated_at"] = stamp
             self._write_payload(path, payload)

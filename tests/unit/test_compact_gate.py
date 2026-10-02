@@ -92,6 +92,10 @@ def test_compact_skips_dataset_with_failed_batches(tmp_path):
         pl.DataFrame([_daily_bar_row("000001.SZ", trade_date)]),
     )
 
+    # Emulate staging written by a pre-seal version.
+    for path in writer.list_run_files("daily_bars", run_id):
+        path.with_suffix(".sealed.json").unlink()
+
     state = StateStore(cfg.meta_root)
     state.set_date("daily_bars", date(2024, 6, 27))
 

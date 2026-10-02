@@ -154,6 +154,9 @@ def test_backfill_does_not_repeat_compact_for_blocked_staging(tmp_path):
         ),
     )
 
+    for seal in cfg.staging_root.rglob("*.sealed.json"):
+        seal.unlink()  # Unknown legacy staging remains blocked.
+
     class FakeEngine:
         def __init__(self):
             self.config = cfg
@@ -361,19 +364,19 @@ def test_status_run_degraded_exits_two_and_lists_dataset_stages(tmp_path, cfg_pa
     manifest = Manifest(cfg.manifest_path)
     run_id = manifest.start_run("daily")
     manifest.record_dataset_result(
-        run_id, "daily_bars", "publish_revision", "success", criticality="core"
+        run_id, "daily_bars", "publish_revision", "success", criticality="core", rows_written=1
     )
     manifest.record_dataset_result(
         run_id,
         "adj_factors",
         "derive",
-        "failed",
+        "warning",
         criticality="research",
         error_code="source_down",
     )
     manifest.finish_run(run_id, "degraded")
 
-    result = CliRunner().invoke(cli, ["status", "--run", "latest", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--run", "latest", "--config", cfg_path])
 
     assert result.exit_code == 2, result.output
     payload = json.loads(result.output)
@@ -381,7 +384,7 @@ def test_status_run_degraded_exits_two_and_lists_dataset_stages(tmp_path, cfg_pa
     assert any(
         item["dataset"] == "adj_factors"
         and item["stage"] == "derive"
-        and item["status"] == "failed"
+        and item["status"] == "warning"
         for item in payload["dataset_results"]
     )
 
@@ -400,7 +403,7 @@ def test_status_run_core_failure_exits_one(tmp_path, cfg_path):
     )
     manifest.finish_run(run_id, "failed")
 
-    result = CliRunner().invoke(cli, ["status", "--run", run_id, "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--run", run_id, "--config", cfg_path])
 
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
@@ -425,7 +428,7 @@ def test_status_datasets_all_fresh(cfg_path, monkeypatch):
         ),
     )
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
     assert result.exit_code == 0, result.output
     assert "最后交易日：2024-06-28" in result.output
 
@@ -459,7 +462,7 @@ def test_status_datasets_fails_when_an_init_is_incomplete(cfg_path, monkeypatch)
     )
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
 
     assert result.exit_code == 1, result.output
     assert "init 尚未完成" in result.output
@@ -510,7 +513,7 @@ def test_status_datasets_rejects_a_fresh_but_narrow_daily_bar_tip(cfg_path, monk
     )
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
 
     assert result.exit_code == 1, result.output
     assert "取数截面（沪深京全市场 A 股）：INCOMPLETE" in result.output
@@ -729,7 +732,7 @@ def test_status_datasets_treats_sample_dates_as_non_gating(tmp_path, monkeypatch
         ),
     )
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", str(cfg_path)])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", str(cfg_path)])
 
     assert result.exit_code == 0, result.output
     assert "sample" in result.output
@@ -754,7 +757,7 @@ def test_status_datasets_ignores_disabled_optional_capture(cfg_path, monkeypatch
             }
         ),
     )
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
     assert result.exit_code == 0, result.output
     assert "n/a" in result.output
     assert "STALE datasets" not in result.output
@@ -790,7 +793,7 @@ def test_status_datasets_shows_freshness_not_the_whole_inventory(cfg_path, monke
     monkeypatch.setattr("cnequity.query.reader.list_datasets", _wide_inventory)
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
 
     assert result.exit_code == 0, result.output
     # 9 inventory columns + freshness, narrowed to the 7 that describe it.
@@ -808,7 +811,7 @@ def test_status_datasets_all_columns_keeps_the_full_inventory(cfg_path, monkeypa
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
     result = CliRunner().invoke(
-        cli, ["status", "--datasets", "--all-columns", "--config", cfg_path]
+        cli, ["status", "--gate", "--datasets", "--all-columns", "--config", cfg_path]
     )
 
     assert result.exit_code == 0, result.output
@@ -950,6 +953,9 @@ def test_retry_requires_exactly_one_scope(cfg_path):
 
 def test_derive_adj_factors(cfg_path, monkeypatch):
     monkeypatch.setattr(
+        "cnequity.query.parquet_scan.dataset_has_parquet", lambda _root, **kwargs: True
+    )
+    monkeypatch.setattr(
         "cnequity.cli.maintain_cmds.compute_adj_factors",
         lambda cfg, full=False: AdjFactorsResult(rows=12, task_count=12, failed=[], findings=[]),
     )
@@ -959,6 +965,9 @@ def test_derive_adj_factors(cfg_path, monkeypatch):
 
 
 def test_derive_industry_index(cfg_path, monkeypatch):
+    monkeypatch.setattr(
+        "cnequity.query.parquet_scan.dataset_has_parquet", lambda _root, **kwargs: True
+    )
     monkeypatch.setattr(
         "cnequity.derive.industry_index.derive_industry_index",
         lambda cfg, full=False, start=None, end=None: {"rows": 3, "note": "ok"},
@@ -1031,13 +1040,34 @@ def test_stats_show_scans_curated_when_no_stats_exist(tmp_path, cfg_path):
     assert any(e["dataset"] == "daily_bars" and e["rows"] == 1 for e in entries)
 
 
-def test_stats_show_fallback_refuses_the_views_it_cannot_serve(cfg_path):
-    """The scan has no per-partition or per-source detail. Silently returning the
-    dataset roll-up for `--by-source` would answer a different question."""
+def test_stats_show_builds_the_tables_a_detail_view_needs(cfg_path):
+    """The scan has no per-source detail, so `--by-source` builds the tables
+    itself rather than sending the reader to `cne stats rebuild` first."""
+    from cnequity.config import load_config
+    from cnequity.storage.stats import load_summary
+
     result = CliRunner().invoke(cli, ["stats", "show", "--by-source", "--config", cfg_path])
 
-    assert result.exit_code != 0
-    assert "cne stats rebuild" in result.output
+    assert result.exit_code == 0, result.output
+    assert "尚未生成" in result.output
+    assert load_summary(load_config(cfg_path)) is not None
+
+
+def test_stats_show_refreshes_tables_a_later_run_made_stale(cfg_path):
+    from cnequity.config import load_config
+    from cnequity.storage.stats import rebuild_stats, stats_freshness
+
+    cfg = load_config(cfg_path)
+    rebuild_stats(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    manifest.finish_run(manifest.start_run("daily:core", {}), "success")
+    assert stats_freshness(cfg).stale
+
+    result = CliRunner().invoke(cli, ["stats", "show", "--config", cfg_path])
+
+    assert result.exit_code == 0, result.output
+    assert "过期" in result.output and "STALE" not in result.output
+    assert not stats_freshness(cfg).stale
 
 
 def test_query_on_demand(cfg_path, monkeypatch):
@@ -1137,42 +1167,61 @@ def test_per_run_audit_warnings_alone_do_not_fail(cfg_path, monkeypatch):
     assert result.exit_code == 0, result.output
 
 
-def test_compact_uses_latest_run(cfg_path, monkeypatch):
-    class FakeManifest:
-        def __init__(self, *a, **k):
-            pass
+def _staged_run(cfg_path, run_id: str, *, job: str, status: str, compacted: bool = False):
+    cfg = Config(data_root=Path(cfg_path).parent / "data")
+    manifest = Manifest(cfg.manifest_path)
+    manifest.start_run(job, {}, run_id=run_id)
+    manifest.start_batch(run_id, f"{run_id}-b", "instruments", "instruments")
+    manifest.finish_batch(run_id, f"{run_id}-b", "success")
+    if compacted:
+        manifest.start_batch(run_id, f"{run_id}-c", "compact", "compact")
+        manifest.finish_batch(run_id, f"{run_id}-c", "success")
+    if status != "running":
+        manifest.finish_run(run_id, status)
+    run_dir = cfg.staging_root / "instruments" / f"run_id={run_id}"
+    run_dir.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["600000.SH"]}).write_parquet(run_dir / "b0.parquet")
 
-        def latest_run(self):
-            return {"run_id": "latest-1"}
 
-    class FakeEngine:
-        def __init__(self, cfg):
-            pass
+def test_bare_compact_publishes_every_unpublished_finished_run(cfg_path, monkeypatch):
+    """No more hunting stranded runs and compacting them one --run-id at a time."""
+    _staged_run(cfg_path, "daily-failed", job="daily:core", status="failed")
+    _staged_run(cfg_path, "backfill-done", job="backfill", status="warning")
+    _staged_run(cfg_path, "already", job="daily:core", status="success", compacted=True)
+    _staged_run(cfg_path, "init-run", job="init", status="failed")
+    seen: list[str] = []
 
-        def run_step(self, name, trade_date, run_id):
-            assert name == "compact"
-            assert run_id == "latest-1"
-            return {"rows_written": 9}
+    def fake_step(self, name, trade_date, run_id, *a, **k):
+        assert name == "compact"
+        seen.append(run_id)
+        return {"status": "success", "rows_written": 1}
 
-    monkeypatch.setattr("cnequity.cli.maintain_cmds.Manifest", FakeManifest)
-    monkeypatch.setattr("cnequity.cli.maintain_cmds.JobEngine", FakeEngine)
+    monkeypatch.setattr(JobEngine, "run_step", fake_step)
+    monkeypatch.setattr(Manifest, "reconcile_orphaned_runs", lambda self, **k: {})
+    result = CliRunner().invoke(cli, ["run", "compact", "--config", cfg_path])
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["daily-failed", "backfill-done"], (
+        "oldest first; init and published runs left alone"
+    )
+
+
+def test_bare_compact_with_nothing_pending(cfg_path):
     result = CliRunner().invoke(cli, ["run", "compact", "--config", cfg_path])
     assert result.exit_code == 0, result.output
-    assert "latest-1" in result.output
+    assert "没有待发布的 staging" in result.output
 
 
-def test_compact_no_runs(cfg_path, monkeypatch):
-    class FakeManifest:
-        def __init__(self, *a, **k):
-            pass
-
-        def latest_run(self):
-            return None
-
-    monkeypatch.setattr("cnequity.cli.maintain_cmds.Manifest", FakeManifest)
-    result = CliRunner().invoke(cli, ["run", "compact", "--config", cfg_path])
-    assert result.exit_code != 0
-    assert "没有找到任何 run" in result.output
+def test_compact_with_run_id_still_targets_one_run(cfg_path, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(
+        JobEngine,
+        "run_step",
+        lambda self, name, td, run_id, *a, **k: seen.append(run_id) or {"rows_written": 9},
+    )
+    result = CliRunner().invoke(cli, ["run", "compact", "--run-id", "r-1", "--config", cfg_path])
+    assert result.exit_code == 0, result.output
+    assert seen == ["r-1"]
 
 
 def test_audit_full_healthy(cfg_path, monkeypatch):
@@ -1304,6 +1353,9 @@ def test_derive_trading_status_and_orphans(cfg_path, monkeypatch):
         return 7
 
     monkeypatch.setattr(
+        "cnequity.query.parquet_scan.dataset_has_parquet", lambda _root, **kwargs: True
+    )
+    monkeypatch.setattr(
         "cnequity.derive.trading_status_history.derive_suspension_history", fake_derive
     )
     result = CliRunner().invoke(
@@ -1345,6 +1397,9 @@ def test_derive_trading_status_failure_is_persisted_and_exits_nonzero(cfg_path, 
     def fail_derive(*args, **kwargs):
         raise RuntimeError("cannot derive suspension history")
 
+    monkeypatch.setattr(
+        "cnequity.query.parquet_scan.dataset_has_parquet", lambda _root, **kwargs: True
+    )
     monkeypatch.setattr(
         "cnequity.derive.trading_status_history.derive_suspension_history", fail_derive
     )
@@ -1464,10 +1519,16 @@ def test_shfe_annual_plan_is_offline_and_requires_partial_fields(cfg_path, tmp_p
     assert "必须带时区" in naive.output
 
 
-def test_backfill_snapshot_dataset_rejected(cfg_path):
+def test_backfill_snapshot_dataset_reports_capability_and_fallback(cfg_path):
     result = CliRunner().invoke(cli, ["backfill", "fund_flow", "--config", cfg_path])
-    assert result.exit_code != 0
-    assert "snapshot" in result.output.lower() or "not supported" in result.output.lower()
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["execution_status"] == "completed"
+    assert payload["status"] == "degraded"
+    assert payload["fallback"][0]["reason_codes"] == ["capability_limit"]
+    assert payload["fallback"][0]["history_mode"] == "snapshot_only"
+    assert payload["fallback"][0]["retry_command"] is None
+    assert not list(Path(cfg_path).parent.joinpath("data").rglob("*.parquet"))
 
 
 def test_backfill_trading_status_uses_dedicated_history_path(cfg_path, monkeypatch):
@@ -1502,14 +1563,23 @@ def test_backfill_trading_status_uses_dedicated_history_path(cfg_path, monkeypat
 
 
 @pytest.mark.parametrize("extra", [[], ["--plan"]])
-def test_backfill_trading_status_rejects_bj_before_touching_lake(cfg_path, extra):
+def test_backfill_trading_status_bj_reports_capability_limit(cfg_path, extra):
     result = CliRunner().invoke(
         cli,
         ["backfill", "trading_status", "--config", cfg_path, "--symbols", "920201.BJ", *extra],
     )
-    assert result.exit_code != 0
-    assert "不支持 BJ 标的" in result.output
-    assert not Path(cfg_path).parent.joinpath("data").exists()
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    if extra:
+        assert payload["writes"] is False
+        assert payload["symbols"] == ["920201.BJ"]
+        assert not Path(cfg_path).parent.joinpath("data").exists()
+    else:
+        assert payload["execution_status"] == "completed"
+        assert payload["status"] == "degraded"
+        assert payload["results"][0]["unsupported_symbols"] == 1
+        assert payload["fallback"][0]["reason_codes"] == ["capability_limit"]
+        assert not list(Path(cfg_path).parent.joinpath("data").rglob("*.parquet"))
 
 
 def test_backfill_sector_bars_force_and_retry_mutex(cfg_path):
@@ -1683,7 +1753,7 @@ def test_status_datasets_exits_1_when_something_is_stale(cfg_path, monkeypatch):
     )
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: True)
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
 
     assert result.exit_code == 1, result.output
     assert "STALE" in result.output
@@ -1729,7 +1799,7 @@ def test_freshness_gate_can_be_scoped_to_the_groups_this_host_runs(tmp_path, mon
     _stale_lake(monkeypatch, ["valuation_metrics"])
 
     result = CliRunner().invoke(
-        cli, ["status", "--datasets", "--groups", "core", "--config", scoped]
+        cli, ["status", "--gate", "--datasets", "--groups", "core", "--config", scoped]
     )
 
     assert result.exit_code == 0, result.output
@@ -1743,7 +1813,7 @@ def test_a_scoped_gate_still_fails_on_its_own_group(cfg_path, monkeypatch):
     _stale_lake(monkeypatch, ["daily_bars"])
 
     result = CliRunner().invoke(
-        cli, ["status", "--datasets", "--groups", "core", "--config", cfg_path]
+        cli, ["status", "--gate", "--datasets", "--groups", "core", "--config", cfg_path]
     )
 
     assert result.exit_code == 1, result.output
@@ -1753,7 +1823,7 @@ def test_an_unscoped_gate_still_fails_on_everything(cfg_path, monkeypatch):
     """The default is unchanged: without --groups, any stale dataset fails."""
     _stale_lake(monkeypatch, ["valuation_metrics"])
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
 
     assert result.exit_code == 1, result.output
 
@@ -1809,6 +1879,9 @@ def test_group_ownership_includes_derived_outputs(tmp_path):
 
 
 def test_cli_derive_publishes_new_revision_and_preserves_old_reader(cfg_path, monkeypatch):
+    monkeypatch.setattr(
+        "cnequity.query.parquet_scan.dataset_has_parquet", lambda _root, **kwargs: True
+    )
     from cnequity.config import load_config
     from cnequity.domain.schemas import ADJ_FACTORS_SCHEMA
     from cnequity.query.parquet_scan import scan_parquet_root
@@ -1850,14 +1923,20 @@ def test_cli_derive_publishes_new_revision_and_preserves_old_reader(cfg_path, mo
     ].to_list() == [1.0]
 
 
-def test_cli_derive_failures_are_not_success(cfg_path, monkeypatch):
+def test_cli_derive_source_limit_finishes_with_fallback(cfg_path, monkeypatch):
+    monkeypatch.setattr(
+        "cnequity.query.parquet_scan.dataset_has_parquet", lambda _root, **kwargs: True
+    )
     monkeypatch.setattr(
         "cnequity.cli.maintain_cmds.compute_adj_factors",
         lambda cfg, full=False: AdjFactorsResult(0, 1, ["920001.BJ:hfq"], []),
     )
     result = CliRunner().invoke(cli, ["derive", "adj_factors", "--config", cfg_path])
-    assert result.exit_code == 1
-    assert "警告：1" in result.output
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output[result.output.index("{") :])
+    assert payload["status"] == "degraded"
+    assert payload["coverage_status"] == "partial"
+    assert payload["fallback"][0]["retry_command"].startswith("cne derive adj_factors")
 
 
 def test_run_daily_all_groups_runs_each_group_and_survives_one_failure(tmp_path, monkeypatch):
@@ -1900,8 +1979,8 @@ def test_run_daily_all_groups_runs_each_group_and_survives_one_failure(tmp_path,
         (["degraded", "failed", "success"], 1),
         (["exception", "degraded", "success"], 1),
         (["degraded", "exception", "success"], 1),
-        (["degraded", "success", "success"], 2),
-        (["success", "warning", "success"], 2),
+        (["degraded", "success", "success"], 0),
+        (["success", "warning", "success"], 0),
     ],
 )
 def test_all_groups_core_failure_takes_precedence_over_degradation(
@@ -1962,6 +2041,107 @@ def test_all_groups_honors_weekly_history_but_keeps_snapshots(
         assert "daily:signals" not in seen
         assert seen["daily:capital"] == ["fund_flow", "compact"]
         assert "skipped_not_scheduled" in result.output
+
+
+_DAY_GROUPS = (
+    '\n[job.daily.groups.core]\nat = "16:00"\nsteps = ["compact"]\n'
+    '\n[job.daily.groups.capital]\nat = "17:00"\nsteps = ["compact"]\n'
+    '\n[job.events.groups.disclosures]\nsteps = ["compact"]\n'
+)
+
+
+def _record_jobs(monkeypatch, *, events_error: Exception | None = None) -> list[str]:
+    seen: list[str] = []
+
+    def fake_run_job(self, job_name, *a, **k):
+        seen.append(job_name)
+        if job_name == "events" and events_error is not None:
+            raise events_error
+        return {"run_id": f"r-{job_name}", "status": "success", "results": []}
+
+    monkeypatch.setattr(JobEngine, "run_job", fake_run_job)
+    return seen
+
+
+def test_bare_run_daily_runs_every_group_then_the_event_stream(tmp_path, monkeypatch):
+    """One command for the whole day: no second cron line for `run events`."""
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    seen = _record_jobs(monkeypatch)
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert seen == ["daily:core", "daily:capital", "daily:audit", "events"]
+    payload = json.loads(result.output[result.output.index("{") :])
+    assert payload["audit"]["status"] == "success", "one lake audit, after every group"
+    assert payload["events"]["status"] == "success"
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (["--no-events"], ["daily:core", "daily:capital", "daily:audit"]),
+        (["--all-groups"], ["daily:core", "daily:capital"]),
+        (["--backfill"], ["daily:core", "daily:capital", "daily:audit"]),
+        (["--core-only"], ["daily"]),
+        (["--group", "capital"], ["daily:capital"]),
+    ],
+)
+def test_run_daily_narrowing_flags(tmp_path, monkeypatch, flags, expected):
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    seen = _record_jobs(monkeypatch)
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg, *flags])
+    assert result.exit_code == 0, result.output
+    assert seen == expected
+
+
+def test_bare_run_daily_points_a_stale_config_at_upgrade(tmp_path, monkeypatch):
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    _record_jobs(monkeypatch)
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert "cne config upgrade" in result.output
+
+
+def test_run_daily_skips_the_audit_when_no_group_ran(tmp_path, monkeypatch):
+    """A weekend: every group skips, so there is nothing new to audit."""
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    seen: list[str] = []
+
+    def fake_run_job(self, job_name, *a, **k):
+        seen.append(job_name)
+        status = "success" if job_name == "events" else "skipped_non_trading_day"
+        return {"run_id": f"r-{job_name}", "status": status, "results": []}
+
+    monkeypatch.setattr(JobEngine, "run_job", fake_run_job)
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert seen == ["daily:core", "daily:capital", "events"]
+
+
+def test_run_daily_leaves_a_running_event_stream_alone(tmp_path, monkeypatch):
+    """An existing `cne run events` cron holding its lock is not a failed day."""
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    _record_jobs(monkeypatch, events_error=RunLockError("events lock held"))
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output[result.output.index("{") :])
+    assert payload["events"]["status"] == "skipped_locked"
+
+
+def test_run_daily_reports_a_failed_event_stream(tmp_path, monkeypatch):
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    _record_jobs(monkeypatch, events_error=RuntimeError("cninfo down"))
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg])
+    assert result.exit_code == 1
+    assert "cninfo down" in result.output
+
+
+@pytest.mark.parametrize(
+    "flags", [["--core-only", "--group", "core"], ["--no-events", "--all-groups"]]
+)
+def test_run_daily_rejects_contradictory_scope_flags(tmp_path, flags):
+    cfg = _write_config(tmp_path, extra=_DAY_GROUPS)
+    result = CliRunner().invoke(cli, ["run", "daily", "--config", cfg, *flags])
+    assert result.exit_code != 0
 
 
 def test_run_daily_all_groups_skips_groups_whose_datasets_are_off(tmp_path, monkeypatch):
@@ -2108,11 +2288,13 @@ def test_scope_gate_respects_the_groups_flag_that_owns_daily_bars(cfg_path, monk
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
     runner = CliRunner()
-    gated = runner.invoke(cli, ["status", "--datasets", "--groups", "core", "--config", cfg_path])
+    gated = runner.invoke(
+        cli, ["status", "--gate", "--datasets", "--groups", "core", "--config", cfg_path]
+    )
     assert gated.exit_code == 1, gated.output
 
     exempt = runner.invoke(
-        cli, ["status", "--datasets", "--groups", "capital", "--config", cfg_path]
+        cli, ["status", "--gate", "--datasets", "--groups", "capital", "--config", cfg_path]
     )
     assert exempt.exit_code == 0, exempt.output
 
@@ -2152,7 +2334,7 @@ def test_unprovable_coverage_exits_two_not_one(cfg_path, monkeypatch):
     )
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--config", cfg_path])
+    result = CliRunner().invoke(cli, ["status", "--gate", "--datasets", "--config", cfg_path])
     assert result.exit_code == 2, result.output
     assert "UNVERIFIED" in result.output
     assert "证明不了" in result.output
@@ -2194,7 +2376,9 @@ def test_no_scope_skips_the_cross_section_read_entirely(cfg_path, monkeypatch):
     )
     monkeypatch.setattr("cnequity.domain.datasets.is_stale", lambda *a, **k: False)
 
-    result = CliRunner().invoke(cli, ["status", "--datasets", "--no-scope", "--config", cfg_path])
+    result = CliRunner().invoke(
+        cli, ["status", "--gate", "--datasets", "--no-scope", "--config", cfg_path]
+    )
     assert result.exit_code == 0, result.output
     assert not calls
     assert "取数截面" not in result.output

@@ -8,16 +8,18 @@ import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
 from datetime import date
 from typing import Any
 
 from cnequity.config import Config, WaveConfig
+from cnequity.domain.datasets import DATASETS, history_mode_for
 from cnequity.domain.market_time import shanghai_today
+from cnequity.orchestrator.backfill_scope import capture_backfill_scope, restore_backfill_scope
 from cnequity.orchestrator.deps import step_execution_levels, validate_steps_registered
 from cnequity.orchestrator.init_phases import (
     DEFAULT_INIT_PHASES,
     INIT_PHASE_STEPS,
-    RESOLVED_BATCH_STATUSES,
     current_phase_statuses,
     init_run_complete,
     missing_steps,
@@ -26,10 +28,19 @@ from cnequity.orchestrator.init_phases import (
     pending_phases,
     phase_backfill,
     step_backfill,
+    step_completed,
     step_succeeded,
 )
 from cnequity.orchestrator.init_phases import expected_steps as init_expected_steps
 from cnequity.orchestrator.manifest import QUEUED_BATCH_STATUS, Manifest
+from cnequity.orchestrator.outcomes import (
+    SOURCE_LIMIT_REASONS,
+    CapabilityLimitError,
+    InputUnavailableError,
+    execution_settled,
+    result_is_usable,
+    step_outcome,
+)
 from cnequity.orchestrator.registry import get_step
 from cnequity.orchestrator.run_lock import (
     DAILY_INGESTION_LOCK,
@@ -55,7 +66,9 @@ _TRANSIENT_RETRY_MARKERS = (
 )
 
 
-def _is_transient_retry_error(error_message: str | None) -> bool:
+def _is_transient_retry_error(error_message: str | None, reason_code: str | None = None) -> bool:
+    if reason_code is not None:
+        return reason_code == "source_transient"
     message = (error_message or "").lower()
     return any(marker in message for marker in _TRANSIENT_RETRY_MARKERS)
 
@@ -85,6 +98,18 @@ def _has_partial_failures(result: dict[str, Any]) -> bool:
         elif value:
             return True
     return False
+
+
+def _has_execution_errors(result: dict[str, Any]) -> bool:
+    """Judge a phase's attempts, allowing a source-only empty phase to close."""
+    steps = result.get("results")
+    if steps:
+        return any(
+            row.get("execution_status") in {"failed", "interrupted"}
+            or (row.get("status") == "failed" and row.get("execution_status") is None)
+            for row in steps
+        )
+    return result.get("status") == "failed"
 
 
 def job_family(job_name: str) -> str:
@@ -176,31 +201,7 @@ class JobEngine:
 
         metadata = {"trade_date": trade_date.isoformat(), "backfill": backfill}
         if backfill:
-            metadata["backfill_scope"] = {
-                "start": (
-                    self.config._backfill_start.isoformat()
-                    if getattr(self.config, "_backfill_start", None)
-                    else None
-                ),
-                "end": (
-                    self.config._backfill_end.isoformat()
-                    if getattr(self.config, "_backfill_end", None)
-                    else None
-                ),
-                "symbols": getattr(self.config, "_backfill_symbols", None),
-                "baostock_repair": bool(
-                    getattr(self.config, "_corporate_actions_baostock_repair", False)
-                ),
-                "ths_repair": bool(getattr(self.config, "_corporate_actions_ths_repair", False)),
-                "eastmoney_bj_repair": bool(
-                    getattr(self.config, "_corporate_actions_eastmoney_bj_repair", False)
-                ),
-                "bse_tip_repair": bool(getattr(self.config, "_bse_tip_repair", False)),
-                "bj_amount_repair": bool(getattr(self.config, "_bj_amount_repair", False)),
-                "tdx_amount_repair": bool(getattr(self.config, "_tdx_amount_repair", False)),
-                "tdx_volume_repair": bool(getattr(self.config, "_tdx_volume_repair", False)),
-                "turnover_repair": bool(getattr(self.config, "_turnover_repair", False)),
-            }
+            metadata["backfill_scope"] = capture_backfill_scope(self.config)
         lock_name = _JOB_LOCKS.get(family)
         with contextlib.ExitStack() as stack:
             stack.enter_context(self._optional_job_lock(lock_name))
@@ -259,6 +260,8 @@ class JobEngine:
                     self.manifest.record_run_progress(
                         run_id, base_read + total_read, base_written + total_written
                     )
+                    if any(row.get("reason_code") == "storage_failure" for row in wave_results):
+                        break
 
                     if "daily_bars" in wave.steps:
                         promoted = self.manifest.promote_running_to_stale(
@@ -294,6 +297,7 @@ class JobEngine:
                 return {
                     "run_id": run_id,
                     "status": status,
+                    **self._public_outcome(run_id),
                     "results": results,
                     "rows_read": total_read,
                     "rows_written": total_written,
@@ -393,6 +397,8 @@ class JobEngine:
         return {
             "derive_adj_factors": "adj_factors",
             "derive_industry_index": "industry_index",
+            "derive_futures_continuous": "futures_continuous",
+            "derive_option_greeks": "option_greeks",
         }.get(name, name)
 
     # These steps write their own dataset receipt (in ``steps/finalize.py``)
@@ -425,13 +431,27 @@ class JobEngine:
             # per-dataset loop starts.
             stages = ("compact",)
             dataset = "compact"
-        elif name in {"derive_adj_factors", "derive_industry_index"}:
+        elif name in {
+            "derive_adj_factors",
+            "derive_industry_index",
+            "derive_futures_continuous",
+            "derive_option_greeks",
+        }:
             stages = ("derive",)
         else:
             # A step result is the final outcome of both source fetch and
             # writing its staging fragment. Recording both makes status useful
             # even when a worker process is not available to expose a batch.
             stages = ("fetch", "stage")
+
+        logical = step_outcome(status, out, stage=stages[0], error=error).to_dict()
+        logical.update(status="skipped" if logical["execution_status"] == "skipped" else status)
+        self.manifest.mutate_run_metadata(
+            run_id,
+            lambda meta: meta.setdefault("step_outcomes", {}).update({name: logical}),
+        )
+        if logical["execution_status"] == "skipped":
+            status = "skipped"
 
         existing_receipts = [
             self.manifest.get_dataset_result(run_id, dataset, stage) for stage in stages
@@ -446,6 +466,27 @@ class JobEngine:
             # or test double may omit the self-recording call, in which case
             # the engine must backfill the receipt below. A receipt from a
             # previous failed retry is likewise not evidence for this attempt.
+            if error is None:
+                return
+            # Preserve the step's detailed message while upgrading the error
+            # classification at the exception boundary.
+            for stage, receipt in zip(stages, existing_receipts, strict=True):
+                self.manifest.record_dataset_result(
+                    run_id,
+                    dataset,
+                    stage,
+                    status,
+                    criticality=receipt["criticality"],
+                    rows_written=receipt["rows_written"],
+                    revision_id=receipt["revision_id"],
+                    error_code=receipt["error_code"],
+                    error_message=receipt["error_message"],
+                    execution_status=logical["execution_status"],
+                    coverage_status=logical["coverage_status"],
+                    publication_status=receipt["publication_status"],
+                    reason_code=logical["reason_code"],
+                    usable_result=bool(receipt["usable_result"]),
+                )
             return
 
         error_code = type(error).__name__ if error is not None else None
@@ -456,6 +497,7 @@ class JobEngine:
             error_code = error_code or "InvalidStepStatus"
             error_message = error_message or f"invalid step status {raw_status!r}"
         for stage in stages:
+            outcome = step_outcome(status, out, stage=stage, error=error)
             self.manifest.record_dataset_result(
                 run_id,
                 dataset,
@@ -468,6 +510,11 @@ class JobEngine:
                     error_message
                     or (None if status == "success" else f"step completed with status={status}")
                 ),
+                execution_status=outcome.execution_status,
+                coverage_status=outcome.coverage_status,
+                publication_status=outcome.publication_status,
+                reason_code=outcome.reason_code,
+                usable_result=result_is_usable(out),
             )
 
     def _overall_status(self, run_id: str, fallback: str) -> str:
@@ -551,6 +598,8 @@ class JobEngine:
 
         if wave.parallel:
             for level in levels:
+                if any(row.get("reason_code") == "storage_failure" for row in results):
+                    break
                 if len(level) == 1:
                     merge_result(self._run_step(level[0], trade_date, run_id, context))
                     continue
@@ -565,6 +614,8 @@ class JobEngine:
         else:
             for level in levels:
                 for name in level:
+                    if any(row.get("reason_code") == "storage_failure" for row in results):
+                        break
                     merge_result(self._run_step(name, trade_date, run_id, context))
 
         return results, total_read, total_written, had_error, had_warning
@@ -582,10 +633,8 @@ class JobEngine:
         uses_worker_batches = entry.requires_workers
         batch_id = str(uuid.uuid4())
         if not uses_worker_batches:
-            # A warning is both retryable and a data-integrity gate. The step
-            # may have staged a valid subset, but compact must wait until the
-            # missing scope has been retried rather than advancing its
-            # dataset watermark over a hole.
+            # Attempt status preserves retry evidence. Validated staging is
+            # selected independently by the publication gate.
             self.manifest.start_batch(
                 run_id,
                 batch_id,
@@ -596,22 +645,35 @@ class JobEngine:
 
         t0 = time.perf_counter()
         try:
+            from cnequity.query.parquet_scan import dataset_has_parquet
+            from cnequity.storage.read_context import read_root
+
+            step_config, scope_limit = self._backfill_source_scope(name, trade_date)
+            missing_inputs = [
+                dataset
+                for dataset in getattr(entry, "input_datasets", ())
+                if not dataset_has_parquet(read_root(self.config, dataset))
+            ]
+            if missing_inputs:
+                raise InputUnavailableError("missing committed input: " + ", ".join(missing_inputs))
             # Internal step metadata is passed through a shallow copy so long-
             # running non-worker steps can refresh their own batch heartbeat
             # without exposing the batch id as user-facing context.
             step_context = dict(context)
             step_context["_batch_id"] = batch_id
+            step_context["_init"] = self._is_init_run(run_id)
             # The only line a step used to produce was the one announcing it
             # done, so a twenty-minute fetch and a hang read identically until
             # one of them ended. Name it on the way in as well, and register it
             # so the heartbeat can say which step the silence belongs to.
             logger.info("Step %s starting", name)
-            with step_scope(name):
-                out = entry.fn(self.config, trade_date, run_id, step_context)
-            elapsed = time.perf_counter() - t0
+            from cnequity.orchestrator.source_gaps import source_gap_scope
+
+            with step_scope(name), source_gap_scope(step_config) as source_gaps:
+                if name == "daily_bars" and step_context["_init"]:
+                    self._recover_init_delisted_bars(run_id, trade_date, step_context)
+                out = entry.fn(step_config, trade_date, run_id, step_context)
             step_status = out.pop("status", "success")
-            if step_status == "success" and _has_partial_failures(out):
-                step_status = "warning"
             if step_status not in {
                 "success",
                 "warning",
@@ -621,7 +683,47 @@ class JobEngine:
                 "degraded",
             }:
                 raise ValueError(f"step {name} returned invalid status {step_status!r}")
+            can_degrade = (
+                step_status in {"success", "warning", "degraded"}
+                and step_outcome(step_status, out).execution_status == "completed"
+            )
+            if scope_limit:
+                out["coverage_status"] = "partial"
+                out["requested_scope"] = scope_limit["requested_scope"]
+                out["effective_scope"] = scope_limit["effective_scope"]
+                if can_degrade:
+                    step_status = "warning"
+                    out["reason_code"] = "capability_limit"
+                out.setdefault("context_updates", {}).setdefault("audit_findings", []).append(
+                    scope_limit
+                )
+            if source_gaps:
+                out["coverage_status"] = "partial"
+                if can_degrade:
+                    step_status = "warning"
+                    out["reason_code"] = "source_scope_incomplete"
+                out.setdefault("context_updates", {}).setdefault("audit_findings", []).extend(
+                    source_gaps
+                )
+            recovery = step_context.get("init_delisted_recovery")
+            if recovery and recovery.get("coverage_status") == "partial":
+                out["coverage_status"] = "partial"
+                if can_degrade:
+                    step_status = "warning"
+                    out["reason_code"] = "delisted_source_unavailable"
+                out.setdefault("context_updates", {})["init_delisted_recovery"] = recovery
+            elapsed = time.perf_counter() - t0
+            if step_status == "success" and _has_partial_failures(out):
+                step_status = "warning"
             step_metrics = self._step_metrics(out)
+            outcome = step_outcome(
+                step_status,
+                out,
+                stage="audit" if name == "audit" else "compact" if name == "compact" else "fetch",
+            )
+            out.update(outcome.to_dict())
+            if step_status == "failed" and outcome.reason_code in SOURCE_LIMIT_REASONS:
+                step_status = "warning"
             request_retry_count = self._request_retry_count(step_metrics)
             if not uses_worker_batches:
                 physical_dataset = out.get("dataset")
@@ -633,10 +735,9 @@ class JobEngine:
                 # outstanding ledger, and nothing is waiting to be retried. The
                 # batch status drives retry and compaction, so it has to be
                 # able to say "settled" while the step still reports a warning.
-                # It is opt-in because for most steps a warning does mean the
-                # batch needs another attempt — `trading_status` with partial
-                # ST evidence must keep blocking, or the lake would publish a
-                # coverage receipt claiming a universe it never swept.
+                # Other source warnings keep an attempt available for an
+                # explicit retry. A seal permits publishing its valid facts;
+                # it never certifies the unswept scope.
                 batch_status = "success" if out.get("batch_settled") else step_status
                 self.manifest.finish_batch(
                     run_id,
@@ -656,6 +757,8 @@ class JobEngine:
                     # without turning this value into a retry cap.
                     retry_count=1 if retry_of else None,
                     request_retry_count=request_retry_count,
+                    execution_status=outcome.execution_status,
+                    reason_code=outcome.reason_code,
                 )
                 if step_status == "success" and retry_of:
                     self.manifest.supersede_batches(
@@ -711,6 +814,7 @@ class JobEngine:
             raise
         except Exception as exc:
             elapsed = time.perf_counter() - t0
+            outcome = step_outcome("failed", error=exc)
             if not uses_worker_batches:
                 self.manifest.finish_batch(
                     run_id,
@@ -718,6 +822,8 @@ class JobEngine:
                     "failed",
                     error_message=str(exc),
                     retry_count=1 if retry_of else None,
+                    execution_status=outcome.execution_status,
+                    reason_code=outcome.reason_code,
                 )
             self._record_step_result(
                 name=name,
@@ -727,8 +833,62 @@ class JobEngine:
                 error=exc,
             )
             self.manifest.record_stage_metrics(run_id, name, elapsed)
-            logger.exception("Step %s failed after %.1fs", name, elapsed)
-            return {"step": name, "status": "failed", "error": str(exc), "elapsed": elapsed}
+            if outcome.reason_code in SOURCE_LIMIT_REASONS:
+                logger.warning("Step %s source unavailable after %.1fs: %s", name, elapsed, exc)
+            elif outcome.execution_status == "skipped":
+                logger.warning("Step %s skipped: %s", name, exc)
+            else:
+                logger.exception("Step %s failed after %.1fs", name, elapsed)
+            if outcome.execution_status == "skipped":
+                status = "skipped"
+            elif outcome.reason_code in SOURCE_LIMIT_REASONS:
+                status = "warning"
+            else:
+                status = "failed"
+            return {
+                "step": name,
+                "status": status,
+                "error": str(exc),
+                "elapsed": elapsed,
+                **outcome.to_dict(),
+            }
+
+    def _backfill_source_scope(self, name: str, trade_date: date) -> tuple[Config, dict | None]:
+        """Retain the requested scope while avoiding known unservable history."""
+        spec = DATASETS.get(name)
+        if not getattr(self.config, "_backfill", False) or spec is None:
+            return self.config, None
+        if history_mode_for(spec) == "snapshot_only":
+            raise CapabilityLimitError(
+                f"{name}: snapshot source has no historical replay; retained observations "
+                "remain readable, and daily collection can accumulate future snapshots"
+            )
+        start = getattr(self.config, "_backfill_start", None)
+        end = getattr(self.config, "_backfill_end", None) or trade_date
+        floor = spec.earliest_available(shanghai_today())
+        ceiling = spec.source_retired_date
+        lo = max(start, floor) if start and floor else start
+        hi = min(end, ceiling) if ceiling else end
+        if (floor and end < floor) or (lo and lo > hi):
+            raise CapabilityLimitError(
+                f"{name}: requested {start}..{end} is outside available history "
+                f"{floor or 'unbounded'}..{ceiling or 'current'}; retained data remains readable"
+            )
+        if lo == start and hi == end:
+            return self.config, None
+        config = copy(self.config)
+        config._backfill_start, config._backfill_end = lo, hi
+        requested = {"start": start.isoformat() if start else None, "end": end.isoformat()}
+        effective = {"start": lo.isoformat() if lo else None, "end": hi.isoformat()}
+        finding = {
+            "dataset": name,
+            "severity": "warning",
+            "check": "source_scope_incomplete",
+            "message": f"{name}: requested history exceeds source capability; fetching {lo}..{hi}",
+            "requested_scope": requested,
+            "effective_scope": effective,
+        }
+        return config, finding
 
     @staticmethod
     def _step_metrics(out: dict[str, Any]) -> dict[str, Any]:
@@ -787,6 +947,121 @@ class JobEngine:
         run = self.manifest.get_run(run_id)
         return run is not None and run["job_name"] == "init"
 
+    def _recover_init_delisted_bars(
+        self, run_id: str, trade_date: date, context: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Publish scoped recovery before daily bars checks delegated ownership.
+
+        A separate run avoids a circular gate on legacy init retries: the old
+        daily-bar ownership warning blocks that run's compact until recovery
+        has reached curated storage. Partial recovery remains durable, while
+        unresolved targets remain durable coverage findings in the parent.
+        """
+        from cnequity.steps.bars import in_ingest_universe_symbol
+        from cnequity.steps.common import BACKFILL_START
+        from cnequity.steps.delisted import (
+            backfill_delisted_bars,
+            delisted_recovery_covers,
+            delisted_recovery_targets,
+        )
+
+        specs = context.get("_retry_batch_specs") or []
+        start = (
+            min(s for _, _, s, _ in specs)
+            if specs
+            else getattr(self.config, "_backfill_start", None) or BACKFILL_START
+        )
+        end = (
+            max(e for _, _, _, e in specs)
+            if specs
+            else getattr(self.config, "_backfill_end", None) or trade_date
+        )
+        scope = {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "universe": self.config.ingest_universe,
+        }
+        previous = self.manifest.get_run_metadata(run_id).get("delisted_recovery_scope") or {}
+        targets = (
+            previous["targets"]
+            if all(previous.get(key) == value for key, value in scope.items())
+            and "targets" in previous
+            else delisted_recovery_targets(self.config, start, end)
+        )
+        targets = {
+            symbol: target
+            for symbol, target in targets.items()
+            if target["ownership"] == "dedicated_fetch"
+            and in_ingest_universe_symbol(symbol, self.config)
+        }
+        symbols = sorted(targets)
+        if not symbols or delisted_recovery_covers(self.config, start, end, symbols):
+            return
+        self.manifest.mutate_run_metadata(
+            run_id,
+            lambda meta: meta.update({"delisted_recovery_scope": {**scope, "targets": targets}}),
+        )
+        child_id = self.manifest.start_run(
+            "delisted_backfill",
+            {"parent_init_run_id": run_id, "start": start.isoformat(), "end": end.isoformat()},
+        )
+        logger.info("Init: recovering %d delisted symbols before daily bars", len(symbols))
+        with self._run_lock(child_id):
+            try:
+                result = backfill_delisted_bars(
+                    self.config, child_id, start, end=end, recovery_targets=targets
+                )
+                self._record_step_result(
+                    name="daily_bars",
+                    entry=get_step("daily_bars"),
+                    run_id=child_id,
+                    status=result.get("status", "success"),
+                    out=result,
+                )
+                recovery_outcome = step_outcome(result.get("status", "success"), result)
+                if recovery_outcome.execution_status in {"failed", "interrupted"}:
+                    raise RuntimeError(
+                        "init delisted recovery execution failed: "
+                        + str(result.get("error") or recovery_outcome.reason_code)
+                    )
+                compact = self.run_step("compact", trade_date, child_id)
+                no_data = set(result.get("expected_no_data_symbols", []))
+                required = [symbol for symbol in symbols if symbol not in no_data]
+                complete = (
+                    result.get("status", "success") == "success"
+                    and compact["status"] == "success"
+                    and delisted_recovery_covers(self.config, start, end, required)
+                )
+                self.manifest.finish_run(
+                    child_id,
+                    "success" if complete else "warning",
+                    rows_read=result.get("rows_read", 0),
+                    rows_written=result.get("rows_written", 0),
+                    error_message=None if complete else "init delisted recovery incomplete",
+                )
+            except (KeyboardInterrupt, SystemExit):
+                self.manifest.interrupt_run(
+                    child_id, error_message="init delisted recovery stopped"
+                )
+                raise
+            except Exception as exc:
+                self.manifest.finish_run(child_id, "failed", error_message=str(exc))
+                raise
+        if compact.get("execution_status") == "failed":
+            raise RuntimeError(
+                "init delisted recovery publication failed: " + str(compact.get("error"))
+            )
+        if not complete:
+            recovery = {
+                "run_id": child_id,
+                "coverage_status": "partial",
+                "reason_code": "delisted_source_unavailable",
+                "requested_symbols": symbols,
+            }
+            context["init_delisted_recovery"] = recovery
+            return recovery
+        return {"run_id": child_id, "coverage_status": "complete"}
+
     def _init_phases_list(self, run_id: str | None = None) -> list[str]:
         if run_id:
             meta = self.manifest.get_run_metadata(run_id)
@@ -794,6 +1069,34 @@ class JobEngine:
             if phases:
                 return list(phases)
         return list(self.config.init_phases or DEFAULT_INIT_PHASES)
+
+    def _init_execution_batches(self, run_id: str) -> list[Any]:
+        batches: list[Any] = list(self.manifest.get_batches_for_run(run_id))
+        outcomes = self.manifest.get_run_metadata(run_id).get("step_outcomes", {})
+        batches.extend(
+            {"dataset": name, "logical_step": True, **outcome} for name, outcome in outcomes.items()
+        )
+        return batches
+
+    def _public_outcome(self, run_id: str) -> dict[str, Any]:
+        from cnequity.orchestrator.recovery import fallback_options
+
+        run = self.manifest.get_run(run_id)
+        aggregate = self.manifest.aggregate_run_status(run_id)
+        source = run if run is not None and run["finished_at"] else aggregate
+        return {
+            **{
+                key: source[key]
+                for key in (
+                    "result_schema_version",
+                    "execution_status",
+                    "coverage_status",
+                    "publication_status",
+                )
+            },
+            "usable_result": aggregate["usable_result"],
+            "fallback": fallback_options(self.config, self.manifest, run_id),
+        }
 
     def _published_run_rows(self, run_id: str) -> tuple[int, int]:
         """Row counts already recorded on *run_id*, or zeros for a new run."""
@@ -804,7 +1107,7 @@ class JobEngine:
 
     def _missing_init_steps(self, run_id: str) -> list[str]:
         phases = self._init_phases_list(run_id)
-        batches = self.manifest.get_batches_for_run(run_id)
+        batches = self._init_execution_batches(run_id)
         return missing_steps_within_phase_order(phases, batches)
 
     def _all_missing_init_steps(self, run_id: str) -> list[str]:
@@ -894,7 +1197,7 @@ class JobEngine:
             # `industry_index`). Track both spellings, or a dependent looks
             # blocked by an upstream that in fact succeeded.
             names = {str(batch["task_id"]), str(batch["dataset"])}
-            if batch["status"] in RESOLVED_BATCH_STATUSES:
+            if execution_settled(batch):
                 resolved |= names
             else:
                 unresolved |= names
@@ -986,12 +1289,15 @@ class JobEngine:
         if incomplete == 0:
             return "success"
         counts = self.manifest.incomplete_batch_counts_by_status(run_id)
+        if counts.get("running") or counts.get("stale") or counts.get(QUEUED_BATCH_STATUS):
+            return "pending"
+        aggregate = self.manifest.aggregate_run_status(run_id)
+        if aggregate["results"]:
+            return aggregate["status"]
         if counts.get("failed"):
             return "failed"
         if counts.get("warning"):
             return "warning"
-        if counts.get("running") or counts.get("stale") or counts.get(QUEUED_BATCH_STATUS):
-            return "pending"
         return "failed"
 
     def _pending_retry_payload(
@@ -1133,7 +1439,7 @@ class JobEngine:
                 total_timeout[key] += int(result.get("batch_timeout", {}).get(key, 0))
             if result.get("retried", 0):
                 retry_passes += 1
-            if result["status"] not in {"failed", "warning"}:
+            if result["status"] not in {"failed", "warning", "degraded"}:
                 break
 
             remaining = self._retryable_batches_with_worker_budget(run_id)
@@ -1141,7 +1447,7 @@ class JobEngine:
                 batch["batch_id"]
                 for batch in remaining
                 if self._resolve_batch_step(batch)[1].requires_workers
-                and _is_transient_retry_error(batch["error_message"])
+                and _is_transient_retry_error(batch["error_message"], batch["reason_code"])
             }
             if not automatic_batch_ids:
                 break
@@ -1173,6 +1479,7 @@ class JobEngine:
                 )
             result["status"] = public_status
             result["missing_steps_unresolved"] = unresolved
+        result.update(self._public_outcome(run_id))
         return result
 
     def _retry_run_locked(
@@ -1194,25 +1501,7 @@ class JobEngine:
             trade_date = date.fromisoformat(stored_trade_date)
         self.config._backfill = bool(run_meta.get("backfill"))
         scope = run_meta.get("backfill_scope") or {}
-        for attr, key in (
-            ("_backfill_start", "start"),
-            ("_backfill_end", "end"),
-            ("_backfill_symbols", "symbols"),
-        ):
-            value = scope.get(key)
-            if key in ("start", "end") and value:
-                value = date.fromisoformat(value)
-            setattr(self.config, attr, value)
-        self.config._corporate_actions_baostock_repair = bool(scope.get("baostock_repair", False))
-        self.config._corporate_actions_ths_repair = bool(scope.get("ths_repair", False))
-        self.config._corporate_actions_eastmoney_bj_repair = bool(
-            scope.get("eastmoney_bj_repair", False)
-        )
-        self.config._bse_tip_repair = bool(scope.get("bse_tip_repair", False))
-        self.config._bj_amount_repair = bool(scope.get("bj_amount_repair", False))
-        self.config._tdx_amount_repair = bool(scope.get("tdx_amount_repair", False))
-        self.config._tdx_volume_repair = bool(scope.get("tdx_volume_repair", False))
-        self.config._turnover_repair = bool(scope.get("turnover_repair", False))
+        restore_backfill_scope(self.config, scope)
         timeout = self.manifest.advance_batch_timeouts(
             run_id,
             stale_after_seconds=self.config.batch_stale_seconds,
@@ -1234,7 +1523,10 @@ class JobEngine:
             if incomplete > 0:
                 exhausted = self._exhausted_worker_retry_count(run_id)
                 status = self._retry_batch_status(run_id)
-                if exhausted and status in {"failed", "warning"}:
+                settled = all(
+                    execution_settled(b) for b in self.manifest.get_batches_for_run(run_id)
+                )
+                if settled or (exhausted and status in {"failed", "warning", "degraded"}):
                     if auto_finalize:
                         self.manifest.finish_run(run_id, status)
                     return {
@@ -1257,7 +1549,7 @@ class JobEngine:
                 # worker failures while a non-transient failure remains in the
                 # run. Preserve that overall failure instead of relabeling it
                 # as pending merely because this pass had nothing to retry.
-                if retry_batch_ids is not None and status in {"failed", "warning"}:
+                if retry_batch_ids is not None and status in {"failed", "warning", "degraded"}:
                     pending["status"] = status
                     pending["retry_exhausted"] = exhausted
                 return pending
@@ -1441,10 +1733,10 @@ class JobEngine:
         rows_written: int = 0,
     ) -> str:
         phases = self._init_phases_list(run_id)
-        batches = self.manifest.get_batches_for_run(run_id)
+        batches = self._init_execution_batches(run_id)
         current = current_phase_statuses(phases, batches)
         complete = init_run_complete(phases, batches)
-        incomplete = self.manifest.incomplete_batch_count(run_id) > 0
+        incomplete = not complete
         if complete and not incomplete:
             status = self._overall_status(run_id, "success")
         else:
@@ -1494,7 +1786,7 @@ class JobEngine:
             phase_results.append({"phase": phase, **result})
             total_read += result.get("rows_read", 0)
             total_written += result.get("rows_written", 0)
-            if result["status"] == "failed" and not keep_going:
+            if _has_execution_errors(result) and not keep_going:
                 logger.error("Init phase %s failed; stopping remaining phases", phase)
                 break
 
@@ -1504,7 +1796,12 @@ class JobEngine:
             rows_read=total_read,
             rows_written=total_written,
         )
-        return {"run_id": run_id, "status": status, "phases": phase_results}
+        return {
+            "run_id": run_id,
+            "status": status,
+            "phases": phase_results,
+            **self._public_outcome(run_id),
+        }
 
     def resume_init(
         self,
@@ -1578,18 +1875,18 @@ class JobEngine:
         logger.info("Resuming init run %s", run_id)
         retry_result = self._retry_run(run_id, trade_date, auto_finalize=False)
 
-        batches = self.manifest.get_batches_for_run(run_id)
+        batches = self._init_execution_batches(run_id)
         to_run = pending_phases(phases, batches)
         phase_results: list[dict[str, Any]] = list(meta.get("phase_results") or [])
         total_read = retry_result.get("rows_read", 0)
         total_written = retry_result.get("rows_written", 0)
 
         for phase in to_run:
-            batches = self.manifest.get_batches_for_run(run_id)
+            batches = self._init_execution_batches(run_id)
             steps = [
                 step
                 for step in INIT_PHASE_STEPS.get(phase, [])
-                if not step_succeeded(batches, step)
+                if not step_completed(batches, step)
             ]
             # `_retry_run` has just retried every failed/stale batch. If any
             # such attempt is still unresolved, this phase remains the gate;
@@ -1598,8 +1895,7 @@ class JobEngine:
                 step
                 for step in steps
                 if any(
-                    batch["dataset"] == step and batch["status"] not in RESOLVED_BATCH_STATUSES
-                    for batch in batches
+                    batch["dataset"] == step and not execution_settled(batch) for batch in batches
                 )
             }
             if unresolved_started:
@@ -1626,16 +1922,16 @@ class JobEngine:
             phase_results.append({"phase": phase, **result})
             total_read += result.get("rows_read", 0)
             total_written += result.get("rows_written", 0)
-            if result["status"] == "failed" and not keep_going:
+            if _has_execution_errors(result) and not keep_going:
                 break
-            batches = self.manifest.get_batches_for_run(run_id)
+            batches = self._init_execution_batches(run_id)
             if (
-                not all(step_succeeded(batches, step) for step in INIT_PHASE_STEPS.get(phase, []))
+                not all(step_completed(batches, step) for step in INIT_PHASE_STEPS.get(phase, []))
                 and not keep_going
             ):
                 break
 
-        batches = self.manifest.get_batches_for_run(run_id)
+        batches = self._init_execution_batches(run_id)
         if needs_finalize(phases, batches) and self.manifest.incomplete_batch_count(run_id) == 0:
             context = self._merge_retry_context(run_id, trade_date)
             fin_results = self._run_finalize_steps(run_id, trade_date, context)
@@ -1667,6 +1963,7 @@ class JobEngine:
             "run_id": run_id,
             "status": status,
             "resumed": True,
+            **self._public_outcome(run_id),
             "retry": retry_result,
             "phases": phase_results,
         }

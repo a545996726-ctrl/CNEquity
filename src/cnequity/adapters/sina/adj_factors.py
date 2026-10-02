@@ -26,6 +26,8 @@ _SINA_FACTOR_COLS = {"qfq": "qfq_factor", "hfq": "hfq_factor"}
 class SinaAdjFactorUnavailableError(ValueError):
     """Raised when Sina explicitly returns no factor series for a symbol."""
 
+    reason_code = "capability_limit"
+
 
 def to_sina_symbol(symbol: str) -> str:
     info = parse_symbol(symbol)

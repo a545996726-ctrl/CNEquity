@@ -68,7 +68,7 @@ cne status --datasets
 
 | 可能原因 | 检查 | 处理 |
 |----------|------|------|
-| 数据仍在 staging | `ls staging/*/run_id=*` | `cne run compact --run-id <id>` 或 `cne run retry`；success 但无 compact batch 时**先 compact 再** `cne run clean`（勿 `--force`，否则 demote 后只能重抓） |
+| 数据仍在 staging | `ls staging/*/run_id=*` | `cne run compact` 发布所有已结束未发布的 run，或 `cne run retry`；**先 compact 再** `cne run clean`（勿 `--force`，否则 demote 后只能重抓） |
 | 分组 run 未 compact | 组 steps 是否含 `compact` | 配置修正后重跑组 |
 | compact 被 gate 跳过 | `cne status` 看 failed batch | `cne run retry --run-id <id>` |
 | 路径错误 | `config.data_root` | 核对 `configs/cnequity.toml` |
@@ -199,13 +199,7 @@ Findings 文件：`meta/quality/findings/{run_id}.json`
 
 ## 症状：init 中断
 
-保留数据和配置。重跑相同的 `cne init` 会查找未完成 run 并续跑；也可显式指定：
-
-```bash
-cne init --resume
-# 或
-cne run retry --run-id INIT_RUN_ID
-```
+保留数据和配置，重跑相同的 `cne init`：它会查找未完成 run 并续跑，已成功的批次不会重拉。结果里的 `warning` / `degraded` 也一样处理，不需要拆成多条补数命令。只有要指定某个旧 run 时才用 `cne init --run-id INIT_RUN_ID`。
 
 `--keep-going`：单 phase 失败后继续后续 phase（用于尽量多回填）。
 
@@ -215,7 +209,7 @@ cne run retry --run-id INIT_RUN_ID
 
 ## 症状：磁盘不足 / staging 膨胀
 
-1. 找出 stranded success（有 staging、incomplete=0、无 compact batch）→ 逐个 `cne run compact --run-id <id>`
+1. `cne run compact`：自动找出并发布所有已结束、有 staging、还没有成功 compact 的 run
 2. `cne run clean` 查看候选；现在只预览，不再删除。历史版本与登记试验到 serve 存储运维页确认，staging 暂仅报告
 3. incomplete / 未 compact 的失败 run 默认保留供 `cne run retry`；只有确认可丢弃时才 `--force`
 4. 压缩或归档旧 `meta/source_snapshots/`（长期会膨胀）

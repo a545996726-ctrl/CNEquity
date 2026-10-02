@@ -115,6 +115,39 @@ def test_sse_skips_codes_outside_the_lake_universe(monkeypatch):
     assert em.fetch_sse_margin_trading(TD).is_empty()
 
 
+@pytest.mark.parametrize("failure", ["error", "repeated", "changed_total", "empty", "oversized"])
+def test_command_retains_valid_sse_pages_before_a_pagination_failure(
+    tmp_path, monkeypatch, failure
+):
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return _Resp(_sse_payload([_SSE_ROW], total=2))
+        if failure == "error":
+            raise OSError("connection reset")
+        rows = {
+            "repeated": [_SSE_ROW],
+            "changed_total": [{**_SSE_ROW, "stockCode": "600001"}],
+            "empty": [],
+            "oversized": [
+                {**_SSE_ROW, "stockCode": "600001"},
+                {**_SSE_ROW, "stockCode": "600002"},
+            ],
+        }[failure]
+        return _Resp(_sse_payload(rows, total=3 if failure == "changed_total" else 2))
+
+    monkeypatch.setattr(em, "_client", lambda: type("C", (), {"get": staticmethod(get)}))
+    with source_gap_scope(_cfg(tmp_path)) as gaps:
+        frame = em.fetch_sse_margin_trading(TD)
+    assert frame.get_column("symbol").to_list() == ["600000.SH"]
+    assert frame.get_column("margin_balance").to_list() == [float(_SSE_ROW["rzye"])]
+    assert gaps[0]["dates"] == [TD.isoformat()]
+
+
 def _szse_workbook(rows):
     import pandas as pd
 
@@ -171,6 +204,27 @@ def test_combined_result_names_the_exchange_that_published(monkeypatch):
     assert result.failures == {"sse": "no usable rows"}
 
 
+def test_combined_exchange_does_not_hide_a_gap_ledger_storage_failure(tmp_path, monkeypatch):
+    from cnequity.orchestrator.source_gaps import source_gap_scope
+    from cnequity.storage.state import StateStore
+
+    responses = iter([_Resp(_sse_payload([_SSE_ROW], total=2)), OSError("connection reset")])
+
+    def get(*args, **kwargs):
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def fail_ledger(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(em, "_client", lambda: type("C", (), {"get": staticmethod(get)}))
+    monkeypatch.setattr(StateStore, "record_missing_dates", fail_ledger)
+    with source_gap_scope(_cfg(tmp_path)), pytest.raises(OSError, match="disk full"):
+        em.fetch_exchange_margin_trading(TD)
+
+
 # --- step wiring -------------------------------------------------------------
 
 
@@ -181,14 +235,11 @@ def _cfg(tmp_path, **kw) -> Config:
     return cfg
 
 
-def test_a_half_published_session_is_left_for_a_later_run(tmp_path, monkeypatch):
-    """SZSE lands a business day after SSE; writing SH alone would strand SZ.
-
-    An empty frame leaves the watermark where it is, so the next run fetches
-    the same session complete rather than the dataset carrying half a market
-    forever.
-    """
+def test_a_half_published_session_retains_rows_and_records_the_gap(tmp_path, monkeypatch):
+    """Command scope retains SH facts; strict callers reject incomplete coverage."""
     import cnequity.adapters.exchange.margin_trading as adapter
+    from cnequity.orchestrator.outcomes import SourceUnavailableError
+    from cnequity.orchestrator.source_gaps import source_gap_scope
 
     monkeypatch.setattr(
         adapter,
@@ -199,7 +250,12 @@ def test_a_half_published_session_is_left_for_a_later_run(tmp_path, monkeypatch)
             failures={"szse": "no usable rows"},
         ),
     )
-    assert _fetch_margin_via_exchange(TD, config=_cfg(tmp_path)).is_empty()
+    cfg = _cfg(tmp_path)
+    with pytest.raises(SourceUnavailableError, match="missing publisher.*szse"):
+        _fetch_margin_via_exchange(TD, config=cfg)
+    with source_gap_scope(cfg) as gaps:
+        assert _fetch_margin_via_exchange(TD, config=cfg).height == 1
+    assert gaps[0]["dates"] == [TD.isoformat()]
 
 
 def test_a_fully_published_session_is_returned(tmp_path, monkeypatch):
@@ -219,6 +275,79 @@ def test_a_fully_published_session_is_returned(tmp_path, monkeypatch):
         ),
     )
     assert _fetch_margin_via_exchange(TD, config=_cfg(tmp_path)).height == 2
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("job", ["backfill", "daily"])
+@pytest.mark.parametrize("source", ["exchange", "eastmoney"])
+def test_partial_exchange_publishes_and_the_retry_fetches_the_missing_exchange(
+    tmp_path, monkeypatch, workers, job, source
+):
+    from cnequity.orchestrator.engine import JobEngine
+    from cnequity.storage.revisions import RevisionStore
+    from cnequity.storage.state import StateStore
+
+    cfg = _cfg(tmp_path)
+    cfg.margin_trading_source = source
+    cfg._backfill_start = cfg._backfill_end = TD
+    cfg._backfill_workers = workers
+    calls = []
+
+    def fetch(day, **kwargs):
+        calls.append(day)
+        rows = [
+            {"symbol": f"{600000 + i:06d}.SH", "trade_date": day, "margin_balance": 1.0}
+            for i in range(60)
+        ]
+        if len(calls) > 1:
+            rows += [
+                {"symbol": f"{i + 1:06d}.SZ", "trade_date": day, "margin_balance": 2.0}
+                for i in range(60)
+            ]
+        return em.ExchangeMarginResult(
+            rows=em._finish(
+                [
+                    {"margin_buy": 0.0, "short_balance": None, "short_sell_volume": 0.0, **row}
+                    for row in rows
+                ]
+            ),
+            covered=frozenset({"sse"}) if len(calls) == 1 else frozenset({"sse", "szse"}),
+            failures={"szse": "connection reset"} if len(calls) == 1 else {},
+        )
+
+    monkeypatch.setattr(em, "fetch_exchange_margin_trading", fetch)
+    if source == "eastmoney":
+        monkeypatch.setattr(
+            "cnequity.steps.capital.fetch_margin_trading", lambda day, **kwargs: fetch(day).rows
+        )
+        monkeypatch.setattr(
+            "cnequity.adapters.eastmoney.em_auth.EastMoneyClient",
+            lambda **kwargs: type("Client", (), {"close": lambda self: None})(),
+        )
+    if job == "daily":
+        monkeypatch.setattr("cnequity.steps.common.incremental_trade_dates", lambda *a, **k: [TD])
+    first = JobEngine(cfg).run_job(
+        job, TD, steps=["margin_trading", "compact"], backfill=job == "backfill"
+    )
+    assert first["execution_status"] == "completed"
+    assert first["coverage_status"] == "partial"
+    assert first["publication_status"] == "partial"
+    assert first["usable_result"] is True
+    assert TD in StateStore(cfg.meta_root).get_missing_dates("margin_trading")
+    state = StateStore(cfg.meta_root).get_payload("margin_trading")
+    assert state["coverage_status"] == "incomplete"
+    assert not state.get("complete_through") or state["complete_through"] < TD.isoformat()
+    root = RevisionStore(cfg.meta_root, cfg.curated_root).current_root("margin_trading")
+    assert pl.read_parquet(list(root.rglob("*.parquet"))).height == 60
+
+    again = JobEngine(cfg).run_job(
+        job, TD, steps=["margin_trading", "compact"], backfill=job == "backfill"
+    )
+    assert len(calls) == 2
+    assert again["status"] == "success", again
+    assert TD not in StateStore(cfg.meta_root).get_missing_dates("margin_trading")
+    root = RevisionStore(cfg.meta_root, cfg.curated_root).current_root("margin_trading")
+    assert pl.read_parquet(list(root.rglob("*.parquet"))).height == 120
 
 
 def test_the_exchange_is_the_default_owner(tmp_path):
@@ -258,7 +387,7 @@ def test_the_backfill_stamps_the_selected_source(tmp_path, monkeypatch):
             rows=adapter._finish(
                 [
                     {
-                        "symbol": f"{600000 + i:06d}.SH",
+                        "symbol": f"{600000 + i:06d}.SH" if i % 2 == 0 else f"{i:06d}.SZ",
                         "trade_date": d,
                         "margin_balance": 1.0,
                         "margin_buy": 1.0,

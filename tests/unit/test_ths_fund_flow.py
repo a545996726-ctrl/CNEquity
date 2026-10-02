@@ -188,7 +188,9 @@ def test_ths_fallback_archives_exact_pages_before_publishing(
     parent = dataset.removesuffix("_ths")
 
     def push2(*args, **kwargs):
-        raise RuntimeError("push2 unavailable")
+        from cnequity.orchestrator.outcomes import SourceUnavailableError
+
+        raise SourceUnavailableError("push2 unavailable")
 
     monkeypatch.setattr(capital, "_run_capital_step", push2)
     monkeypatch.setattr(rotation, "_step_sector_fund_flow", push2)
@@ -218,7 +220,8 @@ def test_ths_fallback_archives_exact_pages_before_publishing(
         _D,
         waves=[WaveConfig(name="fallback", parallel=False, steps=[parent, "compact"])],
     )
-    assert result["status"] == "degraded"  # the EastMoney dataset remains unavailable
+    assert result["status"] == "degraded"
+    assert result["fallback"]
     archive = RawPayloadArchive(cfg.meta_root)
     records = archive.records(dataset)
     assert len(records) == len(served)

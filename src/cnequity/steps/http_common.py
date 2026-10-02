@@ -16,6 +16,7 @@ import polars as pl
 from cnequity.config import Config
 from cnequity.domain.datasets import DATASETS, fetch_semantics
 from cnequity.domain.schemas import data_version_for, validate_dataframe, with_provenance
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.steps.common import fetch_incremental_daily, write_simple
 from cnequity.storage import StagingWriter
 from cnequity.storage.raw_archive import (
@@ -558,6 +559,11 @@ def run_incremental_fetched(
     recovered: dict[date, pl.DataFrame] = {}
     if checkpoint_days:
         writer = StagingWriter(config.staging_root)
+        missing_days = {
+            row["start"]
+            for row in StateStore(config.meta_root).get_payload(dataset).get("missing_ranges", [])
+            if row.get("last_failure") == "source_scope_incomplete"
+        }
         # A day that staged only part of its rows is fetched again, not reused.
         partial = {
             report["batch_id"]
@@ -566,7 +572,11 @@ def run_incremental_fetched(
         }
         for path in writer.list_run_files(dataset, run_id):
             match = re.fullmatch(r"part-day-(\d{4}-\d{2}-\d{2})-[0-9a-f]+", path.stem)
-            if match and path.stem.removeprefix("part-") not in partial:
+            if (
+                match
+                and match.group(1) not in missing_days
+                and path.stem.removeprefix("part-") not in partial
+            ):
                 recovered[date.fromisoformat(match.group(1))] = validate_dataframe(
                     pl.read_parquet(path), dataset
                 )
@@ -578,12 +588,12 @@ def run_incremental_fetched(
             staged = part
             if universe and not staged.is_empty():
                 if "symbol" not in staged.columns:
-                    raise RuntimeError(
+                    raise SourcePayloadError(
                         f"{dataset}: cannot reconcile source rows without a symbol column"
                     )
                 staged = staged.filter(pl.col("symbol").is_in(list(universe)))
                 if staged.is_empty():
-                    raise RuntimeError(f"{dataset}: no rows matched the reconciled universe")
+                    raise SourcePayloadError(f"{dataset}: no rows matched the reconciled universe")
             day_result = write_fetched(
                 config,
                 run_id,
@@ -616,10 +626,12 @@ def run_incremental_fetched(
         # filtering rather than dropping every row.
         source_rows = df.height
         if "symbol" not in df.columns:
-            raise RuntimeError(f"{dataset}: cannot reconcile source rows without a symbol column")
+            raise SourcePayloadError(
+                f"{dataset}: cannot reconcile source rows without a symbol column"
+            )
         df = df.filter(pl.col("symbol").is_in(list(universe)))
         if df.is_empty():
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{dataset}: source returned {source_rows} row(s), but none matched the "
                 f"reconciled universe ({len(universe)} symbol(s))"
             )
@@ -711,4 +723,4 @@ def run_incremental_fetched(
 
 def empty_ok(df: pl.DataFrame, dataset: str, trade_date: date) -> None:
     if df.is_empty():
-        raise RuntimeError(f"{dataset}: no rows returned for {trade_date.isoformat()}")
+        raise SourceUnavailableError(f"{dataset}: no rows returned for {trade_date.isoformat()}")

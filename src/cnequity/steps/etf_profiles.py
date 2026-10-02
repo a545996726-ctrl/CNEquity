@@ -7,6 +7,7 @@ from datetime import date
 from cnequity.adapters.exchange.etf_profiles import fetch_exchange_etf_profiles
 from cnequity.config import Config
 from cnequity.domain.market_time import shanghai_today
+from cnequity.orchestrator.outcomes import SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.steps.common import SnapshotBackfillError
 from cnequity.steps.http_common import verify_raw_archive, write_fetched
@@ -17,7 +18,7 @@ from cnequity.storage.raw_archive import RawPayloadArchive, begin_capture
 def step_etf_profiles(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     """Publish both official directories or retain the previous snapshot."""
     if not config.sources.get("exchange", True):
-        raise RuntimeError("etf_profiles: exchange source disabled in config")
+        raise SourceUnavailableError("etf_profiles: exchange source disabled in config")
     if getattr(config, "_backfill", False):
         raise SnapshotBackfillError(
             "etf_profiles: historical exchange directories are unavailable; "

@@ -19,12 +19,13 @@ import click
 from cnequity.cli._root import cli
 from cnequity.cli._shared import (
     _cfg,
+    _run_status_exit_code,
     attach_log_file,
     comma_values,
     config_option,
     parse_date_option,
 )
-from cnequity.domain.datasets import fetch_semantics, get_dataset
+from cnequity.domain.datasets import get_dataset
 from cnequity.domain.market_time import shanghai_today
 from cnequity.orchestrator.engine import JobEngine
 
@@ -84,7 +85,7 @@ from cnequity.orchestrator.engine import JobEngine
     help=(
         "回填区间起点（YYYY-MM-DD），包括 daily_bars、minute_bars、衍生品日线、"
         "日期/报告期推进及 sector_bars。sector_bars 默认往前 400 天；"
-        "有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。"
+        "超过来源历史深度的范围保留为缺口，可取范围照常交付并提供补数指引。"
     ),
 )
 @click.option(
@@ -311,8 +312,8 @@ def backfill(
         attach_log_file(cfg, "delisted-backfill")
         result = _run_delisted_profile(cfg, since)
         click.echo(json.dumps(result, indent=2, default=str))
-        if result["status"] != "success":
-            raise click.ClickException("delisted recovery has unresolved targets")
+        if _run_status_exit_code(result["status"]):
+            raise click.ClickException("delisted recovery execution or publication failed")
         return
     if shfe_annual_archive is not None:
         if dataset not in {"futures_bars", "option_bars"}:
@@ -407,20 +408,6 @@ def backfill(
     if symbols is not None:
         symbols = list(dict.fromkeys(s.upper() for s in symbols))
         symbols_str = ",".join(symbols)
-    if dataset == "trading_status" and symbols:
-        from cnequity.domain.market_profile import unserved
-
-        bj_symbols = unserved("baostock", symbols)
-        if bj_symbols:
-            raise click.ClickException(
-                "trading_status 的 Baostock 历史 ST 回填不支持 BJ 标的：" + ", ".join(bj_symbols)
-            )
-    if fetch_semantics(dataset) == "snapshot" and not get_dataset(dataset).backfill_source:
-        raise click.ClickException(
-            f"{dataset}：不支持回填 —— 它的采集语义是 snapshot"
-            "（实时页面盖上 trade_date；历史值拿不到）。"
-            "请改为在交易日跑日更采集。"
-        )
     cfg = _cfg(config_path)
     derivatives = {
         "futures_bars",
@@ -574,10 +561,9 @@ def backfill(
         attach_log_file(cfg, f"backfill-{dataset}")
         result = _repair_outstanding(cfg, dataset, workers)
         click.echo(json.dumps(result, indent=2, default=str))
-        if result["status"] != "success":
-            raise SystemExit(1)
+        if code := _run_status_exit_code(result["status"]):
+            raise SystemExit(code)
         return
-    _guard_history_horizon(dataset, start_d)
     if symbols is not None:
         if dataset in (
             "daily_bars",
@@ -653,12 +639,14 @@ def backfill(
     if outstanding:
         result["outstanding"] = _settle_outstanding(cfg, dataset)
     click.echo(json.dumps(result, indent=2, default=str))
-    if result["status"] != "success":
-        raise SystemExit(1)
+    code = _run_status_exit_code(result["status"])
+    if code:
+        raise SystemExit(code)
 
 
 def _backfill_plan(cfg, dataset, start, end, symbols, workers, repair_modes) -> dict:
     from cnequity.diagnostics.source_limits import effective_source_policy
+    from cnequity.domain.datasets import history_mode_for
     from cnequity.domain.http_policy import cooldown_status, source_family
     from cnequity.domain.rate_limit import _read_json
 
@@ -736,6 +724,12 @@ def _backfill_plan(cfg, dataset, start, end, symbols, workers, repair_modes) -> 
         "symbols": symbols,
         "scope": f"显式 {len(symbols)} 只" if symbols else "数据集默认范围，可能是全市场",
         "fetch_semantics": spec.fetch_semantics,
+        "history_mode": history_mode_for(spec),
+        "history_note": (
+            "来源只有当前快照；历史请求正常报告能力限制，保留已有数据并给出日更采集方案"
+            if history_mode_for(spec) == "snapshot_only"
+            else "超出来源能力的范围记为覆盖缺口；执行时获取来源仍可提供的范围"
+        ),
         "registered_sources": registered,
         "source_status": statuses,
         "routing": routing,
@@ -857,18 +851,10 @@ def _derivatives_plan(cfg, dataset, start_str, end_str, symbols_str) -> dict:
 
 
 def _repair_outstanding(cfg, dataset: str, workers: int) -> dict:
-    """Refetch exactly what the ledger says is owed, a month at a time.
-
-    Owed keys are scatter, not a range: measured on a real init, 5,037 keys sat
-    across 833 symbols and 692 sessions, a median of 5 keys and 11 days per
-    symbol. Asking for one window spanning all of them would fetch ~624,750
-    keys to repair 5,037 — the same disproportion the tolerance exists to
-    avoid, in the command meant to undo it. Bucketing by month costs ~32,476 in
-    37 calls; per-session would be exact but 692 engine runs to save 27k
-    fetches, which is the wrong trade.
-    """
+    """Repair monthly key scopes and close with truthful remaining coverage."""
     from collections import defaultdict
 
+    from cnequity.orchestrator.manifest import Manifest
     from cnequity.steps.bars import _last_final_session
     from cnequity.storage.state import StateStore
 
@@ -916,6 +902,9 @@ def _repair_outstanding(cfg, dataset: str, workers: int) -> dict:
         err=True,
     )
     failures: list[str] = []
+    passes = 0
+    filled = 0
+    fatal = False
     for index, month in enumerate(sorted(buckets), start=1):
         symbols = sorted(buckets[month])
         lo, hi = min(days_in[month]), max(days_in[month])
@@ -928,6 +917,7 @@ def _repair_outstanding(cfg, dataset: str, workers: int) -> dict:
         cfg._backfill_end = date.fromisoformat(hi)
         cfg._backfill_workers = workers
         out = _backfill_once(cfg, dataset)
+        passes += 1
         if out.get("status") not in ("success", "warning", "degraded"):
             failures.append(f"{month}: {out.get('status')}")
         # Settle after each pass, not once at the end. A repair of a real
@@ -935,19 +925,44 @@ def _repair_outstanding(cfg, dataset: str, workers: int) -> dict:
         # three hours and, killed there, had struck nothing off: every row it
         # had fetched was still owed. Interrupting this now costs the pass in
         # flight, not the run.
-        settled = _settle_outstanding(cfg, dataset)
+        settled = _settle_outstanding(cfg, dataset, attempted_scope=(set(symbols), lo, hi))
+        filled += settled["filled"]
+        if out.get("status") == "failed" and out.get("run_id"):
+            aggregate = Manifest(cfg.manifest_path).aggregate_run_status(out["run_id"])
+            if aggregate["core_failures"] or not aggregate["source_failures"]:
+                fatal = True
+                break
 
     settled = settled if buckets else _settle_outstanding(cfg, dataset)
     return {
         "dataset": dataset,
-        "status": "success" if not failures else "failed",
-        "passes": len(buckets),
+        "status": "failed"
+        if fatal or (failures and not filled)
+        else "warning"
+        if settled["still_owed"]
+        else "success",
+        "passes": passes,
         "failed_passes": failures,
         "outstanding": settled,
+        "result_schema_version": 2,
+        "execution_status": "failed" if fatal or (failures and not filled) else "completed",
+        "coverage_status": "partial" if settled["still_owed"] else "complete",
+        "publication_status": "partial"
+        if filled and settled["still_owed"]
+        else "published"
+        if filled
+        else "unchanged",
+        "usable_result": bool(filled or not settled["still_owed"]),
     }
 
 
-def _settle_outstanding(cfg, dataset: str, *, note_missing_attempt: bool = True) -> dict:
+def _settle_outstanding(
+    cfg,
+    dataset: str,
+    *,
+    note_missing_attempt: bool = True,
+    attempted_scope: tuple[set[str], str, str] | None = None,
+) -> dict:
     """Strike off the owed keys that are now in the lake, and report the rest.
 
     Checked against what actually landed rather than against the run's exit
@@ -1001,7 +1016,13 @@ def _settle_outstanding(cfg, dataset: str, *, note_missing_attempt: bool = True)
     # ever distinguish last night's blip from a vendor that has stopped
     # serving the symbol at all.
     if note_missing_attempt:
-        store.note_repair_attempt(dataset, missed)
+        attempted = missed
+        if attempted_scope is not None:
+            symbols, start, end = attempted_scope
+            attempted = [
+                (symbol, day) for symbol, day in missed if symbol in symbols and start <= day <= end
+            ]
+        store.note_repair_attempt(dataset, attempted)
     stubborn = sum(
         1 for row in store.get_outstanding_keys(dataset) if int(row.get("attempts", 0) or 0) >= 3
     )
@@ -1110,6 +1131,13 @@ def _finish_backfill_run(engine, result: dict) -> dict:
     # batch is what later lets `cne run clean` release this run's staging.
     result["compact"] = engine.run_step("compact", shanghai_today(), run_id)
     compact_status = result["compact"].get("status", "success")
+    aggregate = (
+        engine.manifest.aggregate_run_status(run_id)
+        if hasattr(engine.manifest, "aggregate_run_status")
+        else {}
+    )
+    if aggregate.get("results"):
+        result["status"] = aggregate["status"]
     if compact_status == "failed" or result["status"] == "failed":
         result["status"] = "failed"
     elif compact_status == "warning" or result["status"] == "warning":
@@ -1121,6 +1149,11 @@ def _finish_backfill_run(engine, result: dict) -> dict:
         rows_written=result.get("rows_written", 0),
         error_message="one or more steps failed" if result["status"] == "failed" else None,
     )
+    if hasattr(engine, "_public_outcome"):
+        result.update(engine._public_outcome(run_id))
+    persisted = engine.manifest.get_run(run_id) if hasattr(engine.manifest, "get_run") else None
+    if persisted is not None:
+        result["status"] = persisted["status"]
     return result
 
 
@@ -1136,9 +1169,21 @@ def _run_had_step_failure(engine: JobEngine, run_id: str) -> bool:
     every slice had raised.
     """
     aggregate = engine.manifest.aggregate_run_status(run_id)
+    if "status" in aggregate:
+        return aggregate["status"] == "failed"
     return bool(aggregate["core_failures"]) or any(
-        str(item["status"]) in {"failed", "blocked"} for item in aggregate["degraded_results"]
+        item["status"] in {"failed", "blocked"} for item in aggregate["degraded_results"]
     )
+
+
+def _source_limited_slice(engine, run_id: str) -> bool:
+    """An unusable source slice does not cancel independent later slices."""
+    result = (
+        engine.manifest.aggregate_run_status(run_id)
+        if hasattr(engine.manifest, "aggregate_run_status")
+        else {}
+    )
+    return bool(result.get("source_failures")) and not result["core_failures"]
 
 
 def _recover_compactable_backfill_staging(engine: JobEngine, dataset: str) -> list[str]:
@@ -1217,19 +1262,39 @@ def _recover_compactable_backfill_staging(engine: JobEngine, dataset: str) -> li
 
 def _run_delisted_profile(cfg, since: date) -> dict:
     """Run the delisted profile through one manifest and compact path."""
+    from cnequity.orchestrator.outcomes import step_outcome
+    from cnequity.orchestrator.registry import get_step
     from cnequity.steps.delisted import backfill_delisted_bars
 
     engine = JobEngine(cfg)
     run_id = engine.manifest.start_run(
         "delisted_backfill", {"since": since.isoformat(), "profile": "delisted"}
     )
-    result = backfill_delisted_bars(cfg, run_id, since)
-    compact_out = engine.run_step("compact", shanghai_today(), run_id)
+    try:
+        result = backfill_delisted_bars(cfg, run_id, since)
+        engine._record_step_result(
+            name="daily_bars",
+            entry=get_step("daily_bars"),
+            run_id=run_id,
+            status=result.get("status", "success"),
+            out=result,
+        )
+        compact_out = engine.run_step("compact", shanghai_today(), run_id)
+    except (KeyboardInterrupt, SystemExit):
+        engine.manifest.interrupt_run(run_id, error_message="delisted recovery interrupted")
+        raise
+    except Exception as exc:
+        engine.manifest.finish_run(run_id, "failed", error_message=str(exc))
+        raise
     complete = (
         result.get("status", "success") == "success"
         and compact_out.get("status", "success") == "success"
     )
     run_status = "success" if complete else "warning"
+    if compact_out.get("status") in {"failed", "blocked"} or step_outcome(
+        result.get("status", "success"), result
+    ).execution_status in {"failed", "interrupted"}:
+        run_status = "failed"
     error_message = None if complete else "delisted recovery has unresolved targets"
     engine.manifest.finish_run(
         run_id,
@@ -1238,7 +1303,13 @@ def _run_delisted_profile(cfg, since: date) -> dict:
         rows_written=result.get("rows_written", 0),
         error_message=error_message,
     )
-    return {"run_id": run_id, **result, "status": run_status, "compact": compact_out}
+    return {
+        "run_id": run_id,
+        **result,
+        "status": run_status,
+        "compact": compact_out,
+        **engine._public_outcome(run_id),
+    }
 
 
 def _run_shfe_annual_archive(
@@ -1386,6 +1457,8 @@ def _backfill_symbol_chunked(cfg, dataset: str, start: date, end: date, chunk_sy
     engine = JobEngine(cfg)
     _recover_compactable_backfill_staging(engine, dataset)
     chunks: list[dict] = []
+    failed_scopes: list[dict] = []
+    usable = False
     status = "success"
     rows_read = rows_written = 0
     original_scope = cfg.minute_bars_scope
@@ -1405,11 +1478,16 @@ def _backfill_symbol_chunked(cfg, dataset: str, start: date, end: date, chunk_sy
             if _run_had_step_failure(engine, result["run_id"]):
                 result["status"] = "failed"
             result = _finish_backfill_run(engine, result)
+            usable |= bool(
+                result.get("usable_result", result["status"] == "success")
+                or result.get("rows_written")
+            )
             rows_read += int(result.get("rows_read", 0))
             rows_written += int(result.get("rows_written", 0))
             chunks.append(
                 {
                     "symbols_from": index + 1,
+                    "run_id": result["run_id"],
                     "symbols_to": index + len(chunk),
                     "first_symbol": chunk[0],
                     "last_symbol": chunk[-1],
@@ -1417,13 +1495,20 @@ def _backfill_symbol_chunked(cfg, dataset: str, start: date, end: date, chunk_sy
                     "end": end,
                     "status": result["status"],
                     "rows_written": result.get("rows_written", 0),
+                    "fallback": result.get("fallback", []),
                 }
             )
             if result["status"] == "failed":
+                if _source_limited_slice(engine, result["run_id"]):
+                    failed_scopes.append(chunks[-1])
+                    status = "warning"
+                    continue
                 status = "failed"
                 break
             if result["status"] in {"warning", "degraded"} and status == "success":
                 status = result["status"]
+            if result["status"] in {"warning", "degraded"}:
+                failed_scopes.append(chunks[-1])
     finally:
         cfg.minute_bars_scope = original_scope
         cfg.minute_bars_symbols = original_symbols
@@ -1434,6 +1519,17 @@ def _backfill_symbol_chunked(cfg, dataset: str, start: date, end: date, chunk_sy
         "rows_read": rows_read,
         "rows_written": rows_written,
         "chunks": chunks,
+        "failed_scopes": failed_scopes,
+        "usable_result": usable,
+        "fallback": [option for chunk in chunks for option in chunk["fallback"]],
+        "result_schema_version": 2,
+        "execution_status": "failed" if status == "failed" else "completed",
+        "coverage_status": "unknown" if status == "success" else "partial",
+        "publication_status": "partial"
+        if status != "success" and usable
+        else "published"
+        if rows_written
+        else "unchanged",
         "resume_from_symbol": (
             chunks[-1]["first_symbol"] if status == "failed" and chunks else None
         ),
@@ -1454,6 +1550,8 @@ def _backfill_chunked(cfg, dataset: str, start: date, end: date, chunk_days: int
     engine = JobEngine(cfg)
     _recover_compactable_backfill_staging(engine, dataset)
     slices: list[dict] = []
+    failed_scopes: list[dict] = []
+    usable = False
     status = "success"
     rows_read = rows_written = 0
     cursor = start
@@ -1465,25 +1563,35 @@ def _backfill_chunked(cfg, dataset: str, start: date, end: date, chunk_days: int
         if _run_had_step_failure(engine, result["run_id"]):
             result["status"] = "failed"
         result = _finish_backfill_run(engine, result)
+        usable |= bool(
+            result.get("usable_result", result["status"] == "success") or result.get("rows_written")
+        )
         rows_read += int(result.get("rows_read", 0))
         rows_written += int(result.get("rows_written", 0))
         slices.append(
             {
                 "start": cursor,
+                "run_id": result["run_id"],
                 "end": slice_end,
                 "status": result["status"],
                 "rows_written": result.get("rows_written", 0),
+                "fallback": result.get("fallback", []),
             }
         )
         if result["status"] == "failed":
-            # Stop rather than press on: the slices already compacted are kept,
-            # and the window to resume from is the one printed here.
+            if _source_limited_slice(engine, result["run_id"]):
+                failed_scopes.append(slices[-1])
+                status = "warning"
+                cursor = slice_end + timedelta(days=1)
+                continue
             status = "failed"
             break
         # `degraded` is an outcome, not a synonym for success: a slice the
         # source could not supply must not leave the sweep claiming it did.
         if result["status"] in {"warning", "degraded"} and status == "success":
             status = result["status"]
+        if result["status"] in {"warning", "degraded"}:
+            failed_scopes.append(slices[-1])
         cursor = slice_end + timedelta(days=1)
     return {
         "dataset": dataset,
@@ -1491,5 +1599,16 @@ def _backfill_chunked(cfg, dataset: str, start: date, end: date, chunk_days: int
         "rows_read": rows_read,
         "rows_written": rows_written,
         "slices": slices,
+        "failed_scopes": failed_scopes,
+        "usable_result": usable,
+        "fallback": [option for part in slices for option in part["fallback"]],
+        "result_schema_version": 2,
+        "execution_status": "failed" if status == "failed" else "completed",
+        "coverage_status": "unknown" if status == "success" else "partial",
+        "publication_status": "partial"
+        if status != "success" and usable
+        else "published"
+        if rows_written
+        else "unchanged",
         "resume_from": slices[-1]["start"] if status == "failed" and slices else None,
     }

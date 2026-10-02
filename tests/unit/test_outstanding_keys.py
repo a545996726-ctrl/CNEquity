@@ -165,7 +165,7 @@ def test_a_repair_settles_after_every_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(
         bf,
         "_settle_outstanding",
-        lambda cfg, ds, **kwargs: settled.append(len(passes)) or {"still_owed": 0},
+        lambda cfg, ds, **kwargs: settled.append(len(passes)) or {"filled": 1, "still_owed": 0},
     )
     monkeypatch.setattr(
         bf,

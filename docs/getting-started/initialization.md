@@ -1,16 +1,14 @@
 # 初始化、范围与续跑
 
-适用：已经跑通小样本，需要建立正式湖或扩大历史窗口。第一次使用请先读[快速开始](quickstart.md)。
+适用：建立正式湖、扩大历史窗口或处理中断。第一次使用可先读[快速开始](quickstart.md)。
 
 ## 初始化前
 
 ```bash
-cne config create
-cne config validate
-cne init --config configs/cnequity.toml
+cne init
 ```
 
-已有配置时跳过 `config create`，先用 `cne config diff` 审阅新增默认值。生成配置会写入绝对 `data.root`，macOS / Windows 默认采用 `workers=1`；直接复制模板不会执行这些处理。
+默认配置 `configs/cnequity.toml` 不存在时，`cne init` 会先按随包示例生成它（与 `cne config create` 相同：写入绝对 `data.root`，macOS / Windows 默认 `workers=1`），再开始初始化。想先改数据目录等设置，可以先运行 `cne config create --data-root /path/to/lake`，修改后再 `cne init`。显式传入的 `--config` 或 `CNE_CONFIG` 指向不存在的文件时不会自动生成，避免拼写错误建出新湖。已有配置升级后运行 `cne config upgrade` 补上新的调度 step。
 
 `init` 按 `[job.init.phases]` 建目录、manifest、视图并回填证券、日历、公司行为、日线、指数、交易状态及派生数据。只建布局可用 `cne init --layout-only`；它不产生研究数据。
 
@@ -18,11 +16,10 @@ cne init --config configs/cnequity.toml
 
 ## Init：范围、磁盘与续跑
 
-默认 `cne init`（`--profile quick`）是沪深京全市场、近 3 年的主干，不是只拉 400 只。`--profile full` 仍是全市场，只是把主干加深到各数据集自己的历史起点，其中日线从 2016-01-01 起。
+默认 `cne init`（`--profile quick`）是沪深京全市场、近 3 年的主干。`--profile full` 仍是全市场，只是把主干加深到各数据集自己的历史起点，其中日线从 2016-01-01 起。
 
 | 命令 | 实际范围 | 请求成本特征 |
 |---|---|---|
-| `cne init --profile demo` | 5 只 × 最近约 30 个交易日，独立 demo 湖 | 小范围，先验证 TDX 可达性 |
 | `cne init`（`--profile quick`） | 沪深京全市场 × 最近 3 年；证券、日历、日线、交易状态等主干 | 全市场，按证券与缺口分页 |
 | `cne init --profile full` | 还是全市场；主干按各数据集默认起点拉取，日线从 2016-01-01 起 | 深历史，页数和落盘量更多 |
 | `cne backfill trading_status` | 补齐全市场历史 ST 证据 | 逐证券、按源节奏执行，宜安排长窗口 |
@@ -31,36 +28,31 @@ TDX / Baostock 的可达性、出口、上游限流、重试和机器配置都�
 
 磁盘量随证券范围、历史起点、频率与修订增长，staging 还需工作空间。分钟线、5 分钟线和分笔默认关闭；全市场分钟数据通常远大于日频主干。扩范围前先小样测量，见[运行手册 · 日内数据](../operations/runbook.md#日内数据minute_bars--minute_bars_5m)。
 
-> **进度里出现 400 只，并不表示 init 只拉了 400 只。** 日线、证券列表等主干仍然扫描全市场。`400` 只限制较慢的 **Baostock 历史 ST 状态**：首次 `init` 每轮先扫 400 **只证券**（不是 400 条数据）就暂停，避免无界等待。进度写入 checkpoint；显式运行 `cne backfill trading_status` 会自动取消这 400 只上限。同一历史起止日和 universe 会从 checkpoint 继续；改变范围会按新范围重新开一轮。
+默认 init 获取当前交易状态，并在日线发布后派生窗口内的历史停牌。**全市场历史 ST 扫描不属于 init，也不是初始化完成条件**；需要历史 ST 研究时显式运行 `cne backfill trading_status`。该命令不设每轮 400 只的上限，会按来源节奏持续扫描并保存 checkpoint；覆盖能力仍取决于市场、来源权限与证据收据，Baostock 不提供北交所历史 ST。
 
-新湖如果希望主干数据和历史 ST 都达到项目约定的完整范围，按顺序跑（历史 ST 是否完整仍取决于所选市场、来源权限与证据收据）：
+初始化会自动恢复配置市场中、历史窗口内的已知退市股票日线，并验证发布后的覆盖，再继续日线取数。来源缺失时保留有效恢复结果和待补范围，并继续能执行的后续阶段；程序、存储或完整性错误仍会失败。已发布的历史在后续补数中复用。此流程使用已知退市身份和目录，不进行全代码空间发现。
 
 ```bash
 cne init --profile full --config configs/cnequity.toml
-cne backfill trading_status --config configs/cnequity.toml
 
-# 再抓其余日更组，并从此每个交易日执行
-cne run daily --all-groups --config configs/cnequity.toml
-cne run events --config configs/cnequity.toml
+# 可选：需要历史 ST 研究时，独立补数并明确窗口
+cne backfill trading_status --start 2016-01-01 --end YYYY-MM-DD --config configs/cnequity.toml
+
+# 之后每天执行一次：全部日更组 + 事件流
+cne run daily --config configs/cnequity.toml
 ```
 
-前两条最好同一天接着跑。如果要跨天续跑，给 `init --trade-date` 和 `backfill --end` 传同一个截止日，并保持 2016-01-01 起点不变，才能接着同一份 checkpoint。
+历史 ST checkpoint 按起止日与 universe 区分；跨天续跑请保持这三个范围不变。当前交易状态和日线派生停牌不等于完整历史 ST 证据。
+
+升级前因 400 只 ST 上限或退市日线委派而未完成的 init，升级后直接重跑同一条 `cne init`，它会自动续跑原 run。续跑改为当前状态快照，自动恢复退市日线，保留成功批次和已抓取的 ST 暂存行；已有历史 ST checkpoint 不会被标记为完整。后续历史 ST 需求仍使用独立补数命令。
 
 这里说的「完整」不是「全部数据集都有无限历史」。项目没有一条命令能把所有数据集的全部历史一次拉完。`init` 负责证券、日历、公司行为、个股/指数日线、交易状态和派生因子这些主干；分钟线、5 分钟线和分笔默认关闭，快照型数据也无法回补源端没有提供的历史。某个可回补的数据集需要更早的历史时，使用 `cne backfill <dataset> --start ... --end ...`；各数据集能拉到哪一年，见[数据集目录](../datasets/catalog.md)。
 
-如果中途按了 Ctrl-C，不要删除 `data/`，也不需要从头开始。原命令再跑一次会自动找到未完成的 run，并从失败批次继续；也可以显式指定：
+如果中途按了 Ctrl-C、进程被杀，或者结果里有 `warning`，不要删除 `data/`，也不需要从头开始：重跑同一条 `cne init`，它会自动找到未完成的 run，从失败批次和缺失阶段继续。完成后用 `cne status --datasets` 查看覆盖与缺口。需要指定某个旧 run 时才用 `cne init --run-id RUN_ID`。
 
-```bash
-cne init --profile full --config configs/cnequity.toml
-# 或：
-cne init --resume --config configs/cnequity.toml
-cne run retry --run-id RUN_ID --config configs/cnequity.toml
-cne status --datasets --config configs/cnequity.toml
-```
+Ctrl-C 之后，命令会先停住正在跑的 worker，再把没跑完的批次记成可以马上重试的 `failed`；已经成功的批次不会重拉。进程被直接杀掉也没关系：下一次命令会根据运行锁认出这个孤儿 run。活动批次和未经封存校验的旧暂存数据仍受发布门禁保护；已经封存校验的独立事实可以发布。缺输入的派生步骤会解释跳过原因。执行结束不代表窗口内每只证券的证据都已齐全。
 
-Ctrl-C 之后，命令会先停住正在跑的 worker，再把没跑完的批次记成可以马上重试的 `failed`；已经成功的批次不会重拉。进程被直接杀掉也没关系：下一次命令会根据运行锁认出这个孤儿 run。某个阶段没跑完，后面的阶段和 compact 都不会开始，所以一次小范围的成功回填，不会把只覆盖部分证券的数据说成「初始化完整」。
-
-`status --datasets` 里的 `fresh` 只表示**已经落盘的那些日期**够新。正式数据湖还会用最新日线截面，对照配置的 `[universe].ingest`、当天 active 证券，以及明确的停牌证据，做一次轻量核对：范围内每只 active 证券都得有日线，或者有明确停牌证据。如果缺了整个配置市场（例如 `all_a` 没有 BJ），初始化会在 instruments 阶段提前失败。init 没跑完、任何一只证券缺证据、或者截面核对不上，都会另外报警并返回非零。
+`status --datasets` 里的 `fresh` 只表示**已经落盘的那些日期**够新。正式数据湖还会用最新日线截面，对照配置的 `[universe].ingest`、当天 active 证券，以及明确的停牌证据，做一次轻量核对：范围内每只 active 证券都得有日线，或者有明确停牌证据。如果缺了整个配置市场（例如 `all_a` 没有 BJ），instruments 阶段会报告部分覆盖，已取得的目录仍可发布。init 没跑完、证券缺证据或截面核对不上都会另行报告。普通 `status` 查询成功返回 0；调度验收使用 `cne status --datasets --gate`，按缺口或失败返回非零。
 
 「全市场」含北交所：上市状态、停复牌与 ST 取自北交所自己的板块页，日线历史优先走 TDX 的 BJ 专用路径，Sina 补未覆盖标的；历史 Sina 行的缺失成交额可经 TDX 逐行比对补齐。默认 universe `all_a` 覆盖沪、深、京三市的 A 股。每个数据集真正拉到哪一天，会记在 `coverage_start`。
 
@@ -96,10 +88,18 @@ cne backfill daily_bars --symbols 600519.SH,000001.SZ --start 2026-09-15 --end 2
 ```
 
 
+## 执行结束与覆盖不足
+
+`init`、日更、事件流、回填和重试共用执行、覆盖与发布三个状态。经过校验的部分结果可发布，命令以 `degraded` / `warning` 结束并返回 0；缺口、来源冷却和未扫描范围继续保留。来源全部不可用、甚至本次取得 0 行时，命令也以覆盖不足正常结束并返回 0，保留已有湖，不制造完整覆盖。结果中的 `fallback` 列出可用数据、注册来源能力与原范围重试命令；程序错误、存储故障或完整性错误仍返回失败。
+
+初始化职责内的来源限制不会留下必须手工运行另一命令才能关闭的执行计划。来源受限但阶段已经尝试或解释跳过的 init 不会被自动当成未完成 run；`--resume` 用于中断或真实执行错误。需要改善覆盖时，显式补数或重试具体范围。历史 ST 始终是可选的独立任务。
+
+任务仍然可能因来源节奏、锁等待和计算耗时而运行较久；项目不承诺固定完成时间，也不把百分之百覆盖作为所有命令的成功条件。结果字段与旧调度脚本迁移见[CLI 结果契约](../reference/cli.md#命令结果与退出码)。
+
 ## 验收，而不只看完成提示
 
 ```bash
-cne status --datasets --config configs/cnequity.toml
+cne status --datasets --gate --config configs/cnequity.toml
 cne stats show --config configs/cnequity.toml
 cne audit --full --config configs/cnequity.toml
 ```

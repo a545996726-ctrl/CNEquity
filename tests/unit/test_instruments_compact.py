@@ -94,6 +94,24 @@ def test_compact_instruments_preserves_missing_symbols_and_marks_delist(tmp_path
     assert active["delist_date"][0] is None
 
 
+def test_partial_instrument_snapshots_do_not_accumulate_delist_evidence(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    path = cfg.curated_root / "instruments" / "part-merged.parquet"
+    path.parent.mkdir(parents=True)
+    rows = [_instrument(f"600{i:03d}.SH", list_date=date(2000, 1, 1)) for i in range(100)]
+    pl.DataFrame(rows).write_parquet(path)
+    writer = StagingWriter(cfg.staging_root)
+    for day in (date(2024, 6, 27), date(2024, 6, 28)):
+        run_id = day.isoformat()
+        writer.write_batch("instruments", run_id, "partial", pl.DataFrame(rows[1:]))
+        compact_instruments(
+            cfg.staging_root, cfg.curated_root, run_id, day, allow_delist_inference=False
+        )
+    missing = pl.read_parquet(path).filter(pl.col("symbol") == "600000.SH")
+    assert missing.height == 1
+    assert missing["delist_date"][0] is None
+
+
 def test_compact_instruments_suppresses_delist_when_absent_ratio_exceeds_threshold(tmp_path):
     root = tmp_path / "data"
     cfg = Config(data_root=root)
@@ -815,7 +833,8 @@ def test_tdx_instrument_frame_strips_fixed_width_name_padding():
     assert not any("\x00" in name for name in names.values())
 
 
-def test_absence_does_not_delist_a_security_that_never_traded(tmp_path):
+@pytest.mark.parametrize("pending_volume", [None, 0])
+def test_absence_does_not_delist_a_security_that_never_traded(tmp_path, pending_volume):
     """TDX lists a new code before its first session, then drops it.
 
     Two such absences used to earn a delist_date days before the listing — 36
@@ -854,7 +873,12 @@ def test_absence_does_not_delist_a_security_that_never_traded(tmp_path):
     bars = curated / "daily_bars" / "trade_date=2026-09-08"
     bars.mkdir(parents=True)
     pl.DataFrame(
-        {"symbol": ["600519.SH"], "trade_date": [date(2026, 9, 8)], "close": [1500.0]}
+        {
+            "symbol": ["600519.SH", "301688.SZ"],
+            "trade_date": [date(2026, 9, 8)] * 2,
+            "close": [1500.0, 7.0],
+            "volume": [100, pending_volume],
+        }
     ).write_parquet(bars / "part-merged.parquet")
 
     writer = StagingWriter(staging)

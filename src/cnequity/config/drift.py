@@ -43,10 +43,16 @@ class ConfigDrift:
     missing_sections: list[str] = field(default_factory=list)
     missing_keys: list[str] = field(default_factory=list)
     unscheduled_steps: list[str] = field(default_factory=list)
+    #: ``job.daily.groups.core`` → steps the example's same-named group has and
+    #: none of this config's groups do. The group schedule (`cne run daily`)
+    #: never runs them, even when a wave still lists them.
+    group_steps: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def clean(self) -> bool:
-        return not (self.missing_sections or self.missing_keys or self.unscheduled_steps)
+        return not (
+            self.missing_sections or self.missing_keys or self.unscheduled_steps or self.group_steps
+        )
 
 
 def _flatten(table: Any, prefix: str = "") -> dict[str, Any]:
@@ -79,6 +85,34 @@ def _scheduled_steps(raw: dict) -> set[str]:
     return steps
 
 
+def _group_tables(raw: dict) -> dict[str, list[str]]:
+    """``job.<scope>.groups.<name>`` → its steps, for both group maps."""
+    out: dict[str, list[str]] = {}
+    job = raw.get("job", {})
+    for scope in ("daily", "events"):
+        for name, group in (job.get(scope, {}).get("groups", {}) or {}).items():
+            out[f"job.{scope}.groups.{name}"] = list(group.get("steps", []) or [])
+    return out
+
+
+def missing_group_steps(mine: dict, theirs: dict) -> dict[str, list[str]]:
+    """Steps the example schedules in a group this config also has, but no group of its own runs.
+
+    A step the operator moved to another group is not missing: only steps
+    absent from every one of this config's groups are reported.
+    """
+    mine_groups = _group_tables(mine)
+    grouped = {step for steps in mine_groups.values() for step in steps}
+    out: dict[str, list[str]] = {}
+    for table, steps in _group_tables(theirs).items():
+        if table not in mine_groups:
+            continue
+        missing = [step for step in steps if step not in grouped]
+        if missing:
+            out[table] = missing
+    return out
+
+
 def config_drift(config_path: Path | str) -> ConfigDrift:
     """Compare *config_path* against the packaged example template."""
     with open(config_path, "rb") as handle:
@@ -100,6 +134,7 @@ def config_drift(config_path: Path | str) -> ConfigDrift:
             drift.missing_keys.append(path)
 
     drift.unscheduled_steps = sorted(_scheduled_steps(theirs) - _scheduled_steps(mine))
+    drift.group_steps = missing_group_steps(mine, theirs)
     drift.missing_sections.sort()
     drift.missing_keys.sort()
     return drift
@@ -114,7 +149,15 @@ def render_drift(drift: ConfigDrift, config_path: Path | str) -> list[str]:
     if drift.unscheduled_steps:
         lines.append(f"未被调度的 step（{len(drift.unscheduled_steps)}）—— 装了但从来不会跑：")
         lines.extend(f"  {step}" for step in drift.unscheduled_steps)
-        lines.append("  → 把它们加进 [job.daily.groups.*] 或 [[job.daily.waves]] 的 steps")
+        lines.append("")
+    in_groups = {
+        table: [step for step in steps if step not in drift.unscheduled_steps]
+        for table, steps in drift.group_steps.items()
+    }
+    in_groups = {table: steps for table, steps in in_groups.items() if steps}
+    if in_groups:
+        lines.append("调度组缺少的 step —— 不带参数的 `cne run daily` 不会跑：")
+        lines.extend(f"  [{table}] {', '.join(steps)}" for table, steps in in_groups.items())
         lines.append("")
     if drift.missing_sections:
         lines.append(f"缺少的配置段（{len(drift.missing_sections)}）—— 当前使用内置默认值：")
@@ -124,5 +167,16 @@ def render_drift(drift: ConfigDrift, config_path: Path | str) -> list[str]:
         lines.append(f"缺少的配置项（{len(drift.missing_keys)}）—— 当前使用内置默认值：")
         lines.extend(f"  {key}" for key in drift.missing_keys)
         lines.append("")
+    if (
+        drift.unscheduled_steps
+        or drift.group_steps
+        or any(
+            section.startswith(("job.daily.groups.", "job.events.groups."))
+            for section in drift.missing_sections
+        )
+    ):
+        lines.append("→ 运行 `cne config upgrade` 自动补上缺少的 step 和调度组（会先备份原配置）。")
+    if drift.missing_keys or drift.missing_sections:
+        lines.append("缺少的配置项使用内置默认值，无需手动补。")
     lines.append(f"对照：{Path(__file__).parent / 'templates' / 'cnequity.example.toml'}")
     return lines

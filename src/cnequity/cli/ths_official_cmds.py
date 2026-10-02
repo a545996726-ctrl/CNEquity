@@ -90,9 +90,10 @@ def _staged_run(cfg, job_name: str, prefix: str, metadata: dict, *, record: bool
     reclaimed rather than aged out the way a manifest-less orphan is: three
     `ths-*` runs had 23MB stranded that way.
 
-    Closed as soon as the fetch is done, because the compact really is a
-    separate step. It is recorded against the same run, and staging still needs
-    that successful compact batch before anything will remove it.
+    Closed as soon as the fetch is done; `_publish_staged` then compacts the
+    same run, so the command publishes what it staged instead of leaving a
+    second command to the operator. Staging still needs that successful
+    compact batch before anything will remove it.
     """
     from cnequity.orchestrator.manifest import Manifest
 
@@ -111,6 +112,21 @@ def _staged_run(cfg, job_name: str, prefix: str, metadata: dict, *, record: bool
         raise
     status, rows_read, rows_written = _run_outcome(outcome.get("result") or {})
     manifest.finish_run(run_id, status, rows_read=rows_read, rows_written=rows_written)
+
+
+def _publish_staged(cfg, run_id: str, result: dict, *, applied: bool = True) -> dict | None:
+    """Compact what *run_id* staged, as `cne run compact --run-id` would.
+
+    Skipped for a dry run and for a failed or empty fetch: there is nothing
+    trustworthy to publish, and the run's staging stays for `cne run retry`.
+    """
+    status, _rows_read, rows_written = _run_outcome(result)
+    if not applied or status == "failed" or rows_written <= 0:
+        return None
+    from cnequity.domain.market_time import shanghai_today
+    from cnequity.orchestrator.engine import JobEngine
+
+    return JobEngine(cfg).run_step("compact", shanghai_today(), run_id)
 
 
 @ths_official_grp.command("capture")
@@ -214,7 +230,7 @@ def ths_backfill(
 
     \b
     需要 `[sources.ths_official] backfill = true`，因为它会改变湖里的内容。
-    它只写 staging —— 跑完之后执行 `cne run compact --run-id <id>`。
+    抓取写入 staging 后会自动 compact 发布，不需要再跑 `cne run compact`。
 
     \b
     收尾 JSON 里的 `failed_symbols` 区分上游缺数据和本地出问题：
@@ -250,7 +266,8 @@ def ths_backfill(
             workers=workers,
         )
         outcome["result"] = result
-    click.echo(json.dumps({"run_id": run_id, **result}, indent=2, default=str))
+    compact = _publish_staged(cfg, run_id, result)
+    click.echo(json.dumps({"run_id": run_id, **result, "compact": compact}, indent=2, default=str))
 
 
 @ths_official_grp.command("repair-bars")
@@ -337,7 +354,8 @@ def ths_repair_bars(
             workers=workers,
         )
         outcome["result"] = result
-    click.echo(json.dumps({"run_id": run_id, **result}, indent=2, default=str))
+    compact = _publish_staged(cfg, run_id, result, applied=apply)
+    click.echo(json.dumps({"run_id": run_id, **result, "compact": compact}, indent=2, default=str))
 
 
 @ths_official_grp.command("resource-sectors")
@@ -357,7 +375,7 @@ def ths_resource_sectors(config_path: str, start: str, end: str | None, apply: b
     [sources.ths_official] backfill = true。覆盖范围取决于源能力，
     不会承诺替换本湖所有历史，也不会删除源没有返回的旧行。
 
-    写入后执行 cne run compact --run-id <id> 发布。
+    写入 staging 后自动 compact 发布。
     """
     from cnequity.steps.rotation import resource_sector_bars_ths_official
 
@@ -384,4 +402,5 @@ def ths_resource_sectors(config_path: str, start: str, end: str | None, apply: b
             dry_run=not apply,
         )
         outcome["result"] = result
-    click.echo(json.dumps({"run_id": run_id, **result}, indent=2, default=str))
+    compact = _publish_staged(cfg, run_id, result, applied=apply)
+    click.echo(json.dumps({"run_id": run_id, **result, "compact": compact}, indent=2, default=str))

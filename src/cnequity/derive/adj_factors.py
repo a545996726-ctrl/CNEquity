@@ -64,13 +64,17 @@ _UNAVAILABLE_STATE_FIELD = "source_unavailable_symbols"
 class AdjFactorsFetchError(RuntimeError):
     """Raised when adj factor fetch fails and no cache is available."""
 
+    reason_code = "source_unavailable"
+
 
 class AdjFactorsSourceUnavailableError(AdjFactorsFetchError):
     """Raised when the configured source explicitly has no series for a symbol."""
 
 
 class AdjFactorsDeriveError(RuntimeError):
-    """Raised when too many symbols lack adj factors after derive."""
+    """Raised when requested factor work has no usable result."""
+
+    reason_code = "source_unavailable"
 
     def __init__(self, message: str, *, findings: list[dict]):
         super().__init__(message)
@@ -609,6 +613,15 @@ def _resolve_factors(
             f"No cached adj factors for {symbol} ({adjust_type}): {exc}"
         ) from exc
     except Exception as exc:
+        from cnequity.orchestrator.outcomes import error_kind
+
+        if error_kind(exc) not in {
+            "source_transient",
+            "source_unavailable",
+            "source_payload_invalid",
+            "capability_limit",
+        }:
+            raise
         if cached is not None and not cached.is_empty():
             logger.warning("External adj factors failed for %s (%s): %s", symbol, adjust_type, exc)
             return cached, source
@@ -657,6 +670,15 @@ def _resolve_factors_via_backup(
         logger.warning("adj_factors backup unavailable for %s: %s", symbol, exc)
         return None
     except Exception as exc:  # noqa: BLE001 — a failed backup is not a new failure mode
+        from cnequity.orchestrator.outcomes import error_kind
+
+        if error_kind(exc) not in {
+            "source_transient",
+            "source_unavailable",
+            "source_payload_invalid",
+            "capability_limit",
+        }:
+            raise
         logger.warning("adj_factors backup failed for %s: %s", symbol, exc)
         return None
     if factors.is_empty():
@@ -1814,6 +1836,15 @@ def _compute_adj_factors_locked(
                     )
                     _consume(sym, aligned, fail_key, finding)
                 except Exception as exc:  # noqa: BLE001 — keep symbol retryable
+                    from cnequity.orchestrator.outcomes import error_kind
+
+                    if error_kind(exc) not in {
+                        "source_transient",
+                        "source_unavailable",
+                        "source_payload_invalid",
+                        "capability_limit",
+                    }:
+                        raise
                     logger.warning("adj_factors failed for %s (%s): %s", sym, adj, exc)
                     _consume(sym, None, f"{sym}:{adj}", _fetch_failure_finding(sym, adj, exc))
     else:
@@ -1838,6 +1869,15 @@ def _compute_adj_factors_locked(
                     aligned, fail_key, finding = fut.result()
                     _consume(sym, aligned, fail_key, finding)
                 except Exception as exc:  # noqa: BLE001 — keep symbol retryable
+                    from cnequity.orchestrator.outcomes import error_kind
+
+                    if error_kind(exc) not in {
+                        "source_transient",
+                        "source_unavailable",
+                        "source_payload_invalid",
+                        "capability_limit",
+                    }:
+                        raise
                     logger.warning("adj_factors failed for %s (%s): %s", sym, adj, exc)
                     _consume(sym, None, f"{sym}:{adj}", _fetch_failure_finding(sym, adj, exc))
 

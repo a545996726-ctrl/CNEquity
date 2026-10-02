@@ -79,6 +79,10 @@ class ReaderError(ValueError):
     """Raised when load() arguments or dataset state are invalid."""
 
 
+class MissingAdjustmentError(ReaderError):
+    """An exact adjusted read needs factors absent from the available lake."""
+
+
 def _merge_revision_selection(
     revision: RevisionSelection | None,
     revision_map: Mapping[str, RevisionRef] | None,
@@ -669,7 +673,9 @@ def _apply_adjustment(
             pl.lit(False).alias("adj_is_exact"),
         )
         if strict_adj:
-            raise ReaderError("adj_factors dataset is empty; cannot compute exact adjusted prices")
+            raise MissingAdjustmentError(
+                "adj_factors dataset is empty; cannot compute exact adjusted prices"
+            )
         logger.warning("adj_factors missing; adj_is_exact=False for all rows")
         return out
 
@@ -700,7 +706,7 @@ def _apply_adjustment(
     if inexact:
         msg = f"{inexact} bar row(s) missing adj_factors for adjust={adjust!r}"
         if strict_adj:
-            raise ReaderError(msg)
+            raise MissingAdjustmentError(msg)
         logger.warning("%s; using factor=1.0 with adj_is_exact=False", msg)
     joined = joined.with_columns(pl.col("factor").fill_null(1.0))
     adj_exprs = [

@@ -80,7 +80,7 @@ if [[ -n "${CNE_GROUPS:-}" ]]; then
   gate_groups=(--groups "$CNE_GROUPS")
 fi
 status_out="freshness gate disabled (no scheduled gate group)"
-if [[ "${CNE_FRESHNESS_CHECK:-1}" != "0" ]] && ! status_out="$("$CNE" status --datasets "${gate_groups[@]+"${gate_groups[@]}"}" \
+if [[ "${CNE_FRESHNESS_CHECK:-1}" != "0" ]] && ! status_out="$("$CNE" status --datasets --gate "${gate_groups[@]+"${gate_groups[@]}"}" \
   --config "$CONFIG" 2>&1)"; then
   problems+=("dataset(s) STALE")
 fi

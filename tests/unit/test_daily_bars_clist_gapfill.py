@@ -26,6 +26,7 @@ from cnequity.steps.bars import (
 )
 from cnequity.storage import StagingWriter
 from cnequity.storage.layout import init_data_layout
+from cnequity.storage.state import StateStore
 
 
 def _no_suspension_evidence(monkeypatch) -> None:
@@ -331,7 +332,8 @@ def test_interior_gaps_schedule_exact_single_day_retry_batches(tmp_path):
     original = next(row for row in batches if row["batch_id"] == "original-wide-batch")
     assert original["status"] == "superseded"
     children = [row for row in batches if row["batch_id"] != "original-wide-batch"]
-    assert all(row["status"] == "stale" for row in children)
+    assert all(row["status"] == "failed" for row in children)
+    assert all(row["execution_status"] == "completed" for row in children)
     assert all(row["window_start"] == row["window_end"] for row in children)
     actual = {
         (row["window_start"], tuple(sorted(json.loads(row["symbols_json"])))) for row in children
@@ -915,7 +917,7 @@ def test_tip_total_loss_still_raises(tmp_path, monkeypatch):
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
     )
-    with pytest.raises(RuntimeError, match="produced no staged tip rows"):
+    with pytest.raises(RuntimeError, match="no usable rows"):
         _finish_daily_bars(
             cfg,
             tip,
@@ -933,10 +935,10 @@ def test_tip_total_loss_still_raises(tmp_path, monkeypatch):
         )
 
 
-def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path, monkeypatch):
+def test_tip_partial_miss_retains_unknown_key_for_repair(tmp_path, monkeypatch):
     # A market-sized response cannot prove that one remaining symbol had no
     # data.  Without listing/status/source-empty evidence the unknown key must
-    # keep the checkpoint blocked; there is no market-level 5% allowance.
+    # remain in the repair ledger; independent facts can still publish.
     cfg = _cfg(tmp_path)
     manifest = Manifest(cfg.manifest_path)
     run_id = manifest.start_run("daily:core")
@@ -968,26 +970,28 @@ def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
     )
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
-        _finish_daily_bars(
-            cfg,
-            tip,
-            run_id,
-            start=tip,
-            end=tip,
-            expected_tdx_symbols=["600519.SH", "000001.SZ"],
-            tdx_result={
-                "rows_read": 0,
-                "rows_written": 0,
-                "had_error": True,
-                "failed_symbols": ["600519.SH", "000001.SZ"],
-            },
-            sina_result=None,
-        )
+    result = _finish_daily_bars(
+        cfg,
+        tip,
+        run_id,
+        start=tip,
+        end=tip,
+        expected_tdx_symbols=["600519.SH", "000001.SZ"],
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "had_error": True,
+            "failed_symbols": ["600519.SH", "000001.SZ"],
+        },
+        sina_result=None,
+    )
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
     assert manifest.get_batch(run_id, "tdx-partial")["status"] == "failed"
 
 
-def test_tip_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
+def test_tip_large_partial_miss_publishes_and_records_gap(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("daily:core")
     tip = date(2026, 7, 24)
@@ -1011,22 +1015,24 @@ def test_tip_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
     )
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
-        _finish_daily_bars(
-            cfg,
-            tip,
-            run_id,
-            start=tip,
-            end=tip,
-            expected_tdx_symbols=expected,
-            tdx_result={
-                "rows_read": 0,
-                "rows_written": 0,
-                "had_error": True,
-                "failed_symbols": expected,
-            },
-            sina_result=None,
-        )
+    result = _finish_daily_bars(
+        cfg,
+        tip,
+        run_id,
+        start=tip,
+        end=tip,
+        expected_tdx_symbols=expected,
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "had_error": True,
+            "failed_symbols": expected,
+        },
+        sina_result=None,
+    )
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
 
 def test_multiday_uses_kline_not_clist(tmp_path, monkeypatch):
@@ -1100,7 +1106,7 @@ def test_multiday_uses_kline_not_clist(tmp_path, monkeypatch):
     assert result["rows_written"] == 7
 
 
-def test_multiday_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path, monkeypatch):
+def test_multiday_partial_miss_retains_unknown_keys_for_repair(tmp_path, monkeypatch):
     # Even a large multi-day response cannot certify one unresolved symbol
     # without symbol-level metadata/status/empty evidence.
     cfg = _cfg(tmp_path)
@@ -1140,22 +1146,24 @@ def test_multiday_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp
         },
     )
 
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
-        _finish_daily_bars(
-            cfg,
-            end,
-            run_id,
-            start=start,
-            end=end,
-            expected_tdx_symbols=expected,
-            tdx_result={
-                "rows_read": 0,
-                "rows_written": 0,
-                "had_error": True,
-                "failed_symbols": expected,
-            },
-            sina_result=None,
-        )
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=expected,
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "had_error": True,
+            "failed_symbols": expected,
+        },
+        sina_result=None,
+    )
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
 
 def test_multiday_single_symbol_scope_still_raises(tmp_path, monkeypatch):
@@ -1182,7 +1190,7 @@ def test_multiday_single_symbol_scope_still_raises(tmp_path, monkeypatch):
         },
     )
 
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
+    with pytest.raises(RuntimeError, match="no usable requested result"):
         _finish_daily_bars(
             cfg,
             end,
@@ -1200,7 +1208,7 @@ def test_multiday_single_symbol_scope_still_raises(tmp_path, monkeypatch):
         )
 
 
-def test_multiday_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
+def test_multiday_large_partial_miss_publishes_and_records_gaps(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("daily:core")
     start, end = date(2024, 6, 20), date(2024, 6, 21)
@@ -1237,22 +1245,24 @@ def test_multiday_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
         },
     )
 
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
-        _finish_daily_bars(
-            cfg,
-            end,
-            run_id,
-            start=start,
-            end=end,
-            expected_tdx_symbols=expected,
-            tdx_result={
-                "rows_read": 0,
-                "rows_written": 0,
-                "had_error": True,
-                "failed_symbols": expected,
-            },
-            sina_result=None,
-        )
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=expected,
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "had_error": True,
+            "failed_symbols": expected,
+        },
+        sina_result=None,
+    )
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
 
 def test_multiday_requires_two_independent_source_empty_observations(tmp_path, monkeypatch):
@@ -2004,15 +2014,17 @@ def test_a_probed_code_with_no_bars_is_settled_as_not_listed(tmp_path, monkeypat
 
 def test_a_probe_the_source_never_answered_settles_nothing(tmp_path, monkeypatch):
     cfg, run_id, tip = _probe_run(tmp_path, monkeypatch)
-    with pytest.raises(RuntimeError, match="unknown"):
-        _finish_daily_bars(
-            cfg,
-            tip,
-            run_id,
-            start=tip,
-            end=tip,
-            expected_tdx_symbols=["600519.SH", "001246.SZ"],
-            tdx_result={"rows_read": 1, "rows_written": 1, "failed_symbols": ["001246.SZ"]},
-            sina_result=None,
-            probe_symbols=["001246.SZ"],
-        )
+    result = _finish_daily_bars(
+        cfg,
+        tip,
+        run_id,
+        start=tip,
+        end=tip,
+        expected_tdx_symbols=["600519.SH", "001246.SZ"],
+        tdx_result={"rows_read": 1, "rows_written": 1, "failed_symbols": ["001246.SZ"]},
+        sina_result=None,
+        probe_symbols=["001246.SZ"],
+    )
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")

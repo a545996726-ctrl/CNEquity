@@ -70,7 +70,7 @@ def resolve_config_path(config_path: str):
             )
         raise click.ClickException(
             f"找不到配置：{USER_CONFIG}。"
-            "跑 `cne config create` 从随包示例生成一份"
+            "首次使用直接跑 `cne init`，它会生成这份配置并开始初始化；只想生成配置用 `cne config create`"
             f"（有仓库 checkout 也可以直接复制 {EXAMPLE_CONFIG}）。"
             f"{hint}"
         )
@@ -213,14 +213,7 @@ def parse_date_option(value: str | None, flag: str) -> date | None:
 
 
 def _run_status_exit_code(status: str) -> int:
-    """Map the run contract to scheduler-friendly exit codes.
+    """Coverage limitations remain visible without failing usable execution."""
+    from cnequity.orchestrator.outcomes import execution_exit_code
 
-    0 means all requested work succeeded; 2 means the core spine completed
-    but research/advisory work degraded; 1 means a core failure (or another
-    terminal failure without a usable result).
-    """
-    if status in {"success", "skipped_non_trading_day"}:
-        return 0
-    if status in {"degraded", "warning"}:
-        return 2
-    return 1
+    return execution_exit_code(status)

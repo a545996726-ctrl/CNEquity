@@ -97,6 +97,48 @@ def test_init_manifest_final_status_reflects_failed_phase(cfg, monkeypatch):
     assert engine.manifest.get_run(result["run_id"])["status"] == "failed"
 
 
+def test_init_persists_new_instrument_dates_without_changing_step_context(cfg, monkeypatch):
+    init_data_layout(cfg)
+    from cnequity.orchestrator import engine as eng_mod
+    from cnequity.orchestrator.registry import StepEntry
+
+    # Exercise a consumer in the same phase, where step context is shared.
+    cfg.init_phases = ["phase1_reference"]
+    monkeypatch.setitem(eng_mod.INIT_PHASE_STEPS, "phase1_reference", ["instruments", "daily_bars"])
+    listed = date(2024, 6, 28)
+    new = [{"symbol": "000001.SZ", "list_date": listed, "delist_date": None}]
+    observed = []
+
+    def _get_step(name):
+        def _fn(config, trade_date, run_id, context):
+            if name == "instruments":
+                return {"rows_read": 1, "context_updates": {"new_instruments": new}}
+            if context.get("new_instruments"):
+                observed.append(context["new_instruments"][0]["list_date"])
+            return {"rows_read": 1, "rows_written": 1}
+
+        return StepEntry(fn=_fn, group="test", requires_workers=False)
+
+    monkeypatch.setattr(eng_mod, "get_step", _get_step)
+    engine = JobEngine(cfg)
+    result = engine.run_init_phases(listed)
+
+    assert result["status"] == "success"
+    assert observed and all(value is listed for value in observed)
+    manifest = Manifest(engine.manifest.db_path)
+    assert manifest.get_run(result["run_id"])["status"] == "success"
+    steps = [
+        step
+        for phase in manifest.get_run_metadata(result["run_id"])["phase_results"]
+        for step in phase["results"]
+    ]
+    instruments = next(
+        step for step in steps if step.get("context_updates", {}).get("new_instruments")
+    )
+    assert instruments["context_updates"]["new_instruments"][0]["list_date"] == "2024-06-28"
+    assert new[0]["list_date"] is listed
+
+
 def test_init_parent_run_stays_locked_between_phases(cfg, monkeypatch):
     """A long first phase must not make the parent look orphaned to phase two."""
     init_data_layout(cfg)
@@ -306,7 +348,8 @@ def test_reference_and_index_phases_backfill_history():
     phases = DEFAULT_INIT_PHASES
     assert step_backfill("trading_calendar", phases) is True
     assert step_backfill("index_bars", phases) is True
-    # instruments/trading_status are date-insensitive but flagged consistently
+    assert step_backfill("trading_status", phases) is False
+    # Index backfill remains independent of the status snapshot.
     assert step_backfill("index_bars", ["phase1_reference"]) is False
 
 

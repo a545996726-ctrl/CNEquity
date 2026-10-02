@@ -63,10 +63,9 @@ def _echo_init_plan(
     resume: bool,
     config_path: str,
     ingest_universe: str,
-    st_history_budget: int,
-    baostock_enabled: bool,
 ) -> None:
-    """Put the market width, time order and 400-symbol caveat before the wait."""
+    """Explain the required backbone and optional history before fetching."""
+    scope = ingest_scope_label(ingest_universe)
     if resume:
         override = (
             f" 本次按显式 --since={history_start.isoformat()} 覆盖历史起点。"
@@ -77,9 +76,7 @@ def _echo_init_plan(
             "续跑计划：保留成功批次，只处理失败/缺失阶段；"
             f"剩余耗时以批次进度和 ETA 为准。{override}"
         )
-        return
-    scope = ingest_scope_label(ingest_universe)
-    if since_str:
+    elif since_str:
         click.echo(
             f"初始化计划：{scope}，"
             f"自定义历史窗口 {history_start.isoformat() if history_start else since_str}"
@@ -95,24 +92,12 @@ def _echo_init_plan(
             f"初始化计划：quick，{scope}，最近 {QUICK_PROFILE_YEARS} 年；"
             "耗时受源可达性、分页和已有缓存影响，以批次进度和 ETA 为准。"
         )
-    if not baostock_enabled:
-        click.echo(
-            "历史 ST 说明：[sources.baostock] 未启用，本次 init 不会执行 Baostock 历史 ST "
-            "扫描；这不是“只有 400 条数据”。如需该证据，请先启用数据源，再运行 "
-            f"`cne backfill trading_status --config {config_path}`。"
-        )
-    elif st_history_budget > 0:
-        click.echo(
-            f"范围说明：init 不是只拉 {st_history_budget} 条数据；"
-            f"{st_history_budget} 只证券上限仅用于最慢的历史 ST 状态扫描。"
-            "要补完这部分，init 后运行 `cne backfill trading_status --config "
-            f"{config_path}`；全市场逐证券扫描耗时较长，以续跑进度为准。"
-        )
-    else:
-        click.echo(
-            "历史 ST 说明：本配置未设置每轮证券数上限，init 会尝试完成整轮扫描；"
-            "全市场逐证券扫描耗时较长，以实时进度为准。"
-        )
+    click.echo("初始化范围：当前交易状态、日线停牌派生；窗口内退市日线自动恢复。")
+    click.echo(
+        "可选补数：全市场历史 ST 扫描不属于 init，不影响初始化完成；"
+        f"历史 ST 研究需另行运行 `cne backfill trading_status --config {config_path}`，"
+        "覆盖能力取决于市场与已启用来源。"
+    )
 
 
 # `cne init --profile demo|sample` used to be `cne demo`. It is the same
@@ -130,6 +115,25 @@ _FLAG_NAMES = {
     "resume_run_id": "--run-id",
     "since_str": "--since",
 }
+
+
+def _create_default_config_if_missing(config_path: str) -> bool:
+    """Let a first `cne init` stand alone instead of needing `config create` first.
+
+    Only the implicit default path is created: an explicit `--config` or
+    `CNE_CONFIG` that does not exist is more likely a typo than a request for a
+    new lake, and silently building one there would hide that.
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is None or ctx.get_parameter_source("config_path") is not (
+        click.core.ParameterSource.DEFAULT
+    ):
+        return False
+    path = Path(config_path).expanduser()
+    if path.exists():
+        return False
+    write_user_config(path)
+    return True
 
 
 def _reject_foreign_options(profile: str, names: tuple[str, ...]) -> None:
@@ -268,9 +272,13 @@ def init(
 
     或者一开始就全量：`--profile full`。
 
-    quick/full 都扫描配置的 universe，不是只拉 400 条数据。400 只是默认配置中 init 最慢的
-    历史 ST 状态扫描每轮先处理的证券数；实际值以启动摘要为准，用
-    `cne backfill trading_status` 补完整轮。
+    第一次运行且默认的 configs/cnequity.toml 不存在时，会先按随包示例生成它
+    （等同 `cne config create`）。中断或部分覆盖后，
+    重跑同一条 `cne init` 即可续跑，已成功的批次不会重拉。
+
+    quick/full 都扫描配置的 universe，并自动恢复窗口内退市日线。
+    交易状态获取当前快照并派生历史停牌；历史 ST 扫描是独立可选任务，
+    使用 `cne backfill trading_status`，不作为 init 的完成条件。
 
     \b
     `--profile demo` 把几只标的建到独立的 `--data-root` 里，一分钟内就能看到进度和查询结果；
@@ -296,7 +304,13 @@ def init(
 
     _reject_foreign_options(profile, _DEMO_ONLY)
     _progress_logging(quiet)
+    created = _create_default_config_if_missing(config_path)
     cfg = _cfg(config_path)
+    if created:
+        click.echo(
+            f"未找到配置，已按默认值生成 {config_path}（data.root = {cfg.data_root}）；"
+            "需要调整时修改它，再重跑 `cne init`。"
+        )
     init_data_layout(cfg)
     if layout_only:
         click.echo(f"已在 {cfg.data_root} 建好目录结构")
@@ -355,8 +369,6 @@ def init(
         resume=is_resume,
         config_path=config_path,
         ingest_universe=cfg.ingest_universe,
-        st_history_budget=int(cfg.st_history_symbols_per_run),
-        baostock_enabled=bool(cfg.sources.get("baostock", False)),
     )
 
     result = engine.run_init_phases(
@@ -374,7 +386,7 @@ def init(
 #: What `cne config` does, and the spellings that used to mean one of them.
 #: `cnequity.cli._root.MOVED` answers a moved *command*; an argument is not a
 #: command, so it needs its own map — and this is the one people hit first.
-CONFIG_ACTIONS: tuple[str, ...] = ("validate", "create", "diff")
+CONFIG_ACTIONS: tuple[str, ...] = ("validate", "create", "diff", "upgrade")
 CONFIG_ACTIONS_MOVED: dict[str, str] = {"init": "cne config create"}
 
 
@@ -396,7 +408,14 @@ CONFIG_ACTIONS_MOVED: dict[str, str] = {"init": "cne config create"}
     default=None,
     help="action=create 时设置 [data].root（默认把 ./data/cnequity 解析成绝对路径）。",
 )
-def config_cmd(action: str, config_path: str, force: bool, data_root: str | None):
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="action=upgrade 时只列出要补的 step 和调度组，不写文件。",
+)
+def config_cmd(
+    action: str, config_path: str, force: bool, data_root: str | None, dry_run: bool = False
+):
     """校验、生成或对比配置。
 
     \b
@@ -406,6 +425,8 @@ def config_cmd(action: str, config_path: str, force: bool, data_root: str | None
     `cne config validate` 校验一份已有的配置。
     `cne config diff` 报告示例配置里有、而这份配置没有的东西 —— 最要紧的是新版本往调度组里
     加的 step：一份写完就再没更新过的配置永远不会跑到它们。
+    `cne config upgrade` 把这些 step 和缺少的调度组直接补进配置（先备份原文件），
+    其余设置不动；缺少的配置项本来就用内置默认值，不会写入。升级版本后跑这一条即可。
     """
     # A free-form argument bypasses `token_normalize_func`, which is what makes
     # every other name in this CLI case-insensitive; normalise it here so
@@ -419,6 +440,11 @@ def config_cmd(action: str, config_path: str, force: bool, data_root: str | None
             f"{action!r} 不是 {', '.join(repr(a) for a in CONFIG_ACTIONS)} 之一",
             param_hint="'{" + "|".join(CONFIG_ACTIONS) + "}'",
         )
+    if dry_run and action != "upgrade":
+        raise click.UsageError("--dry-run 只用于 `cne config upgrade`")
+    if action == "upgrade":
+        _config_upgrade(resolve_config_path(config_path), dry_run=dry_run)
+        return
     if action == "diff":
         from cnequity.config.drift import config_drift, render_drift
 
@@ -439,7 +465,7 @@ def config_cmd(action: str, config_path: str, force: bool, data_root: str | None
         except FileExistsError as exc:
             raise click.ClickException(str(exc)) from exc
         click.echo(f"已写入 {out}")
-        click.echo("data.root 是绝对路径，按需修改后执行：cne config validate && cne init")
+        click.echo("data.root 是绝对路径，按需修改后执行：cne init")
         return
 
     cfg = _cfg(config_path)
@@ -449,6 +475,47 @@ def config_cmd(action: str, config_path: str, force: bool, data_root: str | None
             click.echo(f"ERROR: {e}", err=True)
         raise SystemExit(1)
     click.echo("配置检查通过")
+
+
+def _config_upgrade(path: Path, *, dry_run: bool) -> None:
+    """Apply the schedule edits of `plan_upgrade`, keeping a timestamped backup."""
+    import shutil
+    from datetime import datetime
+
+    from cnequity.config import load_config
+    from cnequity.config.upgrade import plan_upgrade
+
+    plan = plan_upgrade(path)
+    if not plan.changed and not plan.manual_steps:
+        click.echo(f"{path} 的调度已包含当前版本的全部 step，无需升级。")
+        return
+    for table, steps in plan.added_steps.items():
+        label = (
+            f"[[job.daily.waves]] {table.removeprefix('wave:')}"
+            if table.startswith("wave:")
+            else f"[{table}]"
+        )
+        click.echo(f"补 step：{label} += {', '.join(steps)}")
+    for table in plan.added_groups:
+        click.echo(f"补调度组：[{table}]")
+    if plan.manual_steps:
+        click.echo(
+            "无法自动放置，请对照示例配置手动加入：" + ", ".join(plan.manual_steps),
+            err=True,
+        )
+    if dry_run or not plan.changed:
+        if plan.manual_steps:
+            raise SystemExit(1)
+        return
+    backup = path.with_name(f"{path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}")
+    shutil.copy2(path, backup)
+    path.write_text(plan.text, encoding="utf-8")
+    click.echo(f"已更新 {path}（原文件备份为 {backup.name}）")
+    errors = validate_config(load_config(path))
+    for e in errors:
+        click.echo(f"ERROR: {e}", err=True)
+    if errors or plan.manual_steps:
+        raise SystemExit(1)
 
 
 @cli.command()

@@ -143,6 +143,21 @@ def _suspended_pairs(
     unfetched = _unfetched_sessions(config)
     if unfetched:
         gaps = gaps.filter(~pl.col("trade_date").is_in(sorted(unfetched)))
+    from cnequity.storage.state import StateStore
+
+    state = StateStore(config.meta_root)
+    unknown_keys = [
+        {"symbol": row["symbol"], "trade_date": date.fromisoformat(row["trade_date"])}
+        for row in state.get_outstanding_keys("daily_bars")
+    ]
+    if state.get_payload("daily_bars").get("missing_units"):
+        from cnequity.orchestrator.outcomes import InputUnavailableError
+
+        raise InputUnavailableError(
+            "daily_bars has unresolved request units; cannot infer suspensions"
+        )
+    if unknown_keys:
+        gaps = gaps.join(pl.DataFrame(unknown_keys), on=["symbol", "trade_date"], how="anti")
     return gaps
 
 
@@ -183,6 +198,34 @@ def derive_suspension_history(
     When *start* / *end* are set, only that calendar window is considered — use
     yearly chunks for a full-history rebuild to keep the cross-join bounded.
     """
+    from cnequity.orchestrator.outcomes import InputUnavailableError
+
+    for dataset in ("daily_bars", "trading_calendar", "instruments"):
+        if not dataset_has_parquet(config.curated_root / dataset):
+            raise InputUnavailableError(f"trading_status: missing {dataset} input")
+    if start is not None or end is not None:
+        calendar = scan_parquet_root(
+            config.curated_root / "trading_calendar", partition_col="trade_date"
+        )
+        bars = scan_parquet_root(config.curated_root / "daily_bars", partition_col="trade_date")
+        for bound, operator in ((start, "ge"), (end, "le")):
+            if bound is not None:
+                predicate = (
+                    pl.col("trade_date") >= bound
+                    if operator == "ge"
+                    else pl.col("trade_date") <= bound
+                )
+                calendar = calendar.filter(predicate)
+                bars = bars.filter(predicate)
+        if calendar.select(pl.len()).collect().item() == 0:
+            raise InputUnavailableError(
+                "trading_status: calendar does not cover the requested window"
+            )
+        if (
+            calendar.filter(pl.col("is_trading")).select(pl.len()).collect().item()
+            and bars.select(pl.len()).collect().item() == 0
+        ):
+            raise InputUnavailableError("trading_status: no daily bars in the requested window")
     pairs = _suspended_pairs(config, start=start, end=end)
     if pairs.is_empty():
         return 0

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import polars as pl
+import pytest
 
 from cnequity.config import Config
 from cnequity.domain.schemas import DAILY_BARS_SCHEMA, with_provenance
@@ -249,7 +250,9 @@ def test_empty_fetch_without_terminal_evidence_stays_retryable(tmp_path):
     )
 
     assert result["recovered"] == 0
-    assert result["status"] == "warning"
+    assert result["status"] == "failed"
+    assert result["usable_result"] is False
+    assert result["reason_code"] == "source_unavailable"
     assert result["unresolved_symbols"] == 1
     assert "600070.SH" not in _ingested_symbols(cfg)
     assert _staged(cfg, "instruments", "run-1").is_empty()
@@ -303,3 +306,107 @@ def test_pre_window_no_data_evidence_is_reused_on_rerun(tmp_path, monkeypatch):
     assert result["rows_written"] == 0
     assert result["expected_no_data"] == 1
     assert result["coverage_pending_compact"] is True
+
+
+def test_init_recovers_and_publishes_delisted_bars_before_legacy_ownership_retry(
+    tmp_path, monkeypatch
+):
+    from cnequity.steps.delisted import delisted_recovery_covers
+
+    start, end = date(2023, 9, 30), date(2025, 4, 10)
+    cfg = _cfg(tmp_path, {"600070.SH": end.isoformat(), "430001.BJ": end.isoformat()})
+    cfg.ingest_universe = "all_a_sh_sz"
+    cfg._backfill_start = start
+    engine = JobEngine(cfg)
+    run_id = engine.manifest.start_run("init", {})
+    engine.manifest.start_batch(
+        run_id,
+        "ownership",
+        dataset="daily_bars",
+        task_id="daily_bars_ownership",
+        blocks_compaction=True,
+    )
+    engine.manifest.finish_batch(run_id, "ownership", "warning")
+    calls = []
+
+    def fetch(symbol, **kwargs):
+        calls.append(symbol)
+        assert kwargs["start"] == start
+        assert kwargs["end"] == end
+        return _bars(symbol, date(2023, 10, 9), end)
+
+    monkeypatch.setattr("cnequity.adapters.sina.bars.fetch_daily_bars_sina", fetch)
+    engine._recover_init_delisted_bars(run_id, end, {})
+
+    assert calls == ["600070.SH"]
+    assert delisted_recovery_covers(cfg, start, end, ["600070.SH"])
+    # Recovery's compact must not overwrite or bypass the parent's old warning.
+    assert engine.manifest.get_batch(run_id, "ownership")["status"] == "warning"
+    engine._recover_init_delisted_bars(run_id, end, {})
+    assert calls == ["600070.SH"]
+
+
+def test_init_partial_recovery_publishes_progress_and_retries_only_missing_targets(
+    tmp_path, monkeypatch
+):
+
+    start, end = date(2024, 6, 27), date(2025, 4, 10)
+    cfg = _cfg(tmp_path, {"600070.SH": end.isoformat(), "600083.SH": end.isoformat()})
+    cfg._backfill_start = start
+    engine = JobEngine(cfg)
+    run_id = engine.manifest.start_run("init", {})
+    calls = []
+    failing = True
+
+    def fetch(symbol, **kwargs):
+        calls.append(symbol)
+        if failing and symbol == "600083.SH":
+            raise ConnectionError("fixture source unavailable")
+        return _bars(symbol, start, end)
+
+    monkeypatch.setattr("cnequity.adapters.sina.bars.fetch_daily_bars_sina", fetch)
+    recovery = engine._recover_init_delisted_bars(run_id, end, {})
+    assert recovery["coverage_status"] == "partial"
+    assert calls == ["600070.SH", "600083.SH"]
+    failing = False
+    engine._recover_init_delisted_bars(run_id, end, {})
+    assert calls == ["600070.SH", "600083.SH", "600083.SH"]
+
+
+def test_init_accepts_published_pre_window_no_data_evidence(tmp_path, monkeypatch):
+    from cnequity.steps.delisted import delisted_recovery_covers
+
+    start, end = date(2024, 6, 27), date(2025, 4, 10)
+    cfg = _cfg(tmp_path, {"600070.SH": end.isoformat()})
+    cfg._backfill_start = start
+    engine = JobEngine(cfg)
+    run_id = engine.manifest.start_run("init", {})
+    calls = []
+
+    def fetch(symbol, **kwargs):
+        calls.append(symbol)
+        return pl.DataFrame()
+
+    monkeypatch.setattr("cnequity.adapters.sina.bars.fetch_daily_bars_sina", fetch)
+    monkeypatch.setattr(
+        "cnequity.adapters.sina.bars.symbol_exists", lambda *a, **k: date(2009, 12, 15)
+    )
+    engine._recover_init_delisted_bars(run_id, end, {})
+    assert delisted_recovery_covers(cfg, start, end, ["600070.SH"])
+    engine._recover_init_delisted_bars(run_id, end, {})
+    assert calls == ["600070.SH"]
+
+
+def test_init_recovery_preserves_a_returned_execution_failure(tmp_path, monkeypatch):
+    end = date(2025, 4, 10)
+    cfg = _cfg(tmp_path, {"600070.SH": end.isoformat()})
+    engine = JobEngine(cfg)
+    run_id = engine.manifest.start_run("init", {})
+    monkeypatch.setattr(
+        "cnequity.steps.delisted.backfill_delisted_bars",
+        lambda *a, **k: {"status": "failed", "reason_code": "invariant_violation"},
+    )
+    with pytest.raises(RuntimeError, match="recovery execution failed"):
+        engine._recover_init_delisted_bars(run_id, end, {})
+    child = engine.manifest.list_runs(job_name="delisted_backfill")[0]
+    assert child["status"] == "failed"

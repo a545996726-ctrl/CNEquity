@@ -498,9 +498,10 @@ def test_dataset_result_aggregate_distinguishes_degraded_from_core_failure(tmp_p
         run_id,
         "adj_factors",
         "derive",
-        "failed",
+        "warning",
         criticality="research",
         error_code="source_down",
+        rows_written=1,
     )
     assert manifest.aggregate_run_status(run_id)["status"] == "degraded"
 
@@ -553,7 +554,7 @@ def test_adj_failure_keeps_committed_daily_bars_revision(worker_config, monkeypa
     )
     derive = engine.run_step("derive_adj_factors", date(2024, 6, 28), run_id)
     assert derive["status"] == "failed"
-    assert engine._overall_status(run_id, "success") == "degraded"
+    assert engine._overall_status(run_id, "success") == "failed"
     daily_revision = manifest.get_dataset_result(run_id, "daily_bars", "publish_revision")
     assert daily_revision is not None
     assert daily_revision["revision_id"] == revision.revision_id
@@ -749,7 +750,7 @@ def test_retry_reruns_failed_symbol_batch_only(worker_config, monkeypatch):
     init_data_layout(worker_config)
     engine = JobEngine(worker_config)
     result = engine.run_job("daily", date(2024, 6, 28), steps=["daily_bars"])
-    assert result["status"] == "failed"
+    assert result["status"] == "degraded"
     assert list(worker_config.staging_root.glob("daily_bars/**/*.parquet"))
     assert not list(worker_config.curated_root.glob("daily_bars/**/*.parquet"))
 
@@ -804,7 +805,7 @@ def test_partial_batch_retry_scope_is_reduced_to_missing_symbols(worker_config, 
     init_data_layout(worker_config)
     engine = JobEngine(worker_config)
     result = engine.run_job("daily", date(2024, 6, 28), steps=["daily_bars"])
-    assert result["status"] == "failed"
+    assert result["status"] == "degraded"
     failed = Manifest(worker_config.manifest_path).get_failed_batches(result["run_id"])
     assert len(failed) == 1
     assert failed[0]["symbols_json"] == '["600519.SH"]'
@@ -878,7 +879,10 @@ def test_retry_requeues_stale_running_batch(worker_config, monkeypatch):
     assert retry["stale_marked_failed"] == 2
     assert retry["batch_timeout"] == {"running_to_stale": 1, "stale_to_failed": 1}
     assert retry["retried"] == 1
-    assert retry["status"] == "success"
+    assert retry["status"] == "degraded"
+    assert retry["execution_status"] == "completed"
+    skipped = next(r for r in retry["results"] if r["step"] == "derive_industry_index")
+    assert skipped["reason_code"] == "input_unavailable"
     assert calls == [["600519.SH"]]
     curated = (
         worker_config.curated_root / "daily_bars" / "trade_date=2024-06-28" / "part-merged.parquet"

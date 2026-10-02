@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 from cnequity.adapters.eastmoney.economic_calendar import fetch_economic_calendar
 from cnequity.config import Config
+from cnequity.orchestrator.outcomes import SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.steps.common import SnapshotBackfillError
 from cnequity.steps.http_common import (
@@ -29,7 +30,7 @@ def step_flash_news_wire(config: Config, trade_date: date, run_id: str, context:
 @register_step("economic_calendar", group="macro_risk")
 def step_economic_calendar(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("economic_calendar: eastmoney source disabled in config")
+        raise SourceUnavailableError("economic_calendar: eastmoney source disabled in config")
     # This is a rolling live window, not historical by-date data. It cannot
     # be routed through the daily helper because its event_date intentionally
     # contains future dates; reject backfill explicitly before fetching.

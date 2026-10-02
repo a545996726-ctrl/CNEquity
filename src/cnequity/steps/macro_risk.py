@@ -15,6 +15,7 @@ from cnequity.adapters.macro.indicators import (
 )
 from cnequity.config import Config
 from cnequity.derive.market_breadth import MARKET_BREADTH_METRICS, compute_market_breadth
+from cnequity.orchestrator.outcomes import InputUnavailableError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.quality.macro_checks import macro_revision_findings
 from cnequity.steps.common import BACKFILL_START, list_trading_dates
@@ -240,7 +241,7 @@ def _validate_market_breadth_snapshot(df: pl.DataFrame) -> pl.DataFrame:
 @register_step("macro_indicators", group="macro_risk")
 def step_macro_indicators(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("macro_indicators: eastmoney source disabled in config")
+        raise SourceUnavailableError("macro_indicators: eastmoney source disabled in config")
     # Revisions have to be detected here, between fetch and write: compact keeps
     # only the newest row per (indicator_id, obs_date), so once the write lands
     # the previous published value is gone. The overwrite itself is deliberate —
@@ -394,7 +395,7 @@ def step_share_unlock_schedule(
     config: Config, trade_date: date, run_id: str, context: dict
 ) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("share_unlock_schedule: eastmoney source disabled in config")
+        raise SourceUnavailableError("share_unlock_schedule: eastmoney source disabled in config")
     if getattr(config, "_backfill", False):
         return _backfill_share_unlock_schedule(config, trade_date, run_id)
     return run_incremental_fetched(
@@ -536,7 +537,7 @@ def _announcement_coverage(config: Config, start: date, end: date) -> tuple[date
 
     watermark = StateStore(config.meta_root).get_date("announcement_index")
     if watermark is None:
-        raise RuntimeError(
+        raise InputUnavailableError(
             "regulatory_events is derived from announcement_index, which has no "
             "coverage yet — run the announcement_index step (or "
             "`cne backfill announcement_index`) first"
@@ -619,7 +620,7 @@ def step_regulatory_events(config: Config, trade_date: date, run_id: str, contex
         # The rows are CNINFO's disclosures either way, so turning the source
         # off stops this dataset too rather than quietly re-deriving a tail
         # nothing is refreshing any more.
-        raise RuntimeError("regulatory_events: cninfo source disabled in config")
+        raise SourceUnavailableError("regulatory_events: cninfo source disabled in config")
     requested_start, requested_end = _regulatory_window(config, trade_date)
     start, end, findings = _announcement_coverage(config, requested_start, requested_end)
     if start > end:
@@ -634,7 +635,7 @@ def step_regulatory_events(config: Config, trade_date: date, run_id: str, contex
     if derived.announcements == 0:
         # Nothing to search is not the same as nothing to find. Refuse rather
         # than record an empty window that looks like a clean answer.
-        raise RuntimeError(
+        raise InputUnavailableError(
             f"regulatory_events: announcement_index has no rows in "
             f"{start.isoformat()}..{end.isoformat()}; backfill the announcements "
             "for that window first (`cne backfill announcement_index`)"

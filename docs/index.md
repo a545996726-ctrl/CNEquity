@@ -13,8 +13,7 @@ description: 从首个查询到持续采集、历史研究与数据质量验收�
 
 | 我想…… | 阅读路径 |
 |---|---|
-| 先体验，不建全市场湖 | [安装](getting-started/installation.md) → [Demo / 离线样例](getting-started/quickstart.md) |
-| 建立可日更的正式湖 | [初始化与续跑](getting-started/initialization.md) → [配置](getting-started/configuration.md) → [运行手册](operations/runbook.md) |
+| 建立可日更的数据湖 | [快速开始](getting-started/quickstart.md) → [初始化与续跑](getting-started/initialization.md) → [运行手册](operations/runbook.md) |
 | 查有哪些数据、能补多远 | [数据集目录](datasets/catalog.md) → [数据源限制](datasets/sources.md) → [字段与单位](datasets/schema.md) |
 | 研究复权、历史股票池或财报 | [查询指南](datasets/query-guide.md) → [研究示例](recipes/README.md) → [Python API](reference/python-api.md) |
 | 研究商品期货与期权 | [衍生品指南](recipes/derivatives.md) |
@@ -23,15 +22,14 @@ description: 从首个查询到持续采集、历史研究与数据质量验收�
 | 处理失败、限流或数据缺口 | [排障](operations/troubleshooting.md) → [源保护](operations/fetch-policy.md) → [源健康](operations/source-health.md) |
 | 升级或反馈问题 | [更新日志](changelog.md) → [升级与兼容性](getting-started/upgrading.md) |
 
-## 最短体验路径
+## 一条命令初始化
 
 ```bash
 pip install cnequity
-cne init --profile demo
-cne query --config configs/cnequity.demo.toml --sql "SELECT symbol, trade_date, close, source FROM daily_bars LIMIT 5"
+cne init
 ```
 
-默认 5 只股票、最近约 30 个交易日，独立目录；需要 TDX 连通性。网络受限时使用[离线 sample](getting-started/quickstart.md)，合成数据只用于验证链路。
+第一次运行自动生成 `configs/cnequity.toml`，然后建立沪深京全市场最近 3 年的主干（含窗口内已知退市股票的日线），审计后发布到当前目录的 `data/cnequity/`。全市场初始化可能需要数小时；中断或结果有 `warning` 时，重跑同一条 `cne init` 即续跑。详见[快速开始](getting-started/quickstart.md)。
 
 ## 先分清四件事
 
@@ -39,7 +37,7 @@ cne query --config configs/cnequity.demo.toml --sql "SELECT symbol, trade_date, 
 |---|---|
 | 注册 ≠ 已采集 | 当前开发树有 52 个数据集（47 curated + 5 derived），包括可选、兼容与占位入口；安装不会附带数据 |
 | 新鲜 ≠ 完整 | `fresh` 反映更新日期；历史缺口、ST 与退市证据、PIT 质量需要分别核验 |
-| 日更 ≠ 事件流 | `run daily --all-groups` 遍历日更组；公告和新闻另用 `run events`，周末也运行 |
+| 交易日 ≠ 自然日 | `run daily` 交易日跑日更组，每天（含周末）跑公告和新闻事件流；每天调度一次即可 |
 | 回填 ≠ 严格 PIT | 今日回填的财报不能证明过去已观察到该版本；研究显式使用 `pit_mode="strict"` |
 
 ## 产品方向

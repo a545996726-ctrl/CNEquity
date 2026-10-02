@@ -189,11 +189,11 @@ Wave DAG：每个 wave 含 `name`、`parallel`（wave 内 step 是否并行）�
 
 日更与补跑入口使用北京时间 `[job.daily].run_at`（默认 17:30）、`[job.stale].run_at`（默认 21:00）。组内字段 `at` 是运行参考，不会仅凭配置自动安装系统调度器。
 
-`core`、`capital`、`signals`、`fundamentals`、`macro_risk`、`research` 是日常数据组；分钟、分笔和衍生品按各自开关启用。以随包模板与 `cne config diff` 为准，不复制个人主机的耗时来设定所有人的任务间隔。
+`core`、`capital`、`signals`、`fundamentals`、`macro_risk`、`research` 是日常数据组；分钟、分笔和衍生品按各自开关启用。以随包模板为准，升级后用 `cne config upgrade` 补上新增的 step；不复制个人主机的耗时来设定所有人的任务间隔。
 
 各 daily 任务共用非阻塞写入锁。优先由一个调度入口顺序运行所需组；多个独立定时任务可能撞锁而跳过，必须检查退出码与 run 状态。
 
-`cne run daily --group <name>` 只跑该组 steps。
+不带参数的 `cne run daily` 按配置顺序跑完全部组，再跑事件流；`cne run daily --group <name>` 只跑该组 steps。
 
 ### 运行时间（`[job.daily]` / `[job.stale]` 的 `run_at`）
 
@@ -245,7 +245,7 @@ weekday = 5          # 每周组在哪天之前的最后一个交易日跑，ISO
 | `news_wire` | 21:00 | `news_headlines`、`flash_news_wire` | 单张实时页，想要日内新鲜度就单独高频跑这一组 |
 
 `cne run events` 按配置文件里的先后顺序依次跑每个组（各自 `compact` 发布），
-`--group <name>` 只跑一个。定时器见
+`--group <name>` 只跑一个。不带参数的 `cne run daily` 在日更组之后也会跑一遍全部事件流组。定时器见
 [`scripts/events_pipeline.sh`](../operations/scripts.md) 与 `com.cnequity.events` agent。
 
 `validate_config` 在这里守两条：组里只能放**自然日**数据集

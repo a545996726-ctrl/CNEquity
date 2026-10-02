@@ -1,8 +1,28 @@
-"""Compact eligibility: skip datasets with incomplete batches in the current run."""
+"""Publish sealed facts independently of completed source attempts."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from cnequity.orchestrator.manifest import Manifest
+
+
+def publication_files(
+    manifest: Manifest, run_id: str, dataset: str, staging_root: Path | None = None
+) -> list[Path]:
+    """Select immutable validated facts; legacy partial staging stays gated."""
+    from cnequity.storage.parquet import StagingWriter
+
+    writer = StagingWriter(staging_root or manifest.db_path.parent.parent / "staging")
+    batches = [b for b in manifest.get_batches_for_run(run_id) if b["dataset"] == dataset]
+    if any(b["status"] in {"running", "stale", "queued"} for b in batches):
+        return []
+    legacy_safe = manifest.incomplete_batch_counts_by_dataset(run_id).get(dataset, 0) == 0
+    return [
+        path
+        for path in writer.list_run_files(dataset, run_id)
+        if writer.is_sealed(path, dataset, run_id) or legacy_safe
+    ]
 
 
 def refresh_batch_liveness(
@@ -32,4 +52,4 @@ def compact_allowed(
     if stale_after_seconds is not None:
         refresh_batch_liveness(manifest, run_id, stale_after_seconds=stale_after_seconds)
     incomplete = manifest.incomplete_batch_counts_by_dataset(run_id).get(dataset, 0)
-    return incomplete == 0, incomplete
+    return incomplete == 0 or bool(publication_files(manifest, run_id, dataset)), incomplete

@@ -602,24 +602,105 @@ def _history_already_in_the_lake(config: Config, symbols: set[str], start: date)
     delisted is the opposite case: its history is already here, and there is no
     recovery to wait for.
 
-    Proof is by inspection, not by trust: the name must have bars, they must
-    start no later than the requested window, and they must stop at or before
-    the catalogued delisting. A span that runs *past* the delisting contradicts
-    the catalogue and is deliberately not accepted here.
+    Proof is by inspection: traded bars must start by the first required
+    session, or a verified zero-volume prefix must cover the earlier sessions.
+    They must stop at or before the catalogued delisting. A span that runs
+    *past* the delisting contradicts the catalogue and is not accepted here.
     """
     if not symbols:
         return set()
     delist_dates = _catalogued_delist_dates(config, symbols)
     spans = _bar_spans(config, sorted(symbols))
+    starts = _delisted_history_starts(config, symbols, start)
+    prefix_covered = _zero_volume_prefixes(config, spans, starts)
     proven: set[str] = set()
     for symbol in symbols:
         span = spans.get(symbol)
         delisted_on = delist_dates.get(symbol)
         if span is None or delisted_on is None:
             continue
-        if span[0] <= start and span[1] <= delisted_on:
+        if (span[0] <= starts[symbol] or symbol in prefix_covered) and span[1] <= delisted_on:
             proven.add(symbol)
     return proven
+
+
+def _zero_volume_prefixes(
+    config: Config, spans: dict[str, tuple[date, date]], starts: dict[str, date]
+) -> set[str]:
+    """Accept stored non-trading rows before a known listing's first traded bar.
+
+    Require an authoritative IPO date, later positive-volume history, and an
+    explicit zero-volume row for every exchange session in the prefix. A
+    zero-only pre-IPO quote or a missing session cannot satisfy this proof.
+    """
+    from cnequity.query.parquet_scan import scan_parquet_root
+    from cnequity.steps.common import list_trading_dates
+    from cnequity.storage.read_context import read_root
+
+    listings = _known_listing_dates(config)
+    candidates = {
+        symbol: (starts[symbol], span[0] - timedelta(days=1))
+        for symbol, span in spans.items()
+        if symbol in starts
+        and span[0] > starts[symbol]
+        and symbol in listings
+        and listings[symbol] <= starts[symbol]
+    }
+    if not candidates:
+        return set()
+    rows = scan_parquet_root(
+        read_root(config, "daily_bars"),
+        partition_col="trade_date",
+        start=min(lo for lo, _ in candidates.values()),
+        end=max(spans[symbol][0] for symbol in candidates),
+        symbols=sorted(candidates),
+        dataset="daily_bars",
+        committed=False,
+    )
+    if "volume" not in rows.collect_schema():
+        return set()
+    frame = rows.select("symbol", "trade_date", "volume").collect()
+    traded = {
+        (symbol, day)
+        for symbol, day in frame.filter(pl.col("volume") > 0)
+        .select("symbol", "trade_date")
+        .iter_rows()
+    }
+    observed: dict[str, set[date]] = {}
+    for symbol, day in (
+        frame.filter(pl.col("volume") == 0).select("symbol", "trade_date").iter_rows()
+    ):
+        observed.setdefault(symbol, set()).add(day)
+    proven = set()
+    for symbol, (lo, hi) in candidates.items():
+        sessions = set(list_trading_dates(config, lo, hi))
+        # A truncated calendar cannot turn missing days into evidence.
+        if (
+            (symbol, spans[symbol][0]) in traded
+            and sessions
+            and min(sessions) == lo
+            and sessions.issubset(observed.get(symbol, set()))
+        ):
+            proven.add(symbol)
+    return proven
+
+
+def _delisted_history_starts(config: Config, symbols: set[str], start: date) -> dict[str, date]:
+    """A closed-day window or later IPO owes bars from its first session."""
+    from datetime import timedelta
+
+    from cnequity.steps.common import list_trading_dates
+
+    listings = _known_listing_dates(config)
+    starts = {symbol: max(start, listings.get(symbol, start)) for symbol in symbols}
+    for floor in set(starts.values()):
+        sessions = list_trading_dates(config, floor, floor + timedelta(days=31))
+        if sessions:
+            first = min(sessions)
+            starts = {
+                symbol: first if value == floor else value for symbol, value in starts.items()
+            }
+    return starts
 
 
 def delisted_recovery_covers(
@@ -651,6 +732,7 @@ def delisted_recovery_covers(
     # A delisted name owes bars only for the part of the window it could trade
     # in. Beyond its delisting, absence is the evidence, not a gap.
     delist_dates = _catalogued_delist_dates(config, required)
+    starts = _delisted_history_starts(config, required, start)
     horizon = min(
         (min(end, delist_dates[symbol]) for symbol in required if symbol in delist_dates),
         default=end,
@@ -693,14 +775,15 @@ def delisted_recovery_covers(
                 and scope.get("evidence_version") == _RECOVERY_EVIDENCE_VERSION
                 and date.fromisoformat(scope["start"]) <= start
                 and date.fromisoformat(scope["end"]) >= horizon
-                and required <= covered
+                and required <= covered | set(no_data)
             ):
-                spans = _bar_spans(config, sorted(required))
+                required_bars = required & covered
+                spans = _bar_spans(config, sorted(required_bars))
                 if all(
                     symbol in spans
-                    and spans[symbol][0] <= start
+                    and spans[symbol][0] <= starts[symbol]
                     and spans[symbol][1] >= min(horizon, delist_dates.get(symbol, horizon))
-                    for symbol in required
+                    for symbol in required_bars
                 ):
                     return True
         except (KeyError, OSError, ValueError, json.JSONDecodeError):
@@ -1085,6 +1168,7 @@ def backfill_delisted_bars(
     start: date,
     *,
     end: date | None = None,
+    recovery_targets: dict[str, dict[str, str]] | None = None,
     fetch=None,
     probe_last=None,
 ) -> dict:
@@ -1113,7 +1197,14 @@ def backfill_delisted_bars(
     probe_last = probe_last or (
         lambda symbol, client: symbol_exists(symbol, client=client, config=config)
     )
-    targets = delisted_recovery_targets(config, start, end)
+    # Init pins admitted targets before its first recovery publication. A
+    # partial compact changes the lake's reference date; it must not silently
+    # remove the unswept names from this already accepted obligation.
+    targets = (
+        delisted_recovery_targets(config, start, end)
+        if recovery_targets is None
+        else {symbol: dict(target) for symbol, target in recovery_targets.items()}
+    )
     scope = _recovery_scope(start, end, targets)
     checkpoint = _load_recovery_checkpoint(config, scope)
     recovered_spans = dict(checkpoint.get("recovered_spans", {}))
@@ -1226,6 +1317,17 @@ def backfill_delisted_bars(
                     request_managed=default_fetch,
                 )
             except Exception as exc:  # noqa: BLE001 — one dead symbol must not stop the sweep
+                from cnequity.orchestrator.outcomes import error_kind
+
+                if error_kind(exc) not in {
+                    "source_transient",
+                    "source_unavailable",
+                    "source_payload_invalid",
+                    "capability_limit",
+                }:
+                    if error_kind(exc) != "storage_failure":
+                        flush(index)
+                    raise
                 logger.warning("delisted bars: fetch failed for %s: %s", symbol, exc)
                 failed.append(symbol)
                 unresolved.add(symbol)
@@ -1242,6 +1344,17 @@ def backfill_delisted_bars(
                         request_managed=default_probe,
                     )
                 except Exception as exc:  # noqa: BLE001 — unresolved stays retryable
+                    from cnequity.orchestrator.outcomes import error_kind
+
+                    if error_kind(exc) not in {
+                        "source_transient",
+                        "source_unavailable",
+                        "source_payload_invalid",
+                        "capability_limit",
+                    }:
+                        if error_kind(exc) != "storage_failure":
+                            flush(index)
+                        raise
                     logger.warning("delisted bars: terminal probe failed for %s: %s", symbol, exc)
                     empty_unresolved.append(symbol)
                     unresolved.add(symbol)
@@ -1338,12 +1451,16 @@ def backfill_delisted_bars(
         "reused_curated": reused,
         "to_fetch": len(todo),
         "expected_no_data": len(expected_no_data),
+        "expected_no_data_symbols": sorted(expected_no_data),
         "ending_patterns": dict(Counter(e["ending_pattern"] for e in events)),
+        "usable_result": bool(recovered_spans or expected_no_data or not targets),
+        "coverage_status": "unknown" if complete else "partial",
     }
     if complete:
         result["coverage_pending_compact"] = True
     else:
-        result["status"] = "warning"
+        result["status"] = "warning" if result["usable_result"] else "failed"
+        result["reason_code"] = "source_unavailable"
         result["failed_symbols"] = len(failed)
         result["empty_symbols"] = len(empty_unresolved)
         result["unresolved_symbols"] = len(unresolved)

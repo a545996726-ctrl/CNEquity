@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from cnequity.config import Config
-from cnequity.query.reader import ReaderError, load, resolve_config
+from cnequity.query.reader import MissingAdjustmentError, ReaderError, load, resolve_config
 from cnequity.query.universe import apply_universe_filter
 
 
@@ -141,7 +141,7 @@ def test_load_dedupes_duplicate_primary_keys_and_keeps_latest(lake):
 
 
 def test_load_strict_adj_raises_when_factor_missing(lake):
-    with pytest.raises(ReaderError, match="missing adj_factors"):
+    with pytest.raises(MissingAdjustmentError, match="missing adj_factors"):
         load(
             "daily_bars",
             start="2024-06-27",

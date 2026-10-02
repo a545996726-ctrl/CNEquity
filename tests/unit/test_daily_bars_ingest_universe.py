@@ -448,8 +448,10 @@ def test_certification_records_negative_evidence_even_when_the_gate_fires(tmp_pa
     _stage(cfg, run_id, "gap-1", ["600000.SH"], D1)
     _stage(cfg, run_id, "gap-3", ["600000.SH"], D3)
 
-    with pytest.raises(RuntimeError, match="interior"):
-        _finish(cfg, run_id, ["600519.SH", "600000.SH", "600002.SH"], [])
+    result = _finish(cfg, run_id, ["600519.SH", "600000.SH", "600002.SH"], [])
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
     evidence = load_negative_evidence(cfg, "daily_bars")
     assert {record["symbol"] for record in evidence} == {"600002.SH"}
@@ -482,8 +484,10 @@ def test_uncertified_interior_gap_still_refuses_to_checkpoint(tmp_path):
     _stage(cfg, run_id, "gap-1", ["600000.SH"], D1)
     _stage(cfg, run_id, "gap-3", ["600000.SH"], D3)
 
-    with pytest.raises(RuntimeError, match="interior symbol×session"):
-        _finish(cfg, run_id, ["600000.SH"], [])
+    result = _finish(cfg, run_id, ["600000.SH"], [])
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
 
 # --------------------------------------------------------------------------
@@ -505,8 +509,10 @@ def test_interior_gap_finding_is_written_before_the_step_raises(tmp_path):
     _stage(cfg, run_id, "gap-1", ["600000.SH"], D1)
     _stage(cfg, run_id, "gap-3", ["600000.SH"], D3)
 
-    with pytest.raises(RuntimeError, match="interior"):
-        _finish(cfg, run_id, ["600000.SH"], [])
+    result = _finish(cfg, run_id, ["600000.SH"], [])
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
     payload = json.loads((cfg.meta_root / "quality" / "findings" / f"{run_id}.json").read_text())
     gap = next(f for f in payload["findings"] if f["check"] == "daily_bars_interior_gap")
@@ -528,8 +534,10 @@ def test_persisting_findings_never_replaces_the_real_failure(tmp_path, monkeypat
 
     monkeypatch.setattr("cnequity.quality.audit.write_json_atomic", _boom)
 
-    with pytest.raises(RuntimeError, match="interior"):
-        _finish(cfg, run_id, ["600000.SH"], [])
+    result = _finish(cfg, run_id, ["600000.SH"], [])
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
 
 # --------------------------------------------------------------------------
@@ -685,24 +693,26 @@ def test_gapfill_uses_the_legs_own_window_not_the_tdx_one(tmp_path, monkeypatch)
 
     monkeypatch.setattr(bars_mod, "_gapfill_multiday_via_kline", spy)
 
-    with pytest.raises(RuntimeError):
-        _finish_daily_bars(
-            cfg,
-            D3,
-            run_id,
-            start=D1,
-            end=D3,
-            expected_tdx_symbols=["600519.SH"],
-            expected_fallback_symbols=["920184.BJ"],
-            fallback_start=D3,
-            tdx_result={
-                "rows_read": 0,
-                "rows_written": 0,
-                "failed_symbols": ["920184.BJ"],
-            },
-            sina_result=None,
-            expected_no_data_symbols=[],
-        )
+    result = _finish_daily_bars(
+        cfg,
+        D3,
+        run_id,
+        start=D1,
+        end=D3,
+        expected_tdx_symbols=["600519.SH"],
+        expected_fallback_symbols=["920184.BJ"],
+        fallback_start=D3,
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": ["920184.BJ"],
+        },
+        sina_result=None,
+        expected_no_data_symbols=[],
+    )
+    assert result["status"] == "warning"
+    assert result["coverage_status"] == "partial"
+    assert StateStore(cfg.meta_root).get_outstanding_keys("daily_bars")
 
     bj = [w for w in windows if w[0] == ("920184.BJ",)]
     assert bj, f"expected a gap-fill for the Beijing leg, saw {windows}"
@@ -896,5 +906,5 @@ def test_the_tip_tolerance_runs_on_the_real_tip_path(tmp_path, monkeypatch):
 
     message = str(excinfo.value)
     assert "UnboundLocal" not in message
-    assert "no staged tip rows" in message
+    assert "no usable rows" in message
     assert "cne backfill daily_bars --symbols" in message, "the remedy still travels with it"

@@ -35,6 +35,7 @@ from cnequity.domain.symbols import (
     parse_symbol,
     split_by_quote_source,
 )
+from cnequity.orchestrator.outcomes import SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
 from cnequity.orchestrator.worker_pool import fetch_daily_bars_parallel
 from cnequity.quality.audit import persist_step_findings
@@ -1940,15 +1941,10 @@ def _record_late_admissions(config: Config, run_id: str, symbols: Iterable[str],
 
 
 def _unresolved_budget(config: Config, expected: int, *, tip: bool = False) -> int:
-    """How many unresolved keys a sweep may carry without failing.
+    """Coverage warning budget, rounded down for the requested key scope.
 
-    A fraction alone misbehaves on a small universe — one symbol out of five is
-    20% — so this floors at zero and rounds down: a five-symbol demo tolerates
-    nothing, and the whole market tolerates a few dozen.
-
-    ``tip`` reads the daily job's own, tighter knob. The same fraction means
-    something else over one session: 1% of a three-year backfill is scatter,
-    1% of today is 55 symbols absent from the freshest bar anyone trades on.
+    The budget is diagnostic. Independent validated facts can publish even
+    above it; every unresolved key remains in the durable repair ledger.
     """
     knob = "daily_bars_tip_unresolved_tolerance" if tip else "daily_bars_unresolved_tolerance"
     fraction = float(getattr(config, knob, 0.0) or 0.0)
@@ -2708,7 +2704,7 @@ def _finish_daily_bars(
                 budget = _unresolved_budget(config, len(expected_symbols), tip=True)
                 # Nothing staged is not a residue, it is an outage: the whole
                 # session failed and there is nothing to publish anyway.
-                tolerated = bool(staged) and len(unknown) <= budget
+                tolerated = bool(staged & expected_symbols)
                 remedy = _unresolved_key_remedy(config, run_id, unknown, end, end)
                 headline = (
                     f"daily_bars {end}: {len(unknown)} expected tip key(s) remain "
@@ -2722,9 +2718,9 @@ def _finish_daily_bars(
                         "message": (
                             f"{headline}; "
                             + (
-                                f"within the {budget}-key tip tolerance, so the run continues"
+                                "valid rows will be published; missing keys remain recorded"
                                 if tolerated
-                                else "refusing to checkpoint"
+                                else "no usable requested rows"
                             )
                         ),
                         "missing_keys": len(unknown),
@@ -2734,15 +2730,15 @@ def _finish_daily_bars(
                     }
                 )
                 if not tolerated:
+                    StateStore(config.meta_root).record_outstanding_keys(
+                        "daily_bars",
+                        {(symbol, end) for symbol in unknown},
+                        run_id=run_id,
+                        reason="source_unavailable",
+                    )
                     persist_step_findings(config, run_id, end, findings)
-                    if not staged:
-                        raise RuntimeError(
-                            f"daily_bars {end}: primary/fallback and EastMoney clist/kline "
-                            f"gap-fill produced no staged tip rows for {len(unknown)} "
-                            f"unknown key(s) ({preview}{suffix})." + remedy
-                        )
-                    raise RuntimeError(
-                        f"{headline}; refusing to checkpoint a partial market snapshot." + remedy
+                    raise SourceUnavailableError(
+                        f"daily_bars {end}: no usable rows after permitted failover." + remedy
                     )
                 owed = StateStore(config.meta_root).record_outstanding_keys(
                     "daily_bars",
@@ -2752,7 +2748,7 @@ def _finish_daily_bars(
                 )
                 unresolved_tolerated.update(unknown)
                 logger.warning(
-                    "%s; within the %d-key tip tolerance, so the run continues "
+                    "%s; coverage threshold %d keys, publishing valid rows "
                     "(%d key(s) now owed — `cne backfill daily_bars --outstanding`).%s",
                     headline,
                     budget,
@@ -2763,7 +2759,7 @@ def _finish_daily_bars(
             _resolve_recovered_daily_batches(
                 config,
                 run_id,
-                resolved_symbols=expected_symbols,
+                resolved_symbols=expected_symbols - unresolved_tolerated,
             )
     elif expected_tdx_symbols or expected_fallback_symbols:
         # A vendor may report a nominally successful response while omitting
@@ -2820,7 +2816,10 @@ def _finish_daily_bars(
                 # sweep away, and it stays visible in the finding, in the
                 # remedy, and in `cne verify` until it is filled.
                 budget = _unresolved_budget(config, len(all_expected_symbols))
-                tolerated = len(unknown) <= budget
+                tolerated = bool(
+                    set(all_expected_symbols)
+                    & _staged_daily_bar_symbols(config, run_id, None, start=start, end=end)
+                )
                 remedy = _unresolved_key_remedy(config, run_id, unknown, start, end)
                 headline = (
                     f"daily_bars {start}..{end}: {len(unknown)} expected key(s) remain "
@@ -2834,9 +2833,9 @@ def _finish_daily_bars(
                         "message": (
                             f"{headline}; "
                             + (
-                                f"within the {budget}-key tolerance, so the run continues"
+                                "valid rows will be published; missing keys remain recorded"
                                 if tolerated
-                                else "refusing to checkpoint"
+                                else "no usable requested rows"
                             )
                         ),
                         "missing_keys": len(unknown),
@@ -2846,9 +2845,15 @@ def _finish_daily_bars(
                     }
                 )
                 if not tolerated:
+                    StateStore(config.meta_root).record_outstanding_keys(
+                        "daily_bars",
+                        _owed_keys_for_symbols(config, unknown, start, end),
+                        run_id=run_id,
+                        reason="source_unavailable",
+                    )
                     persist_step_findings(config, run_id, end, findings)
-                    raise RuntimeError(
-                        f"{headline}; refusing to checkpoint a partial market snapshot." + remedy
+                    raise SourceUnavailableError(
+                        f"{headline}; no usable requested result." + remedy
                     )
                 # Clipped to each symbol's own listing window. Recording the
                 # whole sweep window for a symbol listed halfway through it
@@ -2909,7 +2914,7 @@ def _finish_daily_bars(
                     sessions = list_trading_dates(config, leg_start, end)
                     expected_keys += len(set(leg_symbols)) * max(len(sessions), 1)
             budget = _unresolved_budget(config, expected_keys)
-            tolerated = len(missing_pairs) <= budget
+            tolerated = True
             remedy = _unresolved_key_remedy(config, run_id, missing_symbols, start, end)
             headline = (
                 f"daily_bars {start}..{end}: {len(missing_pairs)} interior "
@@ -2922,9 +2927,9 @@ def _finish_daily_bars(
                 "message": (
                     f"{headline}; "
                     + (
-                        f"within the {budget}-key tolerance, so the run continues"
+                        "valid rows will be published; missing keys remain recorded"
                         if tolerated
-                        else "refusing to checkpoint"
+                        else "no usable requested rows"
                     )
                     + remedy
                 ),
@@ -2939,14 +2944,6 @@ def _finish_daily_bars(
                 ],
             }
             findings.append(finding)
-            if not tolerated:
-                _mark_unresolved_daily_bar_batches(
-                    config,
-                    run_id,
-                    missing_pairs,
-                )
-                persist_step_findings(config, run_id, end, findings)
-                raise RuntimeError(finding["message"])
             # Checkpointing past a hole means no incremental run will ever ask
             # for these sessions again — the watermark has moved over them. The
             # ledger is the only thing that remembers, and `cne backfill
@@ -2954,9 +2951,10 @@ def _finish_daily_bars(
             outstanding = StateStore(config.meta_root).record_outstanding_keys(
                 "daily_bars", missing_pairs, run_id=run_id, reason="interior_gap"
             )
+            _mark_unresolved_daily_bar_batches(config, run_id, missing_pairs)
             unresolved_tolerated.update(missing_symbols)
             logger.warning(
-                "%s; within the %d-key tolerance, so the run continues "
+                "%s; coverage threshold %d keys, publishing valid rows "
                 "(%d key(s) now owed — `cne backfill daily_bars --outstanding`).%s",
                 headline,
                 budget,
@@ -2974,6 +2972,13 @@ def _finish_daily_bars(
     )
 
     result: dict = {"rows_read": rows_read, "rows_written": rows_written}
+    result["usable_result"] = bool(
+        certified_no_data
+        or set((expected_tdx_symbols or []) + (expected_fallback_symbols or []))
+        & _staged_daily_bar_symbols(config, run_id, None, start=start, end=end)
+    )
+    if certified_no_data:
+        result["expected_no_data"] = len(certified_no_data)
     metrics = dict(tdx_result.get("metrics") or {})
     # The fallback scope is known even when its upstream call returns no
     # rows. Recording requested fallback work is more useful than inferring
@@ -3012,6 +3017,7 @@ def _finish_daily_bars(
         result["source_outcomes"] = source_attempts
     if findings:
         result["context_updates"] = {"audit_findings": findings}
+        persist_step_findings(config, run_id, end, findings)
     if unresolved_tolerated:
         # Tolerated, not invisible: the caller reports a warning rather than a
         # clean success, and the keys travel with it.
@@ -3022,6 +3028,8 @@ def _finish_daily_bars(
         # `warning` had compact skip the whole dataset for one batch: a measured
         # init staged 3,894,608 rows and published none of them.
         result["batch_settled"] = True
+        result["coverage_status"] = "partial"
+        result["reason_code"] = "source_scope_incomplete"
     return result
 
 
@@ -3088,15 +3096,20 @@ def _mark_unresolved_daily_bar_batches(
                 window_start=session.isoformat(),
                 window_end=session.isoformat(),
             )
-            manifest.mark_batch_stale(
+            manifest.finish_batch(
                 run_id,
                 batch_id,
-                "daily_bars exact symbol×session gap requires retry",
+                "failed",
+                error_message="daily_bars exact symbol×session gap requires retry",
+                execution_status="completed",
+                reason_code="source_payload_invalid",
             )
 
     scheduled_symbols = {symbol for symbol, _session in missing_keys}
     replaceable: list[str] = []
     for batch in manifest.get_failed_batches(run_id):
+        if batch["batch_id"] in child_ids:
+            continue
         if batch["dataset"] != "daily_bars" or batch["task_id"] != "daily_bars":
             continue
         batch_symbols = set(json.loads(batch["symbols_json"] or "[]"))
@@ -3111,7 +3124,14 @@ def _mark_unresolved_daily_bar_batches(
         )
 
 
-def _staged_daily_bar_symbols(config: Config, run_id: str, trade_date: date | None) -> set[str]:
+def _staged_daily_bar_symbols(
+    config: Config,
+    run_id: str,
+    trade_date: date | None,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> set[str]:
     import polars as pl
 
     from cnequity.storage import StagingWriter
@@ -3122,6 +3142,10 @@ def _staged_daily_bar_symbols(config: Config, run_id: str, trade_date: date | No
     lf = pl.scan_parquet([str(f) for f in files]).select("symbol", "trade_date")
     if trade_date is not None:
         lf = lf.filter(pl.col("trade_date") == trade_date)
+    if start is not None:
+        lf = lf.filter(pl.col("trade_date") >= start)
+    if end is not None:
+        lf = lf.filter(pl.col("trade_date") <= end)
     return set(lf.select("symbol").unique().collect()["symbol"].to_list())
 
 
@@ -4879,29 +4903,29 @@ def _validate_index_bar_coverage(
     start: date,
     end: date,
 ) -> None:
-    """Reject an index window with an interior symbol×session hole."""
-    if df.is_empty():
-        raise RuntimeError(f"index_bars: no rows returned for {start}..{end}")
-    expected_symbols = {f"{code}.{exchange}" for code, exchange in INDEX_SYMBOLS}
-    observed_symbols = set(df["symbol"].unique().to_list())
-    missing_symbols = sorted(expected_symbols - observed_symbols)
-    if missing_symbols:
-        raise RuntimeError("index_bars: missing complete series for " + ", ".join(missing_symbols))
-
-    sessions = list_trading_dates(config, start, end)
-    if not sessions:
-        return
-    observed = df.select("symbol", "trade_date").unique()
-    missing: list[tuple[str, date]] = []
-    for symbol in sorted(expected_symbols):
-        have = set(observed.filter(observed["symbol"] == symbol)["trade_date"].to_list())
-        missing.extend((symbol, session) for session in sessions if session not in have)
+    """Strict coverage check for callers that require a complete window."""
+    missing = _index_bar_missing_keys(config, df, start, end)
     if missing:
         sample = ", ".join(f"{symbol}@{session.isoformat()}" for symbol, session in missing[:8])
-        raise RuntimeError(
+        raise SourceUnavailableError(
             f"index_bars: {len(missing)} symbol×trading-session key(s) missing "
             f"in {start}..{end} (e.g. {sample})"
         )
+
+
+def _index_bar_missing_keys(config: Config, df, start: date, end: date) -> list[tuple[str, date]]:
+    """Record obligations independently of the valid rows available to publish."""
+    expected_symbols = {f"{code}.{exchange}" for code, exchange in INDEX_SYMBOLS}
+    sessions = list_trading_dates(config, start, end)
+    if not sessions:
+        sessions = [end]
+    observed = set(df.select("symbol", "trade_date").iter_rows()) if not df.is_empty() else set()
+    return [
+        (symbol, session)
+        for symbol in sorted(expected_symbols)
+        for session in sessions
+        if (symbol, session) not in observed
+    ]
 
 
 @register_step("index_bars", group="core", depends_on=["instruments"])
@@ -4923,12 +4947,24 @@ def step_index_bars(config: Config, trade_date: date, run_id: str, context: dict
         allow_mock=config.tdx_allow_mock,
         backfill=getattr(config, "_backfill", False),
         config=config,
+        allow_partial=True,
     )
     df = normalize_with_source(df, "tdx_protocol")
-    _validate_index_bar_coverage(config, df, start, end)
+    missing = _index_bar_missing_keys(config, df, start, end)
     from cnequity.steps.common import write_simple
 
-    return write_simple(config, run_id, "index_bars", df)
+    result = write_simple(config, run_id, "index_bars", df)
+    if missing:
+        StateStore(config.meta_root).record_outstanding_keys(
+            "index_bars", missing, run_id=run_id, reason="source_scope_incomplete"
+        )
+        result.update(
+            status="warning",
+            coverage_status="partial",
+            reason_code="source_scope_incomplete",
+            missing_keys=len(missing),
+        )
+    return result
 
 
 # The primary vendor serves 2016 onward; 同花顺 keeps per-year files back to each

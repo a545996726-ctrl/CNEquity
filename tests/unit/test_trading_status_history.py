@@ -1,6 +1,7 @@
 from datetime import date
 
 import polars as pl
+import pytest
 
 from cnequity.config import Config
 from cnequity.derive.trading_status_history import derive_suspension_history
@@ -440,7 +441,10 @@ def test_derive_suspension_ignores_placeholder_only_symbol(tmp_path):
 
 def test_derive_suspension_empty_lake(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
-    assert _derive_and_publish(cfg) == 0
+    from cnequity.orchestrator.outcomes import InputUnavailableError
+
+    with pytest.raises(InputUnavailableError, match="missing daily_bars"):
+        _derive_and_publish(cfg)
 
 
 def test_derive_suspension_respects_end_window(tmp_path):

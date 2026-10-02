@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from contextvars import copy_context
 from datetime import date, timedelta
 
 import polars as pl
@@ -26,7 +27,9 @@ from cnequity.adapters.eastmoney.capital import (
 )
 from cnequity.config import Config
 from cnequity.domain.market_time import shanghai_now
+from cnequity.orchestrator.outcomes import SourcePayloadError, SourceUnavailableError
 from cnequity.orchestrator.registry import register_step
+from cnequity.orchestrator.source_gaps import record_source_gap, source_gap_dates
 from cnequity.steps.common import BACKFILL_START, incremental_trade_dates, list_trading_dates
 from cnequity.steps.http_common import (
     call_with_run_id,
@@ -60,7 +63,7 @@ def _run_capital_step(
     allow_empty: bool = True,
 ) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError(f"{dataset}: eastmoney source disabled in config")
+        raise SourceUnavailableError(f"{dataset}: eastmoney source disabled in config")
 
     # Bind Config so EastMoneyClient uses [sources.eastmoney] shared pacing /
     # proxy / timeout — bare clients only throttle at 1s in-process and trip EM
@@ -111,7 +114,7 @@ def step_fund_flow(config: Config, trade_date: date, run_id: str, context: dict)
 @register_step("northbound_holdings", group="capital", depends_on=["instruments"])
 def step_northbound_holdings(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("northbound_holdings: eastmoney source disabled in config")
+        raise SourceUnavailableError("northbound_holdings: eastmoney source disabled in config")
     # Quarterly since Aug 2024: daily refreshes the latest quarter. Backfill
     # walks all quarter-ends from 2016 but the EM report only serves the most
     # recent quarter(s) — historical TRADE_DATE filters return 0 rows (verified
@@ -139,7 +142,7 @@ def step_northbound_holdings(config: Config, trade_date: date, run_id: str, cont
         missing_periods = sorted(expected - observed)
     if df.is_empty():
         if not backfill:
-            raise RuntimeError(
+            raise SourceUnavailableError(
                 f"northbound_holdings: no rows returned for {trade_date.isoformat()}"
             )
         result: dict = {"rows_read": 0, "rows_written": 0}
@@ -176,7 +179,7 @@ def step_northbound_flows(config: Config, trade_date: date, run_id: str, context
     returning nothing.
     """
     if not config.sources.get("eastmoney", True):
-        raise RuntimeError("northbound_flows: eastmoney source disabled in config")
+        raise SourceUnavailableError("northbound_flows: eastmoney source disabled in config")
 
     if getattr(config, "_backfill", False):
         start = getattr(config, "_backfill_start", None) or NORTHBOUND_HISTORY_START
@@ -222,7 +225,7 @@ def step_northbound_flows(config: Config, trade_date: date, run_id: str, context
     required_columns = {"trade_date", "channel"}
     missing_columns = sorted(required_columns - set(df.columns))
     if missing_columns:
-        raise RuntimeError(
+        raise SourcePayloadError(
             "northbound_flows: response is missing required column(s): "
             + ", ".join(missing_columns)
         )
@@ -246,14 +249,19 @@ def step_northbound_flows(config: Config, trade_date: date, run_id: str, context
         sample = ", ".join(f"{day.isoformat()}/{channel}" for day, channel in missing[:8])
         gap_ratio = len(missing) / len(expected)
         if gap_ratio > _NORTHBOUND_GAP_TOLERANCE:
-            raise RuntimeError(
-                "northbound_flows: incomplete published range; missing "
-                f"{len(missing)} of {len(expected)} expected day/channel row(s) "
-                f"({gap_ratio:.0%}, e.g. {sample})"
+            record_source_gap(
+                "northbound_flows",
+                (
+                    "northbound_flows: incomplete published range; missing "
+                    f"{len(missing)} of {len(expected)} expected day/channel row(s) "
+                    f"({gap_ratio:.0%}, e.g. {sample})"
+                ),
+                frame=df,
+                dates={day for day, _ in missing},
             )
         logger.warning(
             "northbound_flows: %s of %s expected day/channel row(s) absent from "
-            "%s..%s (e.g. %s) - within HK-holiday tolerance, not raised",
+            "%s..%s (e.g. %s); coverage shortfall recorded",
             len(missing),
             len(expected),
             start.isoformat(),
@@ -281,10 +289,9 @@ def step_northbound_flows(config: Config, trade_date: date, run_id: str, context
 #   vendor path rather than this being a one-way replacement.
 # * **The two publish on different lags.** Measured 2026-08-30, SSE had already
 #   served 2026-08-28 while SZSE's export for that session was still
-#   header-only; SZSE lands on the next business day. A day is therefore
-#   written only when *both* exchanges have published it — a half-market day
-#   would advance the watermark and strand the other half — so the dataset
-#   trails the vendor path by about one session in exchange for authority.
+#   header-only; SZSE lands on the next business day. Publish available rows
+#   while keeping the day in the missing-date ledger, so the other exchange
+#   can be filled on a later run without advancing the complete watermark.
 _MARGIN_SOURCES = ("exchange", "eastmoney")
 # Calendar days an unpublished day is tolerated before it becomes an error.
 # The vendor path answers same-day, so 2 is right there; the exchanges add a
@@ -309,26 +316,24 @@ def _margin_source(config: Config) -> str:
     # `quality/authority_checks.py`, which add network calls an operator opts
     # into; this one is a dataset's primary feed and cannot default to off.
     if not config.sources.get(source, True):
-        raise RuntimeError(f"margin_trading: {source} source disabled in config")
+        raise SourceUnavailableError(f"margin_trading: {source} source disabled in config")
     return source
 
 
 def _fetch_margin_via_exchange(day: date, *, config: Config) -> pl.DataFrame:
-    """Official SSE + SZSE margin detail, or empty until both have published."""
+    """Official margin detail, retaining available rows and tracking missing publishers."""
     from cnequity.adapters.exchange.margin_trading import fetch_exchange_margin_trading
 
     result = fetch_exchange_margin_trading(day, config=config)
-    if result.covered != frozenset({"sse", "szse"}):
-        # Not an error: SZSE lands a business day behind SSE. Returning empty
-        # leaves the day unwritten, the watermark where it was, and the next
-        # run picks it up complete.
-        logger.info(
-            "margin_trading: %s published by %s only; leaving the day for a later run (%s)",
-            day.isoformat(),
-            ",".join(sorted(result.covered)) or "neither exchange",
-            result.failures,
+    if result.covered != frozenset({"sse", "szse"}) and not result.rows.is_empty():
+        missing = sorted({"sse", "szse"} - result.covered)
+        record_source_gap(
+            "margin_trading",
+            f"margin_trading: {day.isoformat()} missing publisher(s) {','.join(missing)}; "
+            f"available rows retained ({result.failures})",
+            frame=result.rows,
+            dates=[day],
         )
-        return pl.DataFrame()
     return result.rows
 
 
@@ -351,15 +356,21 @@ def _existing_margin_dates(
     scan = pl.scan_parquet(files)
     if "symbol" not in scan.collect_schema().names():
         return set()
+    from cnequity.storage.state import StateStore
+
     return set(
         scan.group_by("trade_date")
-        .agg(pl.col("symbol").n_unique().alias("_symbol_count"))
-        .filter(pl.col("_symbol_count") >= min_symbols)
+        .agg(
+            pl.col("symbol").n_unique().alias("_symbol_count"),
+            pl.col("symbol").str.ends_with(".SH").any().alias("_has_sh"),
+            pl.col("symbol").str.ends_with(".SZ").any().alias("_has_sz"),
+        )
+        .filter((pl.col("_symbol_count") >= min_symbols) & pl.col("_has_sh") & pl.col("_has_sz"))
         .select("trade_date")
         .collect()
         .get_column("trade_date")
         .to_list()
-    )
+    ) - set(StateStore(config.meta_root).get_missing_dates("margin_trading"))
 
 
 def _margin_symbol_count(df: pl.DataFrame) -> int:
@@ -380,7 +391,7 @@ def _validate_northbound_holdings_snapshot(df: pl.DataFrame) -> pl.DataFrame:
     required = {"symbol", "trade_date", "channel"}
     missing = sorted(required - set(df.columns))
     if missing:
-        raise RuntimeError(
+        raise SourcePayloadError(
             "northbound_holdings: response is missing required column(s): " + ", ".join(missing)
         )
     unique = df.unique(subset=["symbol", "trade_date", "channel"])
@@ -417,11 +428,15 @@ def _validate_northbound_holdings_snapshot(df: pl.DataFrame) -> pl.DataFrame:
             for row in incomplete_channels.iter_rows(named=True)
         )
         details.extend(missing_channels)
-        raise RuntimeError(
-            "northbound_holdings: incomplete quarterly snapshot; each observed "
-            f"period needs at least {_MIN_NORTHBOUND_HOLDING_ROWS_PER_PERIOD} "
-            f"unique holding row(s), and each exchange channel needs at least "
-            f"{_MIN_NORTHBOUND_HOLDING_ROWS_PER_CHANNEL} row(s) ({'; '.join(details)})"
+        record_source_gap(
+            "northbound_holdings",
+            (
+                "northbound_holdings: incomplete quarterly snapshot; each observed "
+                f"period needs at least {_MIN_NORTHBOUND_HOLDING_ROWS_PER_PERIOD} "
+                f"unique holding row(s), and each exchange channel needs at least "
+                f"{_MIN_NORTHBOUND_HOLDING_ROWS_PER_CHANNEL} row(s) ({'; '.join(details)})"
+            ),
+            frame=df,
         )
     return df
 
@@ -431,11 +446,21 @@ def _validate_margin_snapshot(df: pl.DataFrame, trade_date: date) -> pl.DataFram
     if df.is_empty():
         return df
     count = _margin_symbol_count(df)
-    if count < _MIN_MARGIN_SYMBOLS_PER_DAY:
-        raise RuntimeError(
-            "margin_trading: incomplete daily snapshot; expected at least "
-            f"{_MIN_MARGIN_SYMBOLS_PER_DAY} unique symbols on {trade_date.isoformat()}, "
-            f"got {count}"
+    markets = (
+        set(df.get_column("symbol").drop_nulls().str.slice(-2).to_list())
+        if "symbol" in df.columns
+        else set()
+    )
+    missing_markets = sorted({"SH", "SZ"} - markets)
+    if count < _MIN_MARGIN_SYMBOLS_PER_DAY or missing_markets:
+        record_source_gap(
+            "margin_trading",
+            (
+                "margin_trading: incomplete daily snapshot; expected at least "
+                f"{_MIN_MARGIN_SYMBOLS_PER_DAY} unique symbols on {trade_date.isoformat()}, "
+                f"got {count}; missing market(s): {','.join(missing_markets) or 'none'}"
+            ),
+            frame=df,
         )
     return df
 
@@ -460,6 +485,7 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
     from cnequity.domain.schemas import with_provenance
     from cnequity.steps.common import _backfill_empty_day_finding
     from cnequity.storage import StagingWriter
+    from cnequity.storage.state import StateStore
 
     source = _margin_source(config)
     fetch_day = _margin_fetcher(source)
@@ -487,6 +513,9 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
             pl.concat(frames, how="diagonal_relaxed"), source=source, data_version="v1"
         )
         writer.write_batch("margin_trading", run_id, f"bf-{n_parts:04d}", part)
+        StateStore(config.meta_root).mark_staged_request_days(
+            "margin_trading", run_id, part.get_column("trade_date").unique().to_list()
+        )
         n_parts += 1
         total_rows += part.height
         frames = []
@@ -519,12 +548,16 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
             # out the current chunk, and staged parts land as the sweep goes.
             for lo in range(0, len(todo), _MARGIN_FLUSH_DAYS):
                 chunk = todo[lo : lo + _MARGIN_FLUSH_DAYS]
-                for d, df in zip(chunk, pool.map(fetch_one, chunk), strict=True):
+                # Each worker needs its own copied Context, sharing this run's
+                # gap collector so publisher failures retain their usable rows.
+                futures = [pool.submit(copy_context().run, fetch_one, d) for d in chunk]
+                for d, future in zip(chunk, futures, strict=True):
+                    df = future.result()
                     if df.is_empty():
                         empty_days.append(d)
                     else:
                         if "trade_date" not in df.columns:
-                            raise RuntimeError(
+                            raise SourcePayloadError(
                                 f"margin_trading: fetch for {d.isoformat()} did not return "
                                 "the configured trade_date column"
                             )
@@ -532,14 +565,16 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
                         invalid = parsed_dates.is_null() | (parsed_dates != d).fill_null(True)
                         invalid_count = int(invalid.sum())
                         if invalid_count:
-                            raise RuntimeError(
+                            raise SourcePayloadError(
                                 f"margin_trading: fetch for {d.isoformat()} returned "
                                 f"{invalid_count} row(s) with a different or invalid trade_date"
                             )
                         symbol_count = _margin_symbol_count(df)
-                        if symbol_count < _MIN_MARGIN_SYMBOLS_PER_DAY:
+                        _validate_margin_snapshot(df, d)
+                        if symbol_count < _MIN_MARGIN_SYMBOLS_PER_DAY or d in source_gap_dates(
+                            "margin_trading"
+                        ):
                             incomplete_days.append((d, symbol_count))
-                            continue
                         frames.append(df)
                 done += len(chunk)
                 flush()
@@ -583,8 +618,9 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
                 "severity": "warning",
                 "check": "backfill_incomplete_days",
                 "message": (
-                    f"margin_trading: {len(incomplete_days)} day(s) returned fewer than "
-                    f"{_MIN_MARGIN_SYMBOLS_PER_DAY} unique symbols; rows were not staged"
+                    f"margin_trading: {len(incomplete_days)} day(s) have incomplete publisher "
+                    f"coverage or fewer than {_MIN_MARGIN_SYMBOLS_PER_DAY} unique symbols; "
+                    "valid rows remain publishable"
                 ),
                 "days": [
                     {"trade_date": day.isoformat(), "symbols": count}
@@ -604,8 +640,7 @@ def _backfill_margin_trading(config: Config, trade_date: date, run_id: str) -> d
         # audit finding; it does not invalidate the other, independently
         # checked daily snapshots staged by this sweep.  Settle only this
         # physical batch so compact may publish those snapshots.  A later
-        # backfill will still retry every absent day.  Short/incomplete
-        # responses remain blocking because they could hide a partial market.
+        # backfill will still retry every absent day.
         result["batch_settled"] = True
     return result
 
@@ -622,7 +657,7 @@ def step_margin_trading(config: Config, trade_date: date, run_id: str, context: 
     def _fetch(day: date, *, config: Config) -> pl.DataFrame:
         frame = fetch(day, config=config)
         if frame.is_empty() and day < shanghai_now().date() - timedelta(days=grace):
-            raise RuntimeError(f"margin_trading: no rows returned for {day.isoformat()}")
+            raise SourceUnavailableError(f"margin_trading: no rows returned for {day.isoformat()}")
         return _validate_margin_snapshot(frame, day)
 
     return run_incremental_fetched(

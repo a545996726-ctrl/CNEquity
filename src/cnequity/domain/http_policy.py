@@ -43,6 +43,8 @@ def source_family(source: str) -> str:
 class SourceCoolingDown(RuntimeError):
     """A previous refusal stops this request before any network activity."""
 
+    reason_code = "source_transient"
+
 
 def retry_after_seconds(value: str, *, now: float | None = None) -> float:
     now = time.time() if now is None else now

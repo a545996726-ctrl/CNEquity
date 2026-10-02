@@ -31,7 +31,7 @@
 | `--refresh` | `False` | 仅衍生品日线：忽略完成收据与响应缓存，重新核对指定区间；不绕过熔断。 |
 | `--retry-failed` | `False` | 续跑 sector_bars 回填（跳过 checkpoint 里已写过的板块）。 |
 | `--force` | `False` | 清掉 sector_bars 回填 checkpoint，重抓全部板块。 |
-| `--start` | `—` | 回填区间起点（YYYY-MM-DD），包括 daily_bars、minute_bars、衍生品日线、日期/报告期推进及 sector_bars。sector_bars 默认往前 400 天；有历史深度限制的数据集会拒绝比源仍能提供的范围更早的起点。 |
+| `--start` | `—` | 回填区间起点（YYYY-MM-DD），包括 daily_bars、minute_bars、衍生品日线、日期/报告期推进及 sector_bars。sector_bars 默认往前 400 天；超过来源历史深度的范围保留为缺口，可取范围照常交付并提供补数指引。 |
 | `--end` | `—` | 回填区间终点（YYYY-MM-DD，默认今天），与 --start 配合限定历史窗口。 |
 | `--outstanding` | `False` | 只修复被容忍缺口欠下的那些 key，范围和窗口都取自欠账台账，不看 --symbols/--start/--end。补上的 key 会销账，仍然缺的继续欠着。 |
 | `--symbols` | `—` | 限定范围的标的列表，逗号分隔：用于 intraday、trading_status、corporate_actions 的限定回填，以及 financial_statement_items、daily_bars、share_structure 的限定修复。trading_status 的 checkpoint 与覆盖证据会记下确切范围；daily_bars 会把这个显式范围写进 backfill 元数据。 |
@@ -59,6 +59,7 @@
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
 | `--force` | `False` | action=create 时覆盖已存在的配置文件。 |
 | `--data-root` | `—` | action=create 时设置 [data].root（默认把 ./data/cnequity 解析成绝对路径）。 |
+| `--dry-run` | `False` | action=upgrade 时只列出要补的 step 和调度组，不写文件。 |
 
 ## `cne contract diff`
 
@@ -250,7 +251,7 @@
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
-| `--run-id` | `—` | — |
+| `--run-id` | `—` | 只发布这一次 run；默认处理所有待发布的 run。 |
 
 ## `cne run daily`
 
@@ -259,7 +260,9 @@
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
 | `--groups` | `—` | 把 --stale-only 限定在这些 daily 调度组内（逗号或空格分隔）。 |
 | `--group` | `—` | 调度组：core、capital、signals、fundamentals、macro_risk、research、intraday、ticks |
-| `--all-groups` | `False` | 按配置顺序串行跑完全部调度组，某个组失败也继续往下跑。一条命令跑完一天，给没有仓库里 scripts/daily_pipeline.sh 的人用。数据集全部关闭的组会跳过。 |
+| `--all-groups` | `False` | 只跑全部调度组，不含事件流。给已经单独调度 `cne run events` 的旧定时任务保留；不带参数的 `cne run daily` 已经包含全部调度组和事件流。 |
+| `--core-only` | `False` | 只跑 [[job.daily.waves]] 核心骨架（旧版不带参数时的行为）。 |
+| `--no-events` | `False` | 不带参数运行时不跑事件流（公告、监管事件、资讯）。 |
 | `--trade-date` | `—` | as-of 交易日 YYYY-MM-DD（默认今天）。周末 / 节假日补跑时用。 |
 | `--backfill` | `False` | 用 backfill 语义跑：跳过交易日门禁和每个 step 自己的增量窗口，改为抓配置里 backfill scope 指定的窗口。用于补跑调度漏掉的某一天；日常调度从不带这个参数。 |
 | `--repair-gaps` | `False` | 在 daily / stale 跑之前，先修复已验证、且有诚实来源的历史缺口。 |
@@ -451,6 +454,7 @@
 | `--all-columns` | `False` | 配合 --datasets：打印数据集清单的全部列，而不只是新鲜度。 |
 | `--groups` | `—` | 配合 --datasets：只对这些调度组拥有的数据集判失败（空格或逗号分隔）。其它组的数据集照常列出、照常报为调度缺口，但不会让门禁失败。截面检查同样受它约束——daily_bars 归哪个组，它的覆盖率就归谁判。未跑完的 init 不属于任何调度组，始终判失败。 |
 | `--scope, --no-scope` | `True` | 配合 --datasets：是否做最新交易日的标的截面校验。它要读 daily_bars 的 tip 分区、instruments 和 trading_status，比单纯看水位贵；--no-scope 让这条命令回到纯元数据。 |
+| `--gate` | `False` | 按所选范围和新鲜度执行门禁；默认只报告。 |
 
 ## `cne storage apply`
 

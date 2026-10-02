@@ -6,7 +6,7 @@
 
 ## 采集与更新
 
-`cne init` 建立初始数据，`cne run daily --all-groups` 更新日更数据，`cne run events` 单独更新公告和新闻。`cne backfill` 只对支持历史回填的数据集生效。快照来源无法自动提供过去的完整历史。
+`cne init` 建立初始数据，`cne run daily` 更新日更数据并在末尾跑事件流（公告和新闻；也可单独 `cne run events`）。`cne backfill` 只对支持历史回填的数据集生效。快照来源无法自动提供过去的完整历史。
 
 ## 暂存与发布
 

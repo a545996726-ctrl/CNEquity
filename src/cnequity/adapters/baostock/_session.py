@@ -166,6 +166,8 @@ def import_baostock():
 class _SessionDeadline(RuntimeError):
     """A session operation exceeded its total budget, even if recv kept moving."""
 
+    reason_code = "source_transient"
+
 
 def _session_call(operation, *, config, label: str, deadline: float):
     expired = False
@@ -225,7 +227,9 @@ def _login(bs, *, sleep=time.sleep, config=None) -> None:
         last_msg = getattr(login, "error_msg", "missing login response")
         if attempt + 1 < _LOGIN_RETRIES:
             sleep(_LOGIN_BACKOFF_SECONDS[min(attempt, len(_LOGIN_BACKOFF_SECONDS) - 1)])
-    raise RuntimeError(f"baostock login failed: {last_msg}")
+    from cnequity.orchestrator.outcomes import SourceUnavailableError
+
+    raise SourceUnavailableError(f"baostock login failed: {last_msg}")
 
 
 def _logout(bs, *, config=None) -> None:
