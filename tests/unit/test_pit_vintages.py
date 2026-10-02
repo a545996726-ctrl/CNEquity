@@ -353,7 +353,7 @@ def test_revision_id_ignores_observation_time_but_tracks_value():
 
 
 def test_cninfo_archive_recovery_requires_full_announcement_identity():
-    script = Path(__file__).parents[2] / "scripts" / "migrate_pit_vintages.py"
+    script = Path(__file__).parents[2] / "scripts" / "migrations" / "migrate_pit_vintages.py"
     spec = importlib.util.spec_from_file_location("migrate_pit_vintages", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

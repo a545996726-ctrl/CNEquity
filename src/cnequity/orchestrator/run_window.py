@@ -65,7 +65,7 @@ def _ran_in_manifest(config, job: str, session: date) -> bool:
     """Whether the manifest already holds a run of *job* for *session*.
 
     Covers sessions from before the markers existed and runs started by hand
-    (``scripts/daily_pipeline.sh``), so switching to the gate — or a manual
+    (``scripts/scheduler/daily_pipeline.sh``), so switching to the gate — or a manual
     run — never triggers a second full pipeline for the same session.
     """
     path = Path(getattr(config, "manifest_path", None) or Path(config.meta_root) / "manifest.db")

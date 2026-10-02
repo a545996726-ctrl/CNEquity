@@ -35,7 +35,7 @@ exchange 简称, reachable through ``instruments.name`` and
 
 **Reading a lake that predates the split.** Old rows encode ST as
 ``status="st"``. :func:`risk_warning_expr` accepts both encodings, so queries
-are correct before and after ``scripts/migrate_trading_status_risk_warning.py``
+are correct before and after ``scripts/migrations/migrate_trading_status_risk_warning.py``
 runs; the migration only makes the old rows say it in the new column.
 """
 

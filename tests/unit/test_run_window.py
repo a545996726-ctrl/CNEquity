@@ -109,7 +109,7 @@ run_at = "22:00"
 def test_the_gate_script_checks_and_marks(tmp_path):
     path = tmp_path / "cnequity.toml"
     path.write_text(f'[data]\nroot = "{path_for_toml(tmp_path / "data")}"\n', encoding="utf-8")
-    gate = ROOT / "scripts" / "scheduler_gate.py"
+    gate = ROOT / "scripts" / "scheduler" / "scheduler_gate.py"
     mark = subprocess.run(
         [sys.executable, str(gate), "mark", "daily", "2026-09-24", "--config", str(path)],
         capture_output=True,
@@ -177,7 +177,9 @@ def _env(tmp_path, python: Path) -> dict[str, str]:
 @pytest.mark.parametrize("script", ["daily_pipeline.sh", "stale_pipeline.sh"])
 def test_a_wake_up_that_is_not_due_does_nothing(tmp_path, script):
     env = _env(tmp_path, _fake_python(tmp_path, check_rc=3))
-    done = subprocess.run([str(ROOT / "scripts" / script)], env=env, capture_output=True, text=True)
+    done = subprocess.run(
+        [str(ROOT / "scripts" / "scheduler" / script)], env=env, capture_output=True, text=True
+    )
     assert done.returncode == 0, done.stderr
     assert not (tmp_path / "calls").exists()
     assert not (tmp_path / "marks").exists()
@@ -189,7 +191,9 @@ def test_a_wake_up_that_is_not_due_does_nothing(tmp_path, script):
 )
 def test_a_due_wake_up_runs_that_session_once(tmp_path, script, job):
     env = _env(tmp_path, _fake_python(tmp_path, check_rc=0))
-    subprocess.run([str(ROOT / "scripts" / script)], env=env, capture_output=True, text=True)
+    subprocess.run(
+        [str(ROOT / "scripts" / "scheduler" / script)], env=env, capture_output=True, text=True
+    )
     calls = (tmp_path / "calls").read_text(encoding="utf-8")
     assert "<--trade-date>\n<2026-09-24>" in calls
     assert (tmp_path / "marks").read_text().split() == ["mark", job, "2026-09-24"]

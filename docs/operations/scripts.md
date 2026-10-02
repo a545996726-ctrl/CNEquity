@@ -2,6 +2,13 @@
 
 路径：`scripts/`
 
+| 目录 | 内容 |
+|---|---|
+| `scripts/scheduler/` | 调度：日更 / 事件流 / 补抓管线、健康通知、元数据备份、launchd 模板与安装（改动路径后重跑 `install_scheduler.sh`，已安装任务引用的是绝对路径） |
+| `scripts/` | 运维工具：回填验收、退市名录重建、补跑追赶、幸存者偏差测量 |
+| `scripts/migrations/` | 一次性数据迁移与分区重写，按版本说明执行 |
+| `scripts/dev/` | 仓库维护：文档同步（`sync_*`）、发布检查、离线基准与端到端检查、探针 |
+
 这些脚本需要源码 checkout，不随 PyPI 包安装。仅用安装包时，每天调度一次 `cne run daily`（含全部日更组与事件流）；仓库日更以 `daily_pipeline.sh` 为主入口。
 
 > 以下脚本面向 **自托管本机/VPS**（含 macOS launchd 与服务器回填）。开源贡献者只需
@@ -81,9 +88,9 @@ macOS 不带 `flock`，而 Python 那把 run lock 的作用域只有一次 `cne`
 
 ### install_scheduler.sh / uninstall_scheduler.sh
 
-从 `scripts/launchd/com.cnequity.daily.plist.template` 生成用户 launchd plist，加载 `daily_pipeline.sh`。
+从 `scripts/scheduler/launchd/com.cnequity.daily.plist.template` 生成用户 launchd plist，加载 `daily_pipeline.sh`。
 同时安装 `com.cnequity.stale`（收尾补抓）与 `com.cnequity.events`（事件流，每个自然日 14:00 本机时区）。
-安装时用 `CNE_SOURCE_VANTAGE=cn scripts/install_scheduler.sh` 固化真实出口标签；省略时
+安装时用 `CNE_SOURCE_VANTAGE=cn scripts/scheduler/install_scheduler.sh` 固化真实出口标签；省略时
 使用 `local`。标签仅允许字母、数字、点、下划线和连字符，防止生成无效 plist。
 
 ### health_notify.sh
@@ -111,7 +118,7 @@ cne audit --full          # 整湖结构扫描 + 刷新 health-latest.json
 "不知道谁抓"和"别的主机在抓"不是同一件事。
 
 > 整湖审计里的分区碎片化 / 粒度混用检查只在 repartition 之后才会变化，
-> 所以它们也一并移到了每周那次。手动 `scripts/repartition.py` 之后，
+> 所以它们也一并移到了每周那次。手动 `scripts/migrations/repartition.py` 之后，
 > 请直接跑一次 `cne audit --full` 复核，不要等到周六。
 
 ### backup_meta.sh
@@ -213,9 +220,9 @@ python scripts/delisted_ops.py coverage --start 2016-01-01 --universe all_a_sh_s
 所以列表形式随时可跑。
 
 ```bash
-python scripts/repartition.py                  # 待改写的数据集
-python scripts/repartition.py --all --dry-run  # 先看影响
-python scripts/repartition.py trading_calendar # 单个数据集
+python scripts/migrations/repartition.py                  # 待改写的数据集
+python scripts/migrations/repartition.py --all --dry-run  # 先看影响
+python scripts/migrations/repartition.py trading_calendar # 单个数据集
 ```
 
 读路径按目录形状自解析，改粒度本身**不需要**迁移；这只是把碎文件收回来。写入是先建临时目录、
@@ -232,8 +239,8 @@ python scripts/repartition.py trading_calendar # 单个数据集
 [Schema 契约 · 成交量单位](../datasets/schema.md)。
 
 ```bash
-scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --dry-run
-scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
+scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --dry-run
+scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 ```
 
 - `--dry-run`（默认）只统计不落盘；`--apply` **就地改写 curated**，先跑 `backup_meta.sh` 并备份 curated。
@@ -249,19 +256,19 @@ scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 
 ## launchd 模板
 
-`scripts/launchd/com.cnequity.daily.plist.template`
+`scripts/scheduler/launchd/com.cnequity.daily.plist.template`
 
 - `ProgramArguments` 指向 `daily_pipeline.sh`
 - `StartCalendarInterval`：Minute=7（每小时唤醒）；`CNE_SCHEDULED=1` 让 `daily_pipeline.sh` 先问 `scheduler_gate.py`，每个交易日北京时间 `[job.daily] run_at` 之后只跑一次
 - 标准输出/错误重定向到 `{data.root}/logs/launchd.*.log`
 
-`scripts/launchd/com.cnequity.stale.plist.template`
+`scripts/scheduler/launchd/com.cnequity.stale.plist.template`
 
 - `ProgramArguments` 指向 `stale_pipeline.sh`
 - `StartCalendarInterval`：Minute=37（每小时唤醒）；当天日更跑过、且过了北京时间 `[job.stale] run_at` 才跑一次，只补快照类（`--stale-only --snapshots-only`）
 - 与日更共用 `scheduler_lock.sh` 的锁；主 pipeline 还在跑时直接跳过
 
-`scripts/launchd/com.cnequity.events.plist.template`
+`scripts/scheduler/launchd/com.cnequity.events.plist.template`
 
 - `ProgramArguments` 指向 `events_pipeline.sh`
 - `StartCalendarInterval`：Hour=14, Minute=0，**不带 `Weekday`**——事件流本来就要在

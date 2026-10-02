@@ -6,7 +6,7 @@ from pathlib import Path
 from cnequity.domain.contracts import export_contract
 
 GATE = runpy.run_path(
-    str(Path(__file__).resolve().parents[2] / "scripts/check_release_contract.py")
+    str(Path(__file__).resolve().parents[2] / "scripts/dev/check_release_contract.py")
 )
 
 

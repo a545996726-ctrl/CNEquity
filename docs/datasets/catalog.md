@@ -142,7 +142,7 @@ bars_15m = (
 ## 需要 API Key 的覆盖区间
 
 同花顺官方 API（`ths_official`）是**可选源**：没有 Key 的湖保持原有来源，日更不受影响
-（见 [THS 接入](../getting-started/ths-official.md)）。启用后可按许可与实际覆盖补
+（见 [THS 接入](../getting-started/configuration.md#ths-官方接口)）。启用后可按许可与实际覆盖补
 财报空缺和历史日线，`source` 列标明来源。服务端历史下界、字段完整性与 PIT
 证据仍须按自己的查询窗口验收，不能把另一湖的行数或区间当作本湖承诺。
 
@@ -153,7 +153,7 @@ bars_15m = (
 THS 官方估值快照只能从启用后按日积累，不能用旧日期重放伪造观察。
 这不等于 `valuation_metrics` 完全没有其他历史来源；不同来源的覆盖与口径须分开核验。
 
-完整背景见 [THS 接入](../getting-started/ths-official.md)。
+完整背景见 [THS 接入](../getting-started/configuration.md#ths-官方接口)。
 
 ## 溯源列（所有 curated 行）
 
@@ -196,7 +196,7 @@ THS 官方估值快照只能从启用后按日积累，不能用旧日期重放�
 
 | 数据集 | 分区键 | 主键 | 语义 | 水位 | 主源 | 备注 |
 |--------|--------|------|------|------|------|------|
-| corporate_actions | ex_date（按年） | symbol, ex_date, action_type | by_date | ✓ | eastmoney（日更） | 回填：tdx_protocol；混粒度用 `scripts/repartition.py` |
+| corporate_actions | ex_date（按年） | symbol, ex_date, action_type | by_date | ✓ | eastmoney（日更） | 回填：tdx_protocol；混粒度用 `scripts/migrations/repartition.py` |
 | announcement_index | announce_date | announcement_id | by_date PIT | ✓ | cninfo | `as_of` 过滤 |
 | earnings_disclosure_schedule | report_period | symbol, report_period | by_date | — | eastmoney | 预约披露时间表（RPT_PUBLIC_BS_APPOIN）；现值语义非 PIT：变更覆盖 scheduled_date（first_scheduled_date 保留首约，actual_date 披露后回填）；`cne backfill` 走 2016 起全报告期 |
 

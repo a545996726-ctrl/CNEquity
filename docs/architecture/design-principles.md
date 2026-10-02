@@ -20,4 +20,4 @@
 
 优先提供清晰的安装、运行、诊断与恢复入口。兼容性变化通过更新日志和迁移说明告知用户。
 
-当前功能和限制见[产品方向](overview.md)、[数据目录](../datasets/catalog.md)与[升级说明](../getting-started/upgrading.md)。
+当前功能和限制见[产品方向](overview.md)、[数据目录](../datasets/catalog.md)与[升级说明](../getting-started/installation.md#升级与兼容性)。

@@ -9,7 +9,12 @@ from pathlib import Path
 
 import polars as pl
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "migrate_daily_bars_volume_v2.py"
+_SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "migrations"
+    / "migrate_daily_bars_volume_v2.py"
+)
 _spec = importlib.util.spec_from_file_location("migrate_daily_bars_volume_v2", _SCRIPT)
 migrate = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = migrate

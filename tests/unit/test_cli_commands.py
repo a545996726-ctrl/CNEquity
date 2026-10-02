@@ -1729,7 +1729,7 @@ def test_a_mistyped_date_is_a_usage_error_not_a_traceback(cfg_path, argv):
 
 
 def test_status_datasets_exits_1_when_something_is_stale(cfg_path, monkeypatch):
-    """`scripts/daily_pipeline.sh` uses this exit code as its stale probe.
+    """`scripts/scheduler/daily_pipeline.sh` uses this exit code as its stale probe.
 
     On a clean day it costs one directory walk and skips the retry sleep; if
     the non-zero exit ever stopped happening the pipeline would silently stop
@@ -1942,7 +1942,7 @@ def test_cli_derive_source_limit_finishes_with_fallback(cfg_path, monkeypatch):
 def test_run_daily_all_groups_runs_each_group_and_survives_one_failure(tmp_path, monkeypatch):
     """The whole day in one command, for a lake installed from PyPI.
 
-    `scripts/daily_pipeline.sh` is the only thing that ran all six groups and
+    `scripts/scheduler/daily_pipeline.sh` is the only thing that ran all six groups and
     it is not installed by the package, so the single command people reached
     for covered a third of the lake in silence.
     """

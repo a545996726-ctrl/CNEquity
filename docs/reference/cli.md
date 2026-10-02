@@ -306,7 +306,7 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 
 ```cron
 # 主 pipeline
-5 16 * * 1-5 /path/to/cnequity/scripts/daily_pipeline.sh
+5 16 * * 1-5 /path/to/cnequity/scripts/scheduler/daily_pipeline.sh
 
 # 收尾补抓：只跑仍然落后的，没有就空转
 5 20 * * 1-5 cd /path/to/cnequity && cne run daily --stale-only
@@ -316,7 +316,7 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 
 派生数据集不在其中：它们由 curated 重算，该跑的是 `cne derive`，不是重抓。
 
-**不带参数就是完整的一天。** 按配置顺序串行跑完 `[job.daily.groups]` 的每个组，对整个湖跑一次 `audit`（它读全湖，所以放在所有组落盘之后；没有组实际运行时跳过），再跑 `[job.events.groups]` 事件流：一个组失败不中断后面的组，退出码取最差的一个，数据集全部关闭的组自动跳过。非交易日调度组自动跳过，事件流照常运行，所以一条定时任务每天跑一次即可（仓库 checkout 另有 `scripts/daily_pipeline.sh`，它还会做健康检查与元数据备份）。事件流的锁已被单独的 `cne run events` 持有时，这一段记为 `skipped_locked`，不算失败；`--backfill` 补跑某个交易日时不跑事件流。配置比当前版本少了调度 step 时，会提示运行 `cne config upgrade`。
+**不带参数就是完整的一天。** 按配置顺序串行跑完 `[job.daily.groups]` 的每个组，对整个湖跑一次 `audit`（它读全湖，所以放在所有组落盘之后；没有组实际运行时跳过），再跑 `[job.events.groups]` 事件流：一个组失败不中断后面的组，退出码取最差的一个，数据集全部关闭的组自动跳过。非交易日调度组自动跳过，事件流照常运行，所以一条定时任务每天跑一次即可（仓库 checkout 另有 `scripts/scheduler/daily_pipeline.sh`，它还会做健康检查与元数据备份）。事件流的锁已被单独的 `cne run events` 持有时，这一段记为 `skipped_locked`，不算失败；`--backfill` 补跑某个交易日时不跑事件流。配置比当前版本少了调度 step 时，会提示运行 `cne config upgrade`。
 
 `--core-only` 跑 `[[job.daily.waves]]` DAG —— 只有核心骨架；配置里没有调度组时不带参数也走这条路，没有 waves 时直接报错，不会假装成功。`intraday` 组需先开 `[minute_bars].enabled`，它的数据集关闭时整组自动跳过。
 
@@ -335,10 +335,10 @@ diff 会把删列、改类型、改主键、单位/PIT/历史语义变化识别�
 
 ```cron
 # 每天（含周末）一次全量事件流
-0 14 * * *  /path/to/cnequity/scripts/events_pipeline.sh
+0 14 * * *  /path/to/cnequity/scripts/scheduler/events_pipeline.sh
 
 # 只要资讯的日内新鲜度：单张实时页，代价很低
-*/30 9-22 * * *  CNE_EVENTS_GROUP=news_wire /path/to/cnequity/scripts/events_pipeline.sh
+*/30 9-22 * * *  CNE_EVENTS_GROUP=news_wire /path/to/cnequity/scripts/scheduler/events_pipeline.sh
 ```
 
 `disclosures` 组每次都会重读 30 天对账尾窗，高频跑它是在重复付这份代价；
@@ -993,7 +993,7 @@ apply 的安全边界值得单独说：add/replace/delete 逐条对基线指纹�
 
 `backfill`、`resource-sectors --apply` 与 `repair-bars --apply` 写入 staging 后自动 compact 发布；结果里的 `compact` 字段是发布结果。
 
-配置、使用和失败处理见 [THS 接入](../getting-started/ths-official.md)。
+配置、使用和失败处理见 [THS 接入](../getting-started/configuration.md#ths-官方接口)。
 
 ## cne verify --runs
 

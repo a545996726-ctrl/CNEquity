@@ -331,7 +331,10 @@ def test_migration_rewrites_legacy_st_and_is_idempotent():
 
     spec = importlib.util.spec_from_file_location(
         "_migrate_ts",
-        Path(__file__).resolve().parents[2] / "scripts" / "migrate_trading_status_risk_warning.py",
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "migrations"
+        / "migrate_trading_status_risk_warning.py",
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -20,7 +20,7 @@ description: 从首个查询到持续采集、历史研究与数据质量验收�
 | 让 AI agent 读取本地数据 | [MCP 接入与工具边界](reference/mcp.md) |
 | 查某条命令怎么用 | [CLI 按任务索引](reference/cli.md) → [参数与默认值](reference/cli-options.md) → [联网与写入清单](reference/cli-surface.md) |
 | 处理失败、限流或数据缺口 | [排障](operations/troubleshooting.md) → [源保护](operations/fetch-policy.md) → [源健康](operations/source-health.md) |
-| 升级或反馈问题 | [更新日志](changelog.md) → [升级与兼容性](getting-started/upgrading.md) |
+| 升级或反馈问题 | [更新日志](changelog.md) → [升级与兼容性](getting-started/installation.md#升级与兼容性) |
 
 ## 一条命令初始化
 
@@ -48,6 +48,6 @@ cne init
 
 文档随当前仓库实现更新，PyPI 稳定版可能落后。先运行 `cne --version`，再核对[更新日志](changelog.md)；命令参数可用本机 `cne ... --help` 确认。
 
-代码 Apache-2.0，数据受各上游条款约束，详见[数据许可](legal-and-data-sources.md)与[来源矩阵](legal/source-matrix.md)。论文或报告使用时，请记录软件、数据版本与查询口径，见[引用项目](citation.md)。
+代码 Apache-2.0，数据受各上游条款约束，详见[数据许可](legal-and-data-sources.md)与[来源矩阵](legal-and-data-sources.md#来源合规矩阵)。论文或报告使用时，请记录软件、数据版本与查询口径，见[引用项目](legal-and-data-sources.md#引用项目)。
 
 欢迎[报告问题](https://github.com/rootSunc/CNEquity/issues)、修正文档，或在 [GitHub 点一个 Star](https://github.com/rootSunc/CNEquity)支持项目。

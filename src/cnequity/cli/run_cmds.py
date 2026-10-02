@@ -4,7 +4,7 @@
 A bare `run daily` composes one day's schedule groups and then the event
 stream, because the shell pipelines that used to be the only way to run them
 all are not installed by the package. Everything around a day — health check, source probe, metadata backup,
-the late stale-only pass — still lives in `scripts/daily_pipeline.sh`.
+the late stale-only pass — still lives in `scripts/scheduler/daily_pipeline.sh`.
 """
 
 from __future__ import annotations
@@ -291,7 +291,7 @@ def _run_all_groups(
     """Run every schedule group in config order, one at a time.
 
     A day's ingestion is six groups, and until now the only thing that ran all
-    six was `scripts/daily_pipeline.sh` — which is not installed by the PyPI
+    six was `scripts/scheduler/daily_pipeline.sh` — which is not installed by the PyPI
     package. So the documented answer for anyone who had only `pip install`
     was six cron lines, and the single command they reached for instead
     (`cne run daily`) silently covered a third of the lake.

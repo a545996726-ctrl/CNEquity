@@ -95,9 +95,6 @@ nav:
       - 安装与升级: getting-started/installation.md
       - 初始化、范围与续跑: getting-started/initialization.md
       - 配置参考: getting-started/configuration.md
-      - 可选 THS 接入: getting-started/ths-official.md
-      - 升级与兼容性: getting-started/upgrading.md
-      - 是否适合我: comparison.md
   - 研究与数据:
       - 研究示例索引: recipes/README.md
       - 复权研究基线: recipes/research-baseline.md
@@ -130,9 +127,7 @@ nav:
       - 数据湖目录: architecture/lake-layout.md
   - 项目与许可:
       - 更新日志: changelog.md
-      - 引用项目: citation.md
-      - 数据许可: legal-and-data-sources.md
-      - 来源合规矩阵: legal/source-matrix.md
+      - 许可、来源与引用: legal-and-data-sources.md
 
 extra:
   social:

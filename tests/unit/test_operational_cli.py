@@ -201,7 +201,7 @@ def test_stability_enforce_exits_one_until_the_gate_passes(tmp_path):
 
 
 def test_stability_without_enforce_reports_the_same_failure_and_exits_zero(tmp_path):
-    """`scripts/daily_pipeline.sh` runs it bare, every day, and treats a non-zero
+    """`scripts/scheduler/daily_pipeline.sh` runs it bare, every day, and treats a non-zero
     exit as a pipeline failure. Reporting mode must stay reporting-only."""
     _, path, days = _stability_lake(tmp_path, skip=17)
 

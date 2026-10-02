@@ -14,11 +14,11 @@
 
 | 能力 | 脚本 | 作用 |
 |------|------|------|
-| 调度 | `scripts/daily_pipeline.sh` | 按配置顺序串行跑已启用日更组 + 健康检查 + 备份 |
-| 调度 | `scripts/install_scheduler.sh` | 安装 macOS launchd（每个交易日北京时间 `[job.daily] run_at` 之后跑一次，与本机时区无关） |
-| 调度 | `scripts/uninstall_scheduler.sh` | 卸载 launchd |
-| 告警 | `scripts/health_notify.sh` | 日常审计、每周全湖质量检查 + 分组 freshness + macOS 通知 |
-| 备份 | `scripts/backup_meta.sh` | 元数据与修订收据的 tar 轮换；完整数据另用快照 |
+| 调度 | `scripts/scheduler/daily_pipeline.sh` | 按配置顺序串行跑已启用日更组 + 健康检查 + 备份 |
+| 调度 | `scripts/scheduler/install_scheduler.sh` | 安装 macOS launchd（每个交易日北京时间 `[job.daily] run_at` 之后跑一次，与本机时区无关） |
+| 调度 | `scripts/scheduler/uninstall_scheduler.sh` | 卸载 launchd |
+| 告警 | `scripts/scheduler/health_notify.sh` | 日常审计、每周全湖质量检查 + 分组 freshness + macOS 通知 |
+| 备份 | `scripts/scheduler/backup_meta.sh` | 元数据与修订收据的 tar 轮换；完整数据另用快照 |
 
 脚本使用仓库 `.venv/bin/cne`，路径相对仓库根目录自解析。
 
@@ -26,7 +26,7 @@
 
 ```bash
 cd /path/to/cnequity
-scripts/install_scheduler.sh
+scripts/scheduler/install_scheduler.sh
 ```
 
 安装器将主机选择与模板分开：新安装按配置选择已启用组；重装保留已安装 daily 的
@@ -34,15 +34,15 @@ scripts/install_scheduler.sh
 明确覆盖组别和出口时使用环境变量；海外主机首次安装例如：
 
 ```bash
-CNE_GROUPS=core CNE_SOURCE_VANTAGE=overseas scripts/install_scheduler.sh
-scripts/install_scheduler.sh --check
-scripts/install_scheduler.sh --dry-run /tmp/cnequity-scheduler-review
-scripts/install_scheduler.sh --daily-only                  # 只同步现有日任务，不新增晚间任务
-scripts/install_scheduler.sh --stale-only                  # 只同步补抓任务
+CNE_GROUPS=core CNE_SOURCE_VANTAGE=overseas scripts/scheduler/install_scheduler.sh
+scripts/scheduler/install_scheduler.sh --check
+scripts/scheduler/install_scheduler.sh --dry-run /tmp/cnequity-scheduler-review
+scripts/scheduler/install_scheduler.sh --daily-only                  # 只同步现有日任务，不新增晚间任务
+scripts/scheduler/install_scheduler.sh --stale-only                  # 只同步补抓任务
 ```
 
 **运行时间按北京时间配置，与本机时区无关。** 日更和补抓都每小时唤醒一次（日更每小时第 7 分钟、
-补抓第 37 分钟），由 `scripts/scheduler_gate.py` 判断这次是不是「正式那一次」：
+补抓第 37 分钟），由 `scripts/scheduler/scheduler_gate.py` 判断这次是不是「正式那一次」：
 
 ```toml
 [job.daily]
@@ -54,7 +54,7 @@ run_at = "21:00"   # 北京时间；当天日更跑过之后，只重试失败�
 - 每个交易日各跑一次：过了 `run_at` 就跑，直到下一个交易日 09:15 开盘前都算这一天的；
   过了开盘还没跑（比如电脑一直关着），这一天就不补了——历史类数据下次日更按日期补齐，快照类缺这一天。
 - 本机是哪个时区、有没有夏令时都不用管，也不用重装；电脑在 `run_at` 时睡着，醒来后下一次唤醒就会跑。
-- 手工执行 `scripts/daily_pipeline.sh` 不受这个判断限制，照常立即跑。
+- 手工执行 `scripts/scheduler/daily_pipeline.sh` 不受这个判断限制，照常立即跑。
 - 已跑过的交易日记在 `meta/state/scheduler/`；manifest 里已有当天日更记录的也算跑过，
   所以切换到这套机制或手工跑过之后，不会再重复跑一整遍。
 - 旧的 `--stale-at` 已停用，改用 `[job.stale] run_at`。
@@ -78,24 +78,24 @@ soft 组仍按失败次数升级，但同一日期重试不会重复计为多天
   与本机时区、夏令时无关，重装不保留旧的本机时间。
 - 非交易日自动跳过（退出 0）
 - **漏跑 / 周末补数**：`uv run python scripts/run_catchup.py`（门禁 core + breadth；水位已齐则
-  `skipped_already_fresh`），或 `scripts/daily_pipeline.sh YYYY-MM-DD` /
+  `skipped_already_fresh`），或 `scripts/scheduler/daily_pipeline.sh YYYY-MM-DD` /
   `CNE_TRADE_DATE=...`（全组定点）
 - **按当前出口选择调度组**：先检查源健康，再启用实际能够维护的组。一个出口的失败不能推出某个地域都不可用；出现拒绝先冷却，不通过换出口继续同一轮抓取。见[取数与源保护](fetch-policy.md)。
 
 ```bash
 launchctl list | grep cnequity
 launchctl start com.cnequity.daily   # 手动触发
-scripts/uninstall_scheduler.sh
+scripts/scheduler/uninstall_scheduler.sh
 ```
 
 **Linux cron**：
 
 ```cron
 # 每小时唤醒；CNE_SCHEDULED=1 让脚本自己按北京时间 run_at 判断每个交易日只跑一次
-7 * * * * CNE_SCHEDULED=1 /path/to/cnequity/scripts/daily_pipeline.sh
-37 * * * * CNE_SCHEDULED=1 /path/to/cnequity/scripts/stale_pipeline.sh
+7 * * * * CNE_SCHEDULED=1 /path/to/cnequity/scripts/scheduler/daily_pipeline.sh
+37 * * * * CNE_SCHEDULED=1 /path/to/cnequity/scripts/scheduler/stale_pipeline.sh
 # 事件流独立运行，包含周末；按所需频率调整
-20 20 * * * /path/to/cnequity/scripts/events_pipeline.sh
+20 20 * * * /path/to/cnequity/scripts/scheduler/events_pipeline.sh
 ```
 
 **Windows 任务计划程序**（原生 Win10/11；`daily_pipeline.sh` 不适用于 PowerShell）：
@@ -183,7 +183,7 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 完整湖备份。需要恢复研究数据时，另建并校验可移植快照，或对整个湖做一致性备份。
 
 ```bash
-scripts/backup_meta.sh /abs/path/to/lake /Volumes/ext/cne-bak 30 30
+scripts/scheduler/backup_meta.sh /abs/path/to/lake /Volumes/ext/cne-bak 30 30
 ```
 
 `DATA_ROOT` 是湖目录，不是 TOML 配置路径；省略时脚本使用 `CNE_DATA_ROOT`，
@@ -286,11 +286,11 @@ cne status --datasets --gate --config configs/cnequity.restore.toml
 5 17 * * 1-5 cd /path/to/cnequity && cne run daily --group signals --config configs/cnequity.toml
 ```
 
-生产更推荐用 `scripts/daily_pipeline.sh`（见上文），它会串行跑完全部组并做健康检查与备份。
+生产更推荐用 `scripts/scheduler/daily_pipeline.sh`（见上文），它会串行跑完全部组并做健康检查与备份。
 
 ## 收尾补抓
 
-正常补抓使用独立调度的 `scripts/stale_pipeline.sh`。它在较晚的窗口只处理仍落后的 snapshot 数据集，避免主日更任务内等待造成调度超时；与主任务共享锁，重叠时跳过。`daily_pipeline.sh` 保留 `CNE_STALE_RETRY=1` 兼容开关，但默认关闭。
+正常补抓使用独立调度的 `scripts/scheduler/stale_pipeline.sh`。它在较晚的窗口只处理仍落后的 snapshot 数据集，避免主日更任务内等待造成调度超时；与主任务共享锁，重叠时跳过。`daily_pipeline.sh` 保留 `CNE_STALE_RETRY=1` 兼容开关，但默认关闭。
 
 补抓遵循与主任务相同的 push2 配置，不额外关闭该来源。被封出口可在个人配置中设置 `[sources.eastmoney] push2_paused=true`，或显式传 `CNE_PUSH2_PAUSED=1`；已触发的共享熔断和预算仍会阻止请求。
 
@@ -315,7 +315,7 @@ cne status --datasets --gate --config configs/cnequity.restore.toml
 独立任务可设置更晚的调度窗口：
 
 ```cron
-5 20 * * 1-5 cd /path/to/cnequity && scripts/stale_pipeline.sh
+5 20 * * 1-5 cd /path/to/cnequity && scripts/scheduler/stale_pipeline.sh
 ```
 
 `--stale-only` 没有落后的数据集时不建 run、直接退出 0，重复挂无害。

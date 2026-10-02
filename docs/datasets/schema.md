@@ -1,6 +1,6 @@
 # Schema 契约
 
-本页用于查字段、类型和单位。数据集用途见[目录](catalog.md)，读取方式见[查询指南](query-guide.md)，兼容性与版本见[数据契约](contract.md)。列名与类型由 `scripts/sync_schema_docs.py` 同步，解释文字人工维护。
+本页用于查字段、类型和单位。数据集用途见[目录](catalog.md)，读取方式见[查询指南](query-guide.md)，兼容性与版本见[数据契约](contract.md)。列名与类型由 `scripts/dev/sync_schema_docs.py` 同步，解释文字人工维护。
 
 ### 全局约定
 
@@ -153,7 +153,7 @@
 自动升级（见 `cnequity/domain/trading_status.py`）。把物理 schema 统一过来跑：
 
 ```bash
-scripts/migrate_trading_status_risk_warning.py --config configs/cnequity.toml --apply
+scripts/migrations/migrate_trading_status_risk_warning.py --config configs/cnequity.toml --apply
 ```
 
 迁移**不会**给历史补 `delisted` 行：某一天的状态是当时观测到的事实，用今天的退市日期
@@ -189,8 +189,8 @@ scripts/migrate_trading_status_risk_warning.py --config configs/cnequity.toml --
 **迁移（v1 → v2）。** 湖里既有的行在任何一种口径下都是错的，必须重写：
 
 ```bash
-scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --dry-run
-scripts/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
+scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --dry-run
+scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.toml --apply
 ```
 
 `source ∈ {tdx_protocol, sina}` 且 `data_version=v1` 的行 `volume ×100`；其余 v1 行原样保留（本就是股）；所有被处理的行改写为 `data_version=v2`。已是 v2 的行跳过，脚本幂等、可中断续跑。**`fetched_at` 不重新打戳**——这些行确实是当时抓的，改掉就抹掉了数据被观测到的时间；记录本次重新解释的列是 `data_version`，这正是它的用途。`--apply` 会就地改写 curated，请先备份。

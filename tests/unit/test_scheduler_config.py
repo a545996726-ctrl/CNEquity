@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts/scheduler_config.py"
+SCRIPT = ROOT / "scripts/scheduler/scheduler_config.py"
 spec = importlib.util.spec_from_file_location("scheduler_config", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

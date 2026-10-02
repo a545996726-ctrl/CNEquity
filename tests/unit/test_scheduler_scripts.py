@@ -18,13 +18,13 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-DAILY = ROOT / "scripts" / "daily_pipeline.sh"
-STALE = ROOT / "scripts" / "stale_pipeline.sh"
-EVENTS = ROOT / "scripts" / "events_pipeline.sh"
-DAILY_PLIST = ROOT / "scripts" / "launchd" / "com.cnequity.daily.plist.template"
-STALE_PLIST = ROOT / "scripts" / "launchd" / "com.cnequity.stale.plist.template"
-EVENTS_PLIST = ROOT / "scripts" / "launchd" / "com.cnequity.events.plist.template"
-NEWS_PLIST = ROOT / "scripts" / "launchd" / "com.cnequity.events-news.plist.template"
+DAILY = ROOT / "scripts" / "scheduler" / "daily_pipeline.sh"
+STALE = ROOT / "scripts" / "scheduler" / "stale_pipeline.sh"
+EVENTS = ROOT / "scripts" / "scheduler" / "events_pipeline.sh"
+DAILY_PLIST = ROOT / "scripts" / "scheduler" / "launchd" / "com.cnequity.daily.plist.template"
+STALE_PLIST = ROOT / "scripts" / "scheduler" / "launchd" / "com.cnequity.stale.plist.template"
+EVENTS_PLIST = ROOT / "scripts" / "scheduler" / "launchd" / "com.cnequity.events.plist.template"
+NEWS_PLIST = ROOT / "scripts" / "scheduler" / "launchd" / "com.cnequity.events-news.plist.template"
 
 
 def _ensure_unix_shell() -> None:
@@ -114,7 +114,7 @@ def test_daily_template_schedules_all_groups_and_disables_inline_wait():
 def test_stale_template_is_a_late_independent_agent():
     payload = plistlib.loads(STALE_PLIST.read_bytes())
     assert payload["Label"] == "com.cnequity.stale"
-    assert payload["ProgramArguments"][-1].endswith("scripts/stale_pipeline.sh")
+    assert payload["ProgramArguments"][-1].endswith("scripts/scheduler/stale_pipeline.sh")
     # Hourly wake-up; scheduler_gate.py picks the run by Beijing time.
     assert payload["StartCalendarInterval"] == {"Minute": 37}
     assert payload["EnvironmentVariables"]["CNE_SCHEDULED"] == "1"
@@ -124,7 +124,7 @@ def test_events_template_runs_every_calendar_day_on_its_own_lock():
     """The whole point: no trading-day gate, and not behind the daily lock."""
     payload = plistlib.loads(EVENTS_PLIST.read_bytes())
     assert payload["Label"] == "com.cnequity.events"
-    assert payload["ProgramArguments"][-1].endswith("scripts/events_pipeline.sh")
+    assert payload["ProgramArguments"][-1].endswith("scripts/scheduler/events_pipeline.sh")
     # A weekday filter here would put the market calendar back in the path.
     assert "Weekday" not in payload["StartCalendarInterval"]
     assert 'scheduler_lock_acquire "$REPO_ROOT" events' in EVENTS.read_text(encoding="utf-8")
@@ -249,14 +249,18 @@ def test_stale_pipeline_does_not_remove_ownerless_lock(tmp_path):
 
 def test_installer_xml_escapes_checkout_path(tmp_path):
     repo = tmp_path / "CN&Equity"
-    (repo / "scripts" / "launchd").mkdir(parents=True)
+    (repo / "scripts" / "scheduler" / "launchd").mkdir(parents=True)
     (repo / ".venv" / "bin").mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts" / "install_scheduler.sh", repo / "scripts")
-    shutil.copy2(ROOT / "scripts" / "scheduler_config.py", repo / "scripts")
-    shutil.copy2(DAILY_PLIST, repo / "scripts" / "launchd")
-    shutil.copy2(STALE_PLIST, repo / "scripts" / "launchd")
-    shutil.copy2(EVENTS_PLIST, repo / "scripts" / "launchd")
-    shutil.copy2(NEWS_PLIST, repo / "scripts" / "launchd")
+    shutil.copy2(
+        ROOT / "scripts" / "scheduler" / "install_scheduler.sh", repo / "scripts" / "scheduler"
+    )
+    shutil.copy2(
+        ROOT / "scripts" / "scheduler" / "scheduler_config.py", repo / "scripts" / "scheduler"
+    )
+    shutil.copy2(DAILY_PLIST, repo / "scripts" / "scheduler" / "launchd")
+    shutil.copy2(STALE_PLIST, repo / "scripts" / "scheduler" / "launchd")
+    shutil.copy2(EVENTS_PLIST, repo / "scripts" / "scheduler" / "launchd")
+    shutil.copy2(NEWS_PLIST, repo / "scripts" / "scheduler" / "launchd")
     cne = repo / ".venv" / "bin" / "cne"
     cne.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     cne.chmod(0o755)
@@ -280,7 +284,7 @@ def test_installer_xml_escapes_checkout_path(tmp_path):
         }
     )
 
-    result = _run(repo / "scripts" / "install_scheduler.sh", env=env)
+    result = _run(repo / "scripts" / "scheduler" / "install_scheduler.sh", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     daily = plistlib.loads(
         (home / "Library" / "LaunchAgents" / "com.cnequity.daily.plist").read_bytes()
@@ -291,9 +295,15 @@ def test_installer_xml_escapes_checkout_path(tmp_path):
     events = plistlib.loads(
         (home / "Library" / "LaunchAgents" / "com.cnequity.events.plist").read_bytes()
     )
-    assert daily["ProgramArguments"][-1] == str(repo / "scripts" / "daily_pipeline.sh")
-    assert stale["ProgramArguments"][-1] == str(repo / "scripts" / "stale_pipeline.sh")
-    assert events["ProgramArguments"][-1] == str(repo / "scripts" / "events_pipeline.sh")
+    assert daily["ProgramArguments"][-1] == str(
+        repo / "scripts" / "scheduler" / "daily_pipeline.sh"
+    )
+    assert stale["ProgramArguments"][-1] == str(
+        repo / "scripts" / "scheduler" / "stale_pipeline.sh"
+    )
+    assert events["ProgramArguments"][-1] == str(
+        repo / "scripts" / "scheduler" / "events_pipeline.sh"
+    )
 
 
 def _stub_cne_failing_groups(tmp_path: Path) -> Path:
@@ -400,7 +410,7 @@ def test_health_notify_honours_the_same_cne_override_as_the_pipeline(tmp_path):
     calls = tmp_path / "calls"
     env = _daily_env(tmp_path, cne, calls)
 
-    result = _run(ROOT / "scripts" / "health_notify.sh", env=env)
+    result = _run(ROOT / "scripts" / "scheduler" / "health_notify.sh", env=env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OK" in result.stdout
@@ -491,13 +501,13 @@ def test_health_notify_runs_the_whole_lake_audit_only_on_its_weekly_day(tmp_path
     env = _daily_env(tmp_path, cne, calls)
 
     env["CNE_FULL_AUDIT_DOW"] = "0"  # never
-    _run(ROOT / "scripts" / "health_notify.sh", env=env)
+    _run(ROOT / "scripts" / "scheduler" / "health_notify.sh", env=env)
     assert "--full" not in calls.read_text()
     assert "audit" in calls.read_text()
 
     calls.unlink()
     env["CNE_FULL_AUDIT_DOW"] = "always"
-    _run(ROOT / "scripts" / "health_notify.sh", env=env)
+    _run(ROOT / "scripts" / "scheduler" / "health_notify.sh", env=env)
     assert "--full" in calls.read_text()
 
 
@@ -514,7 +524,7 @@ def test_health_notify_scopes_the_freshness_gate_to_the_scheduled_groups(tmp_pat
     env = _daily_env(tmp_path, cne, calls)
     env["CNE_GROUPS"] = "core"
 
-    result = _run(ROOT / "scripts" / "health_notify.sh", env=env)
+    result = _run(ROOT / "scripts" / "scheduler" / "health_notify.sh", env=env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     args = _call_args(calls)
@@ -531,7 +541,7 @@ def test_health_notify_passes_no_scope_when_no_groups_are_configured(tmp_path):
     env = _daily_env(tmp_path, cne, calls)
     env.pop("CNE_GROUPS", None)
 
-    result = _run(ROOT / "scripts" / "health_notify.sh", env=env)
+    result = _run(ROOT / "scripts" / "scheduler" / "health_notify.sh", env=env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "--groups" not in _call_args(calls)
@@ -540,7 +550,7 @@ def test_health_notify_passes_no_scope_when_no_groups_are_configured(tmp_path):
 def test_health_notify_titles_a_freshness_miss_as_lag_not_an_anomaly(tmp_path):
     """ "数据异常" over a pure freshness miss is the kind of wrong that costs an
     alert its meaning: nothing was anomalous, a scheduled group had not run."""
-    script = (ROOT / "scripts" / "health_notify.sh").read_text(encoding="utf-8")
+    script = (ROOT / "scripts" / "scheduler" / "health_notify.sh").read_text(encoding="utf-8")
 
     assert 'title="cnequity 数据滞后"' in script
     assert 'title="cnequity 数据异常"' in script

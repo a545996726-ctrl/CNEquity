@@ -165,7 +165,7 @@
 | CFE | official | 2010-04-16 | 2019-12-23 | 有 | 有 | supported |
 | DCE | official | 2000-01-04 | 2017-03-31 | 无 | 无 | experimental |
 
-此表由 `scripts/sync_derivative_sources.py` 从读取器注册表生成。起点是适配器路由边界，不证明源端或本湖连续完整；`experimental` 尚未通过真实载荷验收。INE 2018 年期货使用能源中心独立日文件，2019 年起随 SHF 路由合并发布；其独立起点不能套用 SHF 日期。
+此表由 `scripts/dev/sync_derivative_sources.py` 从读取器注册表生成。起点是适配器路由边界，不证明源端或本湖连续完整；`experimental` 尚未通过真实载荷验收。INE 2018 年期货使用能源中心独立日文件，2019 年起随 SHF 路由合并发布；其独立起点不能套用 SHF 日期。
 
 <!-- derivative-capabilities:end -->
 

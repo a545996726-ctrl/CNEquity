@@ -12,8 +12,8 @@ on:
       - "src/**"
       - "contracts/**"
       - "sources/SOURCES.yml"
-      - "scripts/fresh_lake_e2e.py"
-      - "scripts/check_release_contract.py"
+      - "scripts/dev/fresh_lake_e2e.py"
+      - "scripts/dev/check_release_contract.py"
       - "tests/**"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -59,7 +59,7 @@ jobs:
           cne contract validate "$contract" --against-registry \
             | tee evidence/contract-validate.txt
           cp "$contract" evidence/
-          python scripts/check_release_contract.py --current "$contract" \
+          python scripts/dev/check_release_contract.py --current "$contract" \
             --output evidence/contract-diff.json
           printf 'package_version=%s\ncontract=%s\n' "$package_version" "$contract" \
             > evidence/contract-metadata.txt
@@ -70,7 +70,7 @@ jobs:
       - name: Run fresh-lake snapshot recovery drill
         run: |
           set -o pipefail
-          python scripts/fresh_lake_e2e.py --skip-wheel-smoke \
+          python scripts/dev/fresh_lake_e2e.py --skip-wheel-smoke \
             | tee evidence/fresh-lake-e2e.json
       - name: Generate source legal-policy report
         run: |
@@ -105,7 +105,7 @@ jobs:
       - name: Validate distributions
         run: |
           twine check dist/*
-          python scripts/check_public_package.py dist/*
+          python scripts/dev/check_public_package.py dist/*
       - name: Verify the release contract is in sdist and wheel
         run: |
           set -euo pipefail

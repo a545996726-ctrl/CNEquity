@@ -204,7 +204,7 @@ cne mcp --config /abs/path/to/cnequity.toml
 
 ## 适合与边界
 
-**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](docs/comparison.md)。
+**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](docs/architecture/overview.md)。
 
 - 当前处于 **0.x 迭代阶段**。本仓库文档对应当前实现，PyPI 稳定版可能落后；升级前核对 `cne --version` 和[更新日志](CHANGELOG.md)。
 - 公共来源的网络可达性、历史深度和发布节奏会变化。基础采集无需 token，部分补充来源需要自备凭证；安装不代表获得所有上游权限。
@@ -219,7 +219,7 @@ cne mcp --config /abs/path/to/cnequity.toml
 | 找数据、确认口径 | [目录](docs/datasets/catalog.md) · [字段](docs/datasets/schema.md) · [研究示例](docs/recipes/README.md) |
 | 查命令、参数和副作用 | [CLI](docs/reference/cli.md) · [参数默认值](docs/reference/cli-options.md) · [联网与写入清单](docs/reference/cli-surface.md) |
 | 配调度、处理失败 | [运行手册](docs/operations/runbook.md) · [取数与源保护](docs/operations/fetch-policy.md) · [排障](docs/operations/troubleshooting.md) |
-| 理解产品方向与反馈问题 | [产品设计](docs/architecture/overview.md) · [升级与反馈](docs/getting-started/upgrading.md) |
+| 理解产品方向与反馈问题 | [产品设计](docs/architecture/overview.md) · [升级与反馈](docs/getting-started/installation.md#升级与兼容性) |
 
 欢迎提交带最小复现的 [Issue](https://github.com/rootSunc/CNEquity/issues)、文档修正或数据适配 PR。研究引用见 [CITATION.cff](CITATION.cff)；安全问题请按[安全策略](SECURITY.md)私下报告。
 

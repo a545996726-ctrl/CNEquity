@@ -7,7 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
-    "check_public_package", ROOT / "scripts" / "check_public_package.py"
+    "check_public_package", ROOT / "scripts" / "dev" / "check_public_package.py"
 )
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)

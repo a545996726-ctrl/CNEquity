@@ -139,7 +139,7 @@ cne mcp --config /abs/path/to/cnequity.toml
 
 ## Fit and limits
 
-CNEquity fits repeated historical research, ongoing collection and self-hosted data operations. A direct source call is lighter for an occasional quote. Existing research and trading platforms can consume the lake; see [choosing a data workflow](docs/comparison.md).
+CNEquity fits repeated historical research, ongoing collection and self-hosted data operations. A direct source call is lighter for an occasional quote. Existing research and trading platforms can consume the lake; see [choosing a data workflow](docs/architecture/overview.md).
 
 - The project is in **0.x development**. Repository documentation describes the current tree; the stable PyPI release may lag. Check `cne --version` and the [changelog](CHANGELOG.md).
 - Public-source connectivity, retention and publication schedules vary. Basic collection needs no token; some supplemental sources require your own credentials and permissions.
@@ -154,7 +154,7 @@ CNEquity fits repeated historical research, ongoing collection and self-hosted d
 | Understand the data | [Catalog](docs/datasets/catalog.md) · [Schemas](docs/datasets/schema.md) · [Recipes](docs/recipes/README.md) |
 | Find a command | [CLI](docs/reference/cli.md) · [Options](docs/reference/cli-options.md) · [Network/write effects](docs/reference/cli-surface.md) |
 | Operate the lake | [Runbook](docs/operations/runbook.md) · [Fetch policy](docs/operations/fetch-policy.md) · [Troubleshooting](docs/operations/troubleshooting.md) |
-| Product direction and feedback | [Product overview](docs/architecture/overview.md) · [Upgrades and feedback](docs/getting-started/upgrading.md) |
+| Product direction and feedback | [Product overview](docs/architecture/overview.md) · [Upgrades and feedback](docs/getting-started/installation.md#升级与兼容性) |
 
 [Issues](https://github.com/rootSunc/CNEquity/issues) with minimal reproductions, documentation fixes and adapter PRs are welcome. Cite [CITATION.cff](CITATION.cff) for research; report vulnerabilities privately using the [security policy](SECURITY.md).
 

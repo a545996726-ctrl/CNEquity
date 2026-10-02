@@ -29,7 +29,7 @@ def test_backup_meta_accepts_relative_root_and_preserves_evidence(tmp_path):
         (directory / "evidence.json").write_text("{}", encoding="utf-8")
 
     backup_dir = tmp_path / "backup"
-    script = Path(__file__).resolve().parents[2] / "scripts" / "backup_meta.sh"
+    script = Path(__file__).resolve().parents[2] / "scripts" / "scheduler" / "backup_meta.sh"
     subprocess.run(
         [str(script), "lake", "backup", "30"],
         cwd=tmp_path,

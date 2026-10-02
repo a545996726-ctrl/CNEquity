@@ -963,7 +963,7 @@ def check_mixed_partition_granularity(
     put. Whole-layer scans then see the same primary key twice — once in
     ``trade_date=2016-01-04`` and again inside ``trade_date=2016`` — and the
     sampled ``pk_unique`` check (current period only) never notices.
-    ``scripts/repartition.py`` (with PK dedupe) is the fix.
+    ``scripts/migrations/repartition.py`` (with PK dedupe) is the fix.
     """
     if partition_col is None or not dataset_has_parquet(root):
         return None
@@ -1006,7 +1006,7 @@ def check_mixed_partition_granularity(
         f"{stale_count} partition(s) still at {[g for g in on_disk if g != configured]} "
         f"while registry wants {configured!r} (on disk: {on_disk}). "
         "Overlapping periods republish the same primary key across granularities; "
-        f"quarantine the finer leftovers and run `python scripts/repartition.py {dataset}`"
+        f"quarantine the finer leftovers and run `python scripts/migrations/repartition.py {dataset}`"
     )
     if pk_dupes:
         msg += f" — {pk_dupes} duplicate PK row(s) visible in a whole-dataset scan"
@@ -1034,7 +1034,7 @@ def check_partition_fragmentation(
     Guards the granularity choice in the registry: a new dataset added with the
     default day partitioning, or an existing one whose volume never grew into
     it, otherwise quietly accumulates thousands of near-empty files that every
-    scan has to open. ``scripts/repartition.py`` is the fix.
+    scan has to open. ``scripts/migrations/repartition.py`` is the fix.
     """
     if partition_col is None or not dataset_has_parquet(root):
         return None
@@ -1059,7 +1059,7 @@ def check_partition_fragmentation(
             f"{len(partitions)} partitions hold {rows} rows ({avg:.1f} per partition, "
             f"{total_bytes / 1e6:.1f}MB across {len(files)} files) — mostly parquet "
             f"metadata. Configured granularity is {granularity!r}; coarsen it in the "
-            f"registry and run `python scripts/repartition.py {dataset}`"
+            f"registry and run `python scripts/migrations/repartition.py {dataset}`"
         ),
         "partitions": len(partitions),
         "rows": rows,

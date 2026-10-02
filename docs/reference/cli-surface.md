@@ -1,6 +1,6 @@
 # CLI 命令副作用清单
 
-由 `scripts/sync_cli_surface.py` 从 Click 命令注册表核对。‘执行时’指运行命令主体；`--help` 不执行。详细源选择与限制见[取数策略](../operations/fetch-policy.md)。
+由 `scripts/dev/sync_cli_surface.py` 从 Click 命令注册表核对。‘执行时’指运行命令主体；`--help` 不执行。详细源选择与限制见[取数策略](../operations/fetch-policy.md)。
 
 | 命令 | 第三方取数 | 本地效果 |
 |---|---|---|

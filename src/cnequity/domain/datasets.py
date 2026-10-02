@@ -905,7 +905,7 @@ _SPECS = [
         # 2024-01-02 and no further, which is ~624 trading days and growing.
         # The edge landing on a calendar boundary suggests the retention may be
         # year-granular rather than a fixed date, so re-measure each January
-        # with scripts/probe_trade_ticks.py.
+        # with scripts/dev/probe_trade_ticks.py.
         history_floor_date=date(2024, 1, 2),
         # By-date requests, so date chunks are the cheap axis — the exact
         # opposite of the minute bars above, where the wire always walks from

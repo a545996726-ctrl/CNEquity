@@ -36,32 +36,32 @@ jobs:
       - name: Offline benchmark check
         # Synthetic fixture only: this guards limiter/telemetry regressions and
         # deliberately makes no claim about vendor speed or availability.
-        run: python scripts/benchmark_offline.py --check --max-elapsed-seconds 10 --max-concurrency 2
+        run: python scripts/dev/benchmark_offline.py --check --max-elapsed-seconds 10 --max-concurrency 2
 
       - name: Schema docs in sync
         # docs/datasets/schema.md is hand-written prose around generated column
         # tables. Nothing kept the tables honest: 11 of 42 datasets had no
         # section at all, and a column added to domain/schemas.py reached the
         # page only if someone remembered.
-        run: python scripts/sync_schema_docs.py --check
+        run: python scripts/dev/sync_schema_docs.py --check
 
       - name: Config examples in sync
-        run: python scripts/sync_config_templates.py --check
+        run: python scripts/dev/sync_config_templates.py --check
 
       - name: Derivative source docs in sync
-        run: python scripts/sync_derivative_sources.py --check
+        run: python scripts/dev/sync_derivative_sources.py --check
 
       - name: CLI side-effect docs in sync
-        run: python scripts/sync_cli_surface.py --check
+        run: python scripts/dev/sync_cli_surface.py --check
 
       - name: CLI options in sync
-        run: python scripts/sync_cli_options.py --check
+        run: python scripts/dev/sync_cli_options.py --check
 
       - name: Public package boundary
         run: |
           python -m pip install build
           python -m build --sdist --wheel
-          python scripts/check_public_package.py dist/*.whl dist/*.tar.gz
+          python scripts/dev/check_public_package.py dist/*.whl dist/*.tar.gz
 
       - uses: actions/setup-node@v4
         with:

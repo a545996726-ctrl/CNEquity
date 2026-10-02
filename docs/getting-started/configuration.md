@@ -8,7 +8,7 @@ cne config create                              # 推荐：写出 configs/cnequit
 cne config validate --config configs/cnequity.toml
 ```
 
-加载与校验：`cnequity.config.loader`。个人文件不参与开源默认配置；参见[升级与反馈](upgrading.md)。`--config` 优先于环境变量 `CNE_CONFIG`，否则使用当前目录下 `configs/cnequity.toml`。`cne config create` 默认写绝对 `data.root`；手写相对路径仍按进程工作目录解析。
+加载与校验：`cnequity.config.loader`。个人文件不参与开源默认配置；参见[升级与反馈](installation.md#升级与兼容性)。`--config` 优先于环境变量 `CNE_CONFIG`，否则使用当前目录下 `configs/cnequity.toml`。`cne config create` 默认写绝对 `data.root`；手写相对路径仍按进程工作目录解析。
 
 本页按配置段查阅。首次使用通常只需确认 `[data].root`，再按需求启用分钟线、分笔或[衍生品](../recipes/derivatives.md)。表中默认值指随包模板；直接构造 `Config()` 与平台生成器的结果可能不同，以 `cne config diff` 和实际配置为准。
 
@@ -112,6 +112,35 @@ cne config validate --config configs/cnequity.toml
 | sina | 0.3 | 复权因子；与 Sina 日线共享在途上限和拒绝冷却 |
 | sina_bars | 1.0 | BJ/退市日线 fallback；独立于复权因子限速，配合 HTTP 456 有限重试 |
 | baostock | 1.0 + batch 20/120s | 历史市值/ST。另有写死的上海自然日 5 万次上限和单连接；黑名单冻结为本年次数 × 6 小时 |
+
+## THS 官方接口
+`ths_official` 是需要账号凭证的可选接口，与 `ths` 公共页面分开配置、限流与记录来源。它不能成为免费核心数据链的强依赖。源登记和数据使用条件见 [来源矩阵](../legal-and-data-sources.md#来源合规矩阵)；客户端代码许可证不等于数据再分发许可。
+
+### 配置与入口
+
+通过调用环境设置 `HITHINK_FINANCE_API_KEY`；不要在公共模板、日志或问题报告中写入 Key。个人配置中显式启用 `[sources.ths_official] enabled = true`。`verify` 控制对照证据，`backfill` 控制内容补入，默认后者关闭。
+
+| 命令 | 获取与写入边界 |
+|---|---|
+| `cne ths-official capture` | 按 `--what` 抓对手源快照；只写快照与运行证据，不替换 canonical |
+| `cne ths-official backfill` | 按窗口补财报空缺；支持 `--symbols` 缩小范围，需要内容开关 |
+| `cne ths-official repair-bars` | 历史行情核对；默认报告，`--apply` 才写修复结果 |
+| `cne ths-official resource-sectors` | 显式板块换源；默认报告，`--apply` 写入并自动发布 |
+
+后两项的预演仍会联网并消耗源配额。无 Key、未启用源或未允许相应能力时，命令可能返回 `status=skipped`；这不证明抓到了数据。参数以各命令 `--help` 为准。
+
+### 数据契约
+
+- 财务 `net_profit` 使用归母口径，映射 `parent_holder_net_profit`，不能直接同名拼接包含少数股东的总净利润。
+- 披露日要有可追溯的对应证据；当前重述值不能仅因补了日期就升级成原始 PIT。
+- 复权事件优先下载全量 dump，再在本地切片；事件流和因子序列结构不同，通过专用仲裁检查比较。
+- 送股、转增与配股须遵守 [产品边界](../architecture/overview.md)，不能跨来源叠加同一稀释事实。
+- ETF、个股、板块端点的窗口与覆盖不同；适配器会限制已知范围。空响应不能证明退市证券不存在，不能自动删掉原有行。
+- 插入缺失主键与替换已有来源是不同操作；修复前核对[产品边界](../architecture/overview.md)和[数据源限制](../datasets/sources.md)。
+
+### 失败处理
+
+鉴权失败先检查凭证和开关；遇到限流或 HTTP 拒绝时等待共享冷却，再做一次小范围诊断。空结果与失败、跳过是不同状态，不能用作覆盖完整的证明。见[取数与源保护](../operations/fetch-policy.md)。
 
 ## `[adj_factors]`
 
@@ -246,7 +275,7 @@ weekday = 5          # 每周组在哪天之前的最后一个交易日跑，ISO
 
 `cne run events` 按配置文件里的先后顺序依次跑每个组（各自 `compact` 发布），
 `--group <name>` 只跑一个。不带参数的 `cne run daily` 在日更组之后也会跑一遍全部事件流组。定时器见
-[`scripts/events_pipeline.sh`](../operations/scripts.md) 与 `com.cnequity.events` agent。
+[`scripts/scheduler/events_pipeline.sh`](../operations/scripts.md) 与 `com.cnequity.events` agent。
 
 `validate_config` 在这里守两条：组里只能放**自然日**数据集
 （`DatasetSpec.session_scope = "calendar"`），且同一个 step 不能同时出现在 `[job.daily]`

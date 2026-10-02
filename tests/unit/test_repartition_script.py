@@ -1,4 +1,4 @@
-"""`scripts/repartition.py` — the former `cne repartition`.
+"""`scripts/migrations/repartition.py` — the former `cne repartition`.
 
 It moved because what triggers it is a registry granularity change landing on an
 existing lake: a migration, alongside `migrate_daily_bars_volume_v2.py`, not a
@@ -20,7 +20,7 @@ import pytest
 from cnequity.config.bootstrap import path_for_toml
 from cnequity.storage.repartition import RepartitionResult
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "repartition.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "migrations" / "repartition.py"
 
 
 @pytest.fixture

@@ -1283,7 +1283,7 @@ def validate_dataframe(
         # upgraded here rather than at each of the half-dozen read paths
         # (reader, compact, repartition, derive, audit). Idempotent, so it also
         # no-ops on an already migrated lake; delete this once
-        # `scripts/migrate_trading_status_risk_warning.py` has been run
+        # `scripts/migrations/migrate_trading_status_risk_warning.py` has been run
         # everywhere. See domain/trading_status.py.
         from cnequity.domain.trading_status import normalize_legacy
 

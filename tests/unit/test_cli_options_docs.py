@@ -8,7 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
-    "sync_cli_options", ROOT / "scripts" / "sync_cli_options.py"
+    "sync_cli_options", ROOT / "scripts" / "dev" / "sync_cli_options.py"
 )
 generator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(generator)
