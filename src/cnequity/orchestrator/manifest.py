@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
@@ -338,6 +339,13 @@ class Manifest:
         is worth more there than a bare uuid.
         """
         run_id = run_id or str(uuid.uuid4())
+        metadata = dict(metadata or {})
+        # A dashboard job sets this in its own process, and in every child that
+        # process starts (retry --failed-groups inherits the environment). A
+        # run tagged this way is not "the day's scheduled pipeline".
+        launch_id = os.environ.get("CNE_LAUNCH_ID")
+        if launch_id and "launch" not in metadata:
+            metadata["launch"] = {"id": launch_id, "source": "serve"}
         with self._connect() as conn:
             conn.execute(
                 """
@@ -346,7 +354,7 @@ class Manifest:
                     execution_status, result_schema_version
                 ) VALUES (?, ?, 'running', ?, ?, 'running', 2)
                 """,
-                (run_id, job_name, _utcnow(), _encode_run_metadata(metadata or {})),
+                (run_id, job_name, _utcnow(), _encode_run_metadata(metadata)),
             )
         return run_id
 

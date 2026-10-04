@@ -67,6 +67,10 @@ def _ran_in_manifest(config, job: str, session: date) -> bool:
     Covers sessions from before the markers existed and runs started by hand
     (``scripts/scheduler/daily_pipeline.sh``), so switching to the gate — or a manual
     run — never triggers a second full pipeline for the same session.
+
+    A run tagged ``metadata.launch`` was started from the dashboard. One group
+    from that page must not cancel the day's scheduled pipeline; the full daily
+    operation writes the session marker itself when it is the due session.
     """
     path = Path(getattr(config, "manifest_path", None) or Path(config.meta_root) / "manifest.db")
     if not path.exists():
@@ -78,6 +82,7 @@ def _ran_in_manifest(config, job: str, session: date) -> bool:
         "SELECT 1 FROM ingestion_runs WHERE job_name LIKE ? "
         "AND json_extract(metadata_json, '$.trade_date') = ? "
         + ("" if job == "stale" else "AND job_name != 'daily:stale' ")
+        + "AND json_extract(metadata_json, '$.launch.id') IS NULL "
         + "LIMIT 1"
     )
     try:

@@ -72,6 +72,29 @@ def test_the_catch_up_waits_for_the_days_run(tmp_path):
     assert pending_session(cfg, "stale", now) == date(2026, 9, 24)
 
 
+def test_a_panel_run_does_not_count_as_the_scheduled_day(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(cfg.manifest_path) as conn:
+        conn.execute("CREATE TABLE ingestion_runs (job_name TEXT, metadata_json TEXT)")
+        conn.execute(
+            "INSERT INTO ingestion_runs VALUES (?, ?)",
+            (
+                "daily:core",
+                json.dumps(
+                    {"trade_date": "2026-09-24", "launch": {"id": "abc", "source": "serve"}}
+                ),
+            ),
+        )
+    assert not is_done(cfg.meta_root, "daily", date(2026, 9, 24), cfg)
+    with sqlite3.connect(cfg.manifest_path) as conn:
+        conn.execute(
+            "INSERT INTO ingestion_runs VALUES (?, ?)",
+            ("daily:capital", json.dumps({"trade_date": "2026-09-24"})),
+        )
+    assert is_done(cfg.meta_root, "daily", date(2026, 9, 24), cfg)
+
+
 def test_a_run_already_in_the_manifest_counts_as_done(tmp_path):
     """Sessions from before the markers, and manual runs, are not run again."""
     cfg = _cfg(tmp_path)

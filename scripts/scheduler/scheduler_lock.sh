@@ -16,13 +16,43 @@
 #
 # CNE_SCHEDULER_LOCK_DIR (or the older CNE_LOCK_DIR alias) can point at a
 # writable directory for tests or for a repo whose data directory is elsewhere.
+# Otherwise the directory is {data.root}/locks from CNE_CONFIG, the same place
+# `cne serve` takes when it starts a daily or events job. The old fallback,
+# $REPO_ROOT/data/cnequity/locks, missed every lake whose root was not that path.
+
+_scheduler_lock_root() {
+  local repo_root="$1"
+  local config py resolved
+  if [[ -n "${CNE_SCHEDULER_LOCK_DIR:-}" ]]; then
+    printf '%s\n' "$CNE_SCHEDULER_LOCK_DIR"
+    return 0
+  fi
+  if [[ -n "${CNE_LOCK_DIR:-}" ]]; then
+    printf '%s\n' "$CNE_LOCK_DIR"
+    return 0
+  fi
+  config="${CNE_CONFIG:-$repo_root/configs/cnequity.toml}"
+  py="${CNE_PYTHON:-python3}"
+  resolved=""
+  if [[ -f "$config" ]]; then
+    resolved="$("$py" -m cnequity.orchestrator.scheduler_lock --config "$config" 2>/dev/null || true)"
+  fi
+  case "$resolved" in
+    /*|[A-Za-z]:*|[A-Za-z]:/*)
+      printf '%s\n' "$resolved"
+      ;;
+    *)
+      printf '%s\n' "$repo_root/data/cnequity/locks"
+      ;;
+  esac
+}
 
 scheduler_lock_acquire() {
   local repo_root="$1"
   local lock_name="${2:-daily}"
   local lock_root lock_dir lock_pid owner attempt
 
-  lock_root="${CNE_SCHEDULER_LOCK_DIR:-${CNE_LOCK_DIR:-$repo_root/data/cnequity/locks}}"
+  lock_root="$(_scheduler_lock_root "$repo_root")"
   lock_dir="$lock_root/$lock_name.lock"
   lock_pid="$lock_dir/pid"
 
