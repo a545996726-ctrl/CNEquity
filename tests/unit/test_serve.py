@@ -546,12 +546,24 @@ def test_rows_reject_an_unknown_adjustment(client):
 
 
 def test_only_storage_review_and_confirmation_allow_post(client):
+    """Write routes stay an explicit set. New ones have to be named here."""
     mutations = {
         (route.path, method)
         for route in client.app.routes
         for method in getattr(route, "methods", set()) - {"GET", "HEAD"}
     }
-    assert mutations == {("/api/storage/reviews", "POST"), ("/api/storage/confirm", "POST")}
+    assert mutations == {
+        ("/api/storage/reviews", "POST"),
+        ("/api/storage/confirm", "POST"),
+        ("/api/ops/preview", "POST"),
+        ("/api/ops/jobs", "POST"),
+        ("/api/ops/jobs/{job_id}/cancel", "POST"),
+        ("/api/ops/schedule/preview", "POST"),
+        ("/api/ops/schedule/apply", "POST"),
+        ("/api/ops/settings/preview", "POST"),
+        ("/api/ops/settings/apply", "POST"),
+        ("/api/setup/config", "POST"),
+    }
 
 
 def test_a_token_is_required_when_one_is_configured(lake):
@@ -572,8 +584,11 @@ def test_the_page_reaches_nothing_outside_this_host(client):
 
 
 def test_the_bundle_ships_beside_the_page(client):
-    """The page is a shell; without the bundle it renders nothing at all."""
-    assert "/static/bundle.js" in client.get("/").text
+    """The page is a shell. It shows a boot line until the bundle paints."""
+    page = client.get("/")
+    assert "/static/bundle.js" in page.text
+    assert "正在打开面板" in page.text
+    assert page.headers["cache-control"] == "no-cache"
     bundle = client.get("/static/bundle.js")
     assert bundle.status_code == 200
     assert "javascript" in bundle.headers["content-type"]
@@ -827,3 +842,213 @@ def test_heatmap_cell_coverage_is_exact_at_the_interval_edges(client, lake):
     expected = {i for i, d in enumerate(parsed) for s, e in spans if s <= d <= e}
     actual = {i for i, c in enumerate(row["cells"]) if c == covered_char}
     assert actual == expected
+
+
+def test_runs_list_names_each_batch_failure(config):
+    from cnequity.orchestrator.manifest import Manifest
+    from cnequity.serve.lake import LakeView
+
+    manifest = Manifest(config.manifest_path)
+    run_id = manifest.start_run("events")
+    manifest.start_batch(run_id, "announcements", "announcements", "announcement_index")
+    manifest.finish_batch(
+        run_id,
+        "announcements",
+        "failed",
+        error_message=(
+            "CNINFO announcement pagination failed for szse page 1: "
+            "Server error '504 Gateway Time-out' for url "
+            "'https://www.cninfo.com.cn/new/hisAnnouncement/query'\n"
+            "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504"
+        ),
+        execution_status="failed",
+        reason_code="execution_error",
+    )
+    manifest.start_batch(run_id, "announcements-stage", "announcements", "announcement_index")
+    manifest.finish_batch(
+        run_id,
+        "announcements-stage",
+        "failed",
+        error_message=(
+            "CNINFO announcement pagination failed for szse page 1: "
+            "Server error '504 Gateway Time-out' for url "
+            "'https://www.cninfo.com.cn/new/hisAnnouncement/query'"
+        ),
+        execution_status="failed",
+        reason_code="execution_error",
+    )
+    manifest.start_batch(run_id, "news", "news", "news_headlines")
+    manifest.finish_batch(
+        run_id,
+        "news",
+        "failed",
+        error_message="eastmoney: HTTP 403；共享冷却剩余 300 秒，本次不发请求。",
+        execution_status="completed",
+        reason_code="source_transient",
+    )
+    manifest.finish_run(run_id, "failed", error_message="one or more core steps failed")
+
+    client = TestClient(create_app(config))
+    page = client.get("/api/runs?limit=10").json()
+    assert page["offset"] == 0
+    assert page["limit"] == 10
+    assert page["total"] >= 1
+    body = page["runs"]
+    row = next(item for item in body if item["run_id"] == run_id)
+    assert row["error_message"] == "one or more core steps failed"
+    reasons = {item["dataset"]: item["error_message"] for item in row["failures"]}
+    assert reasons == {
+        "announcement_index": (
+            "CNINFO announcement pagination failed for szse page 1: "
+            "Server error '504 Gateway Time-out' for url "
+            "'https://www.cninfo.com.cn/new/hisAnnouncement/query'"
+        ),
+        "news_headlines": "eastmoney: HTTP 403；共享冷却剩余 300 秒，本次不发请求。",
+    }
+    total, rows, failed_daily = LakeView(config).runs(limit=10)
+    assert total == page["total"]
+    assert failed_daily is None
+    assert rows[0]["failures"] == row["failures"]
+    beyond = client.get("/api/runs?limit=10&offset=100000").json()
+    assert beyond["runs"] == []
+    assert beyond["total"] == page["total"]
+    failed = client.get("/api/runs?status=failed").json()
+    assert failed["total"] == 1
+    assert failed["runs"][0]["run_id"] == run_id
+    assert client.get("/api/runs?status=success").json()["total"] == 0
+    mixed = client.get("/api/runs?status=failed, success").json()
+    assert mixed["total"] == 1
+    assert client.get("/api/runs?status=no-such").status_code == 422
+    assert page["failed_daily_groups"] is None
+
+
+def _stamp_run(path, run_id: str, started: str) -> None:
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE ingestion_runs SET started_at = ? WHERE run_id = ?",
+            (started, run_id),
+        )
+
+
+def test_open_runs_omit_handled_and_outdated(config):
+    """A failure that a later attempt replaced, or an init a later run finished, is not counted."""
+    from cnequity.orchestrator.init_phases import expected_steps
+    from cnequity.orchestrator.manifest import Manifest
+
+    manifest = Manifest(config.manifest_path)
+    path = config.manifest_path
+
+    def close(job, status, started, *, steps=None, dataset="daily_bars", error="boom"):
+        meta = {"planned_steps": steps} if steps else None
+        run_id = manifest.start_run(job, meta)
+        batch_id = f"b-{started}"
+        manifest.start_batch(run_id, batch_id, "task", dataset)
+        if status != "running":
+            batch_status = (
+                "success" if status in {"success", "skipped_non_trading_day"} else "failed"
+            )
+            manifest.finish_batch(
+                run_id,
+                batch_id,
+                batch_status,
+                error_message=None if batch_status == "success" else error,
+            )
+            manifest.finish_run(
+                run_id,
+                status,
+                error_message=error if status == "failed" else None,
+            )
+        _stamp_run(path, run_id, started)
+        return run_id
+
+    phases = ["phase4_finalize"]
+    init_id = manifest.start_run("init", {"phases": phases, "trade_date": "2024-06-28"})
+    for step in expected_steps(phases):
+        if step == "derive_industry_index":
+            continue
+        manifest.start_batch(init_id, f"init-{step}", step, step)
+        manifest.finish_batch(init_id, f"init-{step}", "success")
+    manifest.finish_run(init_id, "failed", error_message="one or more init steps are incomplete")
+    _stamp_run(path, init_id, "2026-10-01T00:00:00+00:00")
+
+    client = TestClient(create_app(config))
+    alone = client.get("/api/runs", params={"open": "true"}).json()
+    assert alone["total"] == 1
+    assert alone["runs"][0]["run_id"] == init_id
+    assert alone["failed_daily_groups"] == 0
+
+    close("daily:core", "failed", "2026-10-02T00:00:00+00:00")
+    core_ok = manifest.start_run("daily:core")
+    manifest.start_batch(core_ok, "core-ok", "task", "daily_bars")
+    manifest.finish_batch(core_ok, "core-ok", "success")
+    manifest.start_batch(core_ok, "core-derive", "task", "derive_industry_index")
+    manifest.finish_batch(core_ok, "core-derive", "success")
+    manifest.finish_run(core_ok, "success")
+    _stamp_run(path, core_ok, "2026-10-03T00:00:00+00:00")
+
+    close("daily:capital", "failed", "2026-10-02T01:00:00+00:00")
+    capital = close("daily:capital", "failed", "2026-10-04T00:00:00+00:00")
+    research = close("daily:research", "failed", "2026-10-02T02:00:00+00:00")
+    close("daily:research", "skipped_non_trading_day", "2026-10-05T00:00:00+00:00")
+    close("events", "failed", "2026-10-02T03:00:00+00:00")
+    close("events", "running", "2026-10-06T00:00:00+00:00")
+    close(
+        "backfill",
+        "failed",
+        "2026-10-02T04:00:00+00:00",
+        steps=["daily_bars"],
+        dataset="daily_bars",
+    )
+    close(
+        "backfill",
+        "success",
+        "2026-10-03T01:00:00+00:00",
+        steps=["daily_bars"],
+        dataset="daily_bars",
+    )
+    stale = close("daily:stale", "degraded", "2026-10-07T00:00:00+00:00")
+
+    announcements = manifest.start_run("backfill", {"planned_steps": ["announcements"]})
+    manifest.start_batch(announcements, "ann-open", "task", "announcements")
+    manifest.finish_batch(announcements, "ann-open", "failed", error_message="still broken")
+    manifest.start_batch(announcements, "ann-done", "task", "announcements")
+    manifest.finish_batch(
+        announcements,
+        "ann-done",
+        "superseded",
+        error_message="superseded by successful retry batch later",
+    )
+    manifest.start_batch(announcements, "ann-stale", "task", "news")
+    manifest.finish_batch(announcements, "ann-stale", "stale", error_message="silent for too long")
+    manifest.start_batch(announcements, "ann-recovered", "task", "news")
+    manifest.finish_batch(
+        announcements,
+        "ann-recovered",
+        "success",
+        error_message="recovered after a retry",
+    )
+    manifest.finish_run(announcements, "failed", error_message="one or more core steps failed")
+    _stamp_run(path, announcements, "2026-10-02T05:00:00+00:00")
+
+    opened = client.get("/api/runs", params={"open": "true", "limit": 10}).json()
+    assert opened["total"] == 4
+    assert opened["failed_daily_groups"] == 2
+    assert [row["run_id"] for row in opened["runs"]] == [stale, capital, announcements, research]
+    reasons = {item["error_message"] for item in opened["runs"][2]["failures"]}
+    assert reasons == {"still broken"}
+
+    page = client.get("/api/runs", params={"open": "true", "limit": 1, "offset": 1}).json()
+    assert page["total"] == 4
+    assert [row["run_id"] for row in page["runs"]] == [capital]
+
+    degraded = client.get("/api/runs", params={"open": "true", "status": "degraded"}).json()
+    assert degraded["total"] == 1
+    assert degraded["runs"][0]["run_id"] == stale
+    assert degraded["failed_daily_groups"] == 0
+
+    history = client.get("/api/runs", params={"status": "failed", "limit": 50}).json()
+    assert history["total"] == 8
+    assert history["failed_daily_groups"] is None
+    assert init_id in {row["run_id"] for row in history["runs"]}

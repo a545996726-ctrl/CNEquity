@@ -104,6 +104,11 @@ def test_reading_and_review_never_delete_then_explicit_confirmation_does(web):
         summary = client.get("/api/storage").json()
         assert sum(o["status"] == "due" for o in summary["objects"]) == 2
         assert sum(o["status"] == "protected" for o in summary["objects"]) == 6
+        in_use = [o for o in summary["objects"] if o["current"]]
+        assert len(in_use) == 1
+        assert in_use[0]["kind"] == "revisions"
+        assert "current_generation" in in_use[0]["reasons"]
+        assert sum(o["kind"] == "revisions" and not o["current"] for o in summary["objects"]) == 7
     assert store.registry() == original
     job = review(client)
     assert len(job["objects"]) == 2
@@ -119,6 +124,56 @@ def test_reading_and_review_never_delete_then_explicit_confirmation_does(web):
     assert writer.current_root("daily_bars") == current
     assert confirm(client, job).status_code == 409
     assert not client.app.state.storage_maintenance.gate.closed
+
+
+def test_operator_can_delete_selected_history_and_the_result_reports_space(web):
+    client, _, store, writer = web
+    current = writer.current_root("daily_bars")
+    contents = (current / "part.parquet").read_bytes()
+    summary = client.get("/api/storage").json()
+    recent = [
+        o for o in summary["objects"] if not o["current"] and o["reasons"] == ["recent_generation"]
+    ]
+    assert len(recent) >= 2
+    live = next(o for o in summary["objects"] if o["current"])
+    legacy = next(o for o in summary["objects"] if "unreceipted_generation" in o["reasons"])
+    assert review(client, object_ids=[live["object_id"]])["status"] == "error"
+    assert review(client, object_ids=[legacy["object_id"]])["status"] == "error"
+    assert review(client, phase="mark", object_ids=[recent[0]["object_id"]])["status"] == "error"
+    store.hold(recent[0]["object_id"], "audit")
+    assert review(client, object_ids=[recent[0]["object_id"]])["status"] == "error"
+    assert len(store.inspect()["objects"]) == 8
+
+    job = review(client, object_ids=[recent[1]["object_id"]])
+    assert job["status"] == "ready", job
+    assert [item["label"] for item in job["objects"]] == [recent[1]["label"]]
+    result = wait(client, confirm(client, job))
+    assert result["status"] == "complete", result
+    journal = result["result"]
+    assert journal["items"][recent[1]["object_id"]] == "deleted"
+    assert journal["logical_bytes_deleted"] == recent[1]["logical_bytes"]
+    assert isinstance(journal["filesystem_free_bytes_before"], int)
+    assert isinstance(journal["filesystem_free_bytes_after"], int)
+    assert len(store.inspect()["objects"]) == 7
+    assert (current / "part.parquet").read_bytes() == contents
+    assert writer.current_root("daily_bars") == current
+
+    value = store.registry()
+    value["pending"] = {}
+    store._save(value)
+    summary = client.get("/api/storage").json()
+    unmarked = next(o for o in summary["objects"] if o["status"] == "unmarked" and can_pick(o))
+    job = review(client, object_ids=[unmarked["object_id"]])
+    assert job["status"] == "ready", job
+    result = wait(client, confirm(client, job))
+    assert result["status"] == "complete", result
+    assert result["result"]["logical_bytes_deleted"] == unmarked["logical_bytes"]
+    assert unmarked["object_id"] not in {o["object_id"] for o in store.inspect()["objects"]}
+    assert (current / "part.parquet").read_bytes() == contents
+
+
+def can_pick(obj):
+    return not obj["current"] and set(obj["reasons"]) <= {"recent_generation"}
 
 
 @pytest.mark.parametrize(

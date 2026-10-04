@@ -462,16 +462,22 @@ class LifecycleStore:
         report["grace_days"] = GRACE_DAYS
         return report
 
-    def plan(self, *, keep: int = 5, phase: str = "mark") -> dict:
-        from cnequity.storage.lifecycle.purge import prepare, unfinished
+    def plan(
+        self, *, keep: int = 5, phase: str = "mark", selected_ids: list[str] | None = None
+    ) -> dict:
+        from cnequity.storage.lifecycle.purge import prepare, prepare_selected, unfinished
 
         if phase not in ("mark", "purge"):
             raise LifecycleError("Invalid lifecycle plan phase")
+        if selected_ids is not None and phase != "purge":
+            raise LifecycleError("手动选择只能用于删除。")
         with lake_mutation_lock(self.meta):
             if unfinished(self):
                 raise LifecycleError("Resume unfinished purge before creating another plan")
             report = self._plan(keep)
-            if phase == "purge":
+            if selected_ids is not None:
+                report = prepare_selected(self, report, selected_ids)
+            elif phase == "purge":
                 report = prepare(self, report)
             report["phase"] = phase
             report["created_at"] = datetime.now(timezone.utc).isoformat()

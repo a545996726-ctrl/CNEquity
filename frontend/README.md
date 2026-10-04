@@ -13,6 +13,8 @@ the trade this directory exists to make:
 - `pip install cnequity` needs no node. The bundle ships in the wheel.
 - Only a contributor changing the dashboard needs npm, and only to re-run
   `npm run build` before committing.
+- `npm test` runs the operations-page regression tests on Linux, macOS and
+  Windows without requiring a browser.
 - CI runs `npm run check`, which rebuilds and fails if the committed assets do
   not match the source — so generated JavaScript and CSS cannot drift.
 

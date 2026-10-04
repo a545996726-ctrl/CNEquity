@@ -329,8 +329,7 @@ class Config:
     # midnight. A failover to the backup hosts is what spread the 2026-09 ban.
     eastmoney_push2_breaker: bool = True
     # Hard cap on push2 requests per local day, across processes; 0 = no cap.
-    # A normal day needs ~100 (one ~60-page full-market sweep, the ETF and ST
-    # boards, sector boards, probes).
+    # Size a deployment from its own ledger, not from another lake's counts.
     eastmoney_push2_daily_budget: int = 150
     # Serve every full-market clist caller (instruments list_date, valuation,
     # fund_flow, the clist bar fallback) from one union-field sweep per
@@ -341,7 +340,7 @@ class Config:
     # once on "busy" through every backoff. It serves most EastMoney datasets.
     eastmoney_datacenter_breaker: bool = True
     eastmoney_datacenter_breaker_strikes: int = 3
-    # Requests per local day; 0 counts them (meta/state/eastmoney_guard.json)
+    # Requests per local day; 0 counts them (meta/rate_limits/eastmoney_guard.json)
     # without a cap. Set a cap from measured usage, not a guess: backfills of the
     # large reports legitimately need thousands.
     eastmoney_datacenter_daily_budget: int = 0
@@ -648,6 +647,11 @@ def _optional_date(value) -> date | None:
     return date.fromisoformat(str(value))
 
 
+def push2_paused_by_env() -> bool:
+    """Whether ``CNE_PUSH2_PAUSED`` forces push2 off, ahead of the config file."""
+    return os.environ.get("CNE_PUSH2_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_config(path: str | Path) -> Config:
     config_path = Path(path).expanduser().resolve()
     with open(config_path, "rb") as f:
@@ -814,7 +818,7 @@ def load_config(path: str | Path) -> Config:
     source_concurrency.setdefault("sw", 1)
     source_concurrency.setdefault("cni", 1)
     # The scheduler's late stale-only pass sets this so it never touches push2.
-    if os.environ.get("CNE_PUSH2_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if push2_paused_by_env():
         eastmoney_push2_paused = True
 
     daily_waves: list[WaveConfig] = []

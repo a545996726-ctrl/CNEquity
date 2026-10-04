@@ -6,9 +6,12 @@ remote data, and MCP live mode is separately opt-in.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
+import socket
 import sys
+from pathlib import Path
 
 import click
 
@@ -22,26 +25,120 @@ from cnequity.query.on_demand import OnDemandService
 from cnequity.query.views import ensure_duckdb_views
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+# macOS resolves localhost to ::1 before 127.0.0.1, and a browser does not
+# fall back when that first address refuses the connection. Binding only the
+# IPv4 loopback makes http://localhost:<port>/ look like the panel is down.
+_LOOPBACK_FAMILIES = (
+    (socket.AF_INET, "127.0.0.1"),
+    (socket.AF_INET6, "::1"),
+)
+
+
+def _address_in_use(exc: OSError) -> bool:
+    if exc.errno == errno.EADDRINUSE:
+        return True
+    return getattr(exc, "winerror", None) == 10048
+
+
+def bind_loopback(port: int) -> list[socket.socket]:
+    """Listen on every loopback family this machine has.
+
+    The sockets are already listening, so a browser can connect while the
+    dashboard app is still being built. The kernel queues that connection
+    until uvicorn accepts it, instead of answering with connection refused.
+    """
+    bound: list[socket.socket] = []
+    chosen = port
+    try:
+        for family, address in _LOOPBACK_FAMILIES:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                if family is socket.AF_INET6:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((address, chosen))
+                sock.listen(2048)
+                sock.set_inheritable(True)
+            except OSError as exc:
+                sock.close()
+                if _address_in_use(exc):
+                    raise click.ClickException(
+                        f"端口 {chosen or port} 已被占用，面板没有启动。"
+                        "先停掉占用这个端口的进程，再运行 cne serve。"
+                    ) from exc
+                continue
+            chosen = sock.getsockname()[1]
+            bound.append(sock)
+    except Exception:
+        for sock in bound:
+            sock.close()
+        raise
+    if not bound:
+        raise click.ClickException("这台机器没有可用的回环地址，面板没有启动。")
+    return bound
+
+
+def _panel_url(sockets: list[socket.socket], token: str | None) -> str:
+    """One loopback URL. localhost is the name browsers try first."""
+    suffix = f"?token={token}" if token else ""
+    port = sockets[0].getsockname()[1]
+    names = [
+        "localhost" if sock.getsockname()[0] == "::1" else sock.getsockname()[0] for sock in sockets
+    ]
+    name = "localhost" if "localhost" in names else names[0]
+    return f"http://{name}:{port}/{suffix}"
+
+
+def _run_server(app, host: str, port: int, sockets: list[socket.socket] | None) -> None:
+    import uvicorn
+
+    if sockets is not None:
+        uvicorn.Server(uvicorn.Config(app, log_level="info")).run(sockets=sockets)
+        return
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 @cli.command()
 @config_option
-@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="回环地址会同时监听 127.0.0.1 和 localhost。非回环地址必须配 --token。",
+)
 @click.option("--port", default=8787, show_default=True)
 @click.option(
     "--token",
     default=None,
     help="要求这个 bearer token（或 ?token=）。--host 不是回环地址时必须设置。",
 )
-def serve(config_path: str, host: str, port: int, token: str | None):
-    """启动数据湖面板；存储清理须在运维页逐次确认。
+@click.option(
+    "--read-only",
+    is_flag=True,
+    help="只浏览。不注册操作页和存储清理的写入口。",
+)
+@click.option(
+    "--allow-remote-ops",
+    is_flag=True,
+    help="非回环地址上也可以从面板发起取数。默认远程只能浏览和做存储清理；令牌在网址里，局域网又是明文。",
+)
+def serve(
+    config_path: str,
+    host: str,
+    port: int,
+    token: str | None,
+    read_only: bool,
+    allow_remote_ops: bool,
+):
+    """启动数据湖面板。回环地址上可以从页面发起取数和日更。
 
     \b
-    查看覆盖、新鲜度和来源；存储运维页检查并确认已到期版本和试验清理。
-    页面浏览不会自动删除，采集和重试仍通过 CLI 执行。
+    查看覆盖、新鲜度和来源；操作页按白名单启动初始化、日更、回填和巡检；
+    取数设置预览后写回配置，不启动取数；
+    存储运维页检查并确认已到期版本和试验清理。``--read-only`` 关掉这些写入口。
+    非回环地址必须带 ``--token``。远程默认不能发起取数，除非同时给 ``--allow-remote-ops``。
+    回环地址同时接受 127.0.0.1 和 localhost。
     """
-    import uvicorn
-
     from cnequity.serve.app import create_app
 
     # Checked before the config is even loaded: a typo in --config must not
@@ -53,15 +150,68 @@ def serve(config_path: str, host: str, port: int, token: str | None):
             f"--host {host} 会把面板暴露到本机之外；"
             "请用 --token 要求令牌，或者把 --host 留在 127.0.0.1。"
         )
+    if allow_remote_ops and host in _LOOPBACK:
+        allow_remote_ops = False
 
-    cfg = _cfg(config_path)
-    click.echo(f"数据湖：  {cfg.data_root}")
-    click.echo(f"面板：    http://{host}:{port}/" + (f"?token={token}" if token else ""))
-    click.echo(f"API 文档：http://{host}:{port}/api/docs")
-    click.echo(
-        f"源健康：  http://{host}:{port}/source-health" + (f"?token={token}" if token else "")
+    ctx = click.get_current_context()
+    config_was_default = (
+        ctx.get_parameter_source("config_path") is click.core.ParameterSource.DEFAULT
     )
-    uvicorn.run(create_app(cfg, token=token), host=host, port=port, log_level="info")
+    config_file = Path(config_path).expanduser()
+    setup = config_was_default and not config_file.exists()
+    if setup and host not in _LOOPBACK:
+        raise click.ClickException("首次配置只能在本机打开，请把 --host 留在 127.0.0.1。")
+
+    cfg = None if setup else _cfg(config_path)
+    if read_only:
+        mode = "只读（--read-only）"
+    elif setup:
+        mode = "首次配置"
+    elif host not in _LOOPBACK and not allow_remote_ops:
+        mode = "远程浏览（取数未开启；存储清理仍可用）"
+    else:
+        mode = "可从面板发起取数和日更"
+    sockets: list[socket.socket] | None = None
+    try:
+        if host in _LOOPBACK:
+            sockets = bind_loopback(port)
+            port = sockets[0].getsockname()[1]
+        if cfg is not None:
+            click.echo(f"数据湖：  {cfg.data_root}")
+        else:
+            click.echo(f"还没有配置文件 {config_file}，面板进入首次配置。")
+        if sockets is not None:
+            url = _panel_url(sockets, token)
+            click.echo(f"面板：    {url}")
+            primary = url.split("?", 1)[0].rstrip("/")
+        else:
+            suffix = f"?token={token}" if token else ""
+            primary = f"http://{host}:{port}"
+            click.echo(f"面板：    {primary}/{suffix}")
+        click.echo(f"API 文档：{primary}/api/docs")
+        if not setup:
+            query = f"?token={token}" if token else ""
+            click.echo(f"源健康：  {primary}/source-health{query}")
+        click.echo(f"模式：    {mode}")
+        _run_server(
+            create_app(
+                cfg,
+                token=token,
+                read_only=read_only,
+                allow_remote_ops=allow_remote_ops,
+                setup=setup,
+                config_path=config_file,
+            ),
+            host,
+            port,
+            sockets,
+        )
+    finally:
+        for sock in sockets or []:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 @cli.command()
@@ -140,7 +290,7 @@ def mcp_cmd(config_path: str, live: bool):
     不是某一家厂商专有的 Claude 集成。
 
     \b
-    MCP 工具只读，不提供 serve 的网页确认清理入口。这些工具只查询湖；采集仍然留在 CLI 上，由人来跑。
+    MCP 工具只读，不提供 serve 的操作页和网页确认清理。这些工具只查询湖；采集从 CLI 或 serve 的操作页发起。
     """
 
     from cnequity.mcp_server import serve_stdio

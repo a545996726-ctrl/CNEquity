@@ -70,6 +70,54 @@ class _Cached:
     at: float
 
 
+# Statuses the runs list may filter on. Anything else is a typo, not a quiet empty page.
+RUN_STATUSES = frozenset(
+    {
+        "running",
+        "success",
+        "failed",
+        "degraded",
+        "warning",
+        "interrupted",
+        "skipped",
+        "skipped_non_trading_day",
+    }
+)
+# The runs page "needs attention" count. A later attempt of the same job
+# replaces an older one, so only the latest non-skip run of each scope can
+# still be open, and only when it is one of these.
+_OPEN_ATTENTION_STATUSES = ("failed", "degraded", "warning", "interrupted")
+# A skip is not an attempt. It must not hide the failure that came before it.
+_NON_ATTEMPT_STATUSES = ("skipped", "skipped_non_trading_day")
+# These job names are shared across datasets. The first planned step is the
+# scope, so a later backfill of one dataset does not close another.
+_STEP_SCOPED_JOBS = ("backfill", "derivatives-rebuild")
+# Batch rows that still need an operator. Success (including a recovered
+# attempt that kept its error text), superseded, and stale are closed.
+_ACTIONABLE_BATCH_STATUSES = ("failed", "warning", "degraded", "interrupted", "blocked")
+
+
+def _launch_id(metadata_json: str | None) -> str | None:
+    if not metadata_json:
+        return None
+    try:
+        launch = json.loads(metadata_json).get("launch") or {}
+    except (TypeError, ValueError):
+        return None
+    ident = launch.get("id")
+    return ident if isinstance(ident, str) else None
+
+
+def _failure_line(message: str) -> str:
+    """The reason itself, without the HTTP client's documentation trailer."""
+    line = str(message).splitlines()[0].strip()
+    trailer = " For more information check:"
+    cut = line.find(trailer)
+    if cut != -1:
+        line = line[:cut].rstrip()
+    return line
+
+
 def _jsonable(value: Any) -> Any:
     """Cell values as JSON, without inventing a type the column does not have."""
     if isinstance(value, (datetime, date)):
@@ -123,6 +171,7 @@ class LakeView:
         self.config = config
         self._lock = threading.Lock()
         self._cache: dict[str, _Cached] = {}
+        self._inflight: dict[str, threading.Event] = {}
         self._refresh_lock = threading.Lock()
         self._refreshing = False
         self.maintenance_gate = None
@@ -135,11 +184,34 @@ class LakeView:
             hit = self._cache.get(key)
             if hit is not None and now - hit.at < _CACHE_TTL_SECONDS:
                 return hit.value
-        # Built outside the lock: two concurrent misses do the work twice, which
-        # is cheaper than serialising every request behind one directory walk.
-        value = build()
+            event = self._inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                self._inflight[key] = event
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            # The overview fires health, tiers, datasets and the heatmap
+            # together. They share this catalog; a second walk would just
+            # queue behind the same disks.
+            event.wait()
+            with self._lock:
+                hit = self._cache.get(key)
+            if hit is not None and time.monotonic() - hit.at < _CACHE_TTL_SECONDS:
+                return hit.value
+            return self._cached(key, build)
+        try:
+            value = build()
+        except BaseException:
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()
+            raise
         with self._lock:
             self._cache[key] = _Cached(value, time.monotonic())
+            self._inflight.pop(key, None)
+        event.set()
         return value
 
     def invalidate(self) -> None:
@@ -451,20 +523,41 @@ class LakeView:
             "unit": spec.partition_granularity,
         }
 
-    def _commands(self, spec, freshness: str) -> list[dict]:
-        """What to run, and why. The dashboard names the fix; it does not run it."""
+    def _commands(self, spec, freshness: str, gaps: dict | None = None) -> list[dict]:
+        """What to run, and why. ``op`` is set only when the operations page can start it."""
+        from cnequity.serve.ops.catalog import DERIVE_NAMES, backfill_datasets
+
         name = spec.name
         out: list[dict] = []
         if spec.layer == "derived":
-            out.append({"cmd": f"cne derive {name}", "why": "由 curated 重算"})
-        elif spec.backfill_source:
-            out.append(
-                {"cmd": f"cne backfill {name}", "why": f"专用历史源：{spec.backfill_source}"}
+            command = {"cmd": f"cne derive {name}", "why": "由 curated 重算"}
+            if name in DERIVE_NAMES:
+                command["op"] = "derive.run"
+                command["params"] = {"name": name}
+            out.append(command)
+        elif spec.backfill_source or spec.fetch_semantics == "by_date":
+            why = (
+                f"专用历史源：{spec.backfill_source}" if spec.backfill_source else "按日期回补缺口"
             )
-        elif spec.fetch_semantics == "by_date":
-            out.append({"cmd": f"cne backfill {name}", "why": "按日期回补缺口"})
+            command = {"cmd": f"cne backfill {name}", "why": why}
+            if name in backfill_datasets(self.config):
+                params: dict = {"dataset": name}
+                missing = (gaps or {}).get("missing") or []
+                if (gaps or {}).get("unit") == "day" and missing and gaps["total"] <= len(missing):
+                    params["start"] = missing[0]
+                    params["end"] = missing[-1]
+                command["op"] = "backfill.run"
+                command["params"] = params
+            out.append(command)
         if freshness == "stale":
-            out.append({"cmd": "cne status", "why": "查看最近 run，再 cne run retry --run-id"})
+            out.append(
+                {
+                    "cmd": "cne run daily --stale-only",
+                    "why": "重抓仍然落后的数据集",
+                    "op": "daily.stale",
+                    "params": {},
+                }
+            )
         out.append({"cmd": f"cne stats show --dataset {name}", "why": "逐分区行数与体积"})
         return out
 
@@ -625,14 +718,165 @@ class LakeView:
             if conn is not None:
                 conn.close()
 
-    def runs(self, *, limit: int = 40) -> list[dict]:
-        """Recent runs, newest first, with their batch tally."""
-        runs = self._manifest_rows(
-            """SELECT run_id, job_name, status, started_at, finished_at,
-                      rows_read, rows_written, error_message
-               FROM ingestion_runs ORDER BY started_at DESC LIMIT ?""",
-            (limit,),
+    def runs(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        statuses: tuple[str, ...] | None = None,
+        open_only: bool = False,
+    ) -> tuple[int, list[dict], int | None]:
+        """One page of runs, newest first, plus the count of matching runs.
+
+        The manifest keeps the full history. The page is only a window: callers
+        walk it with ``offset`` instead of pretending the newest slice is all
+        there is. ``statuses`` limits both the page and the count; omit it to
+        count every run.
+
+        ``open_only`` is the runs-page attention count. It keeps the latest
+        attempt of each job that is still failed, degraded, or interrupted.
+        An older failure is not counted once a later attempt of that job has
+        succeeded, is running, or has replaced it. A skip does not count as
+        that later attempt. An init whose missing steps a later run completed
+        is closed too. The third value is how many of those open runs are a
+        failed ``daily:*`` group, which is what ``cne run retry --failed-groups``
+        would pick up; it is ``None`` for an ordinary list.
+        """
+        if open_only:
+            chosen = self._open_attention_runs()
+            if statuses:
+                allowed = set(statuses)
+                chosen = [row for row in chosen if row["status"] in allowed]
+            failed_daily = sum(
+                1
+                for row in chosen
+                if row["status"] == "failed" and str(row["job_name"]).startswith("daily:")
+            )
+            page = chosen[offset : offset + limit]
+            rows = self._decorate_runs(self._runs_by_id([row["run_id"] for row in page]))
+            return len(chosen), rows, failed_daily
+        chosen = tuple(dict.fromkeys(statuses or ()))
+        where = ""
+        bound: tuple[str, ...] = ()
+        if chosen:
+            where = f" WHERE status IN ({','.join('?' * len(chosen))})"
+            bound = chosen
+        counted = self._manifest_rows(
+            f"SELECT COUNT(*) AS n FROM ingestion_runs{where}",
+            bound,
         )
+        total = int(counted[0]["n"]) if counted else 0
+        runs = self._manifest_rows(
+            f"""SELECT run_id, job_name, status, started_at, finished_at,
+                      rows_read, rows_written, error_message, metadata_json
+               FROM ingestion_runs{where} ORDER BY started_at DESC LIMIT ? OFFSET ?""",
+            (*bound, limit, offset),
+        )
+        return total, self._decorate_runs(runs), None
+
+    def _open_attention_runs(self) -> list[dict]:
+        """Latest still-open attempt of each job, newest first."""
+        ignored = ",".join("?" * len(_NON_ATTEMPT_STATUSES))
+        scoped = ",".join("?" * len(_STEP_SCOPED_JOBS))
+        attention = ",".join("?" * len(_OPEN_ATTENTION_STATUSES))
+        rows = self._manifest_rows(
+            f"""
+            WITH scoped AS (
+                SELECT run_id, job_name, status, started_at, metadata_json,
+                       CASE
+                           WHEN job_name IN ({scoped})
+                           THEN COALESCE(json_extract(metadata_json, '$.planned_steps[0]'), '')
+                           ELSE ''
+                       END AS scope_key
+                FROM ingestion_runs
+                WHERE status NOT IN ({ignored})
+            ),
+            ranked AS (
+                SELECT run_id, job_name, status, started_at, metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY job_name, scope_key
+                           ORDER BY started_at DESC, run_id DESC
+                       ) AS rn
+                FROM scoped
+            )
+            SELECT run_id, job_name, status, started_at, metadata_json
+            FROM ranked
+            WHERE rn = 1 AND status IN ({attention})
+            ORDER BY started_at DESC, run_id DESC
+            """,
+            (*_STEP_SCOPED_JOBS, *_NON_ATTEMPT_STATUSES, *_OPEN_ATTENTION_STATUSES),
+        )
+        return [
+            row for row in rows if row["job_name"] != "init" or self._init_failure_still_open(row)
+        ]
+
+    def _init_failure_still_open(self, run: dict) -> bool:
+        """Whether this init still owes work a later run has not already done.
+
+        Same coverage question as ``cne status``: a step the init never
+        finished, but some later run completed, is not an open failure.
+        """
+        from cnequity.orchestrator.init_phases import (
+            expected_steps,
+            init_run_complete,
+            step_succeeded,
+        )
+
+        try:
+            meta = json.loads(run.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            return True
+        if not isinstance(meta, dict):
+            return True
+        phases = [phase for phase in meta.get("phases") or [] if isinstance(phase, str)]
+        if not phases:
+            return True
+        batches = self._manifest_rows(
+            "SELECT dataset, status FROM ingestion_batches WHERE run_id = ?",
+            (run["run_id"],),
+        )
+        outcomes = meta.get("step_outcomes") or {}
+        if isinstance(outcomes, dict):
+            batches = list(batches) + [
+                {"dataset": name, "logical_step": True, **outcome}
+                for name, outcome in outcomes.items()
+                if isinstance(outcome, dict)
+            ]
+        if init_run_complete(phases, batches):
+            return True
+        missing = [step for step in expected_steps(phases) if not step_succeeded(batches, step)]
+        if not missing:
+            return True
+        return not all(
+            self._dataset_succeeded_after(step, str(run.get("started_at") or ""))
+            for step in missing
+        )
+
+    def _dataset_succeeded_after(self, dataset: str, started_at: str) -> bool:
+        rows = self._manifest_rows(
+            """
+            SELECT 1 AS ok FROM ingestion_batches b
+            JOIN ingestion_runs r ON r.run_id = b.run_id
+            WHERE b.dataset = ? AND b.status = 'success' AND r.started_at > ?
+            LIMIT 1
+            """,
+            (dataset, started_at),
+        )
+        return bool(rows)
+
+    def _runs_by_id(self, run_ids: list[str]) -> list[dict]:
+        if not run_ids:
+            return []
+        rows = self._manifest_rows(
+            f"""SELECT run_id, job_name, status, started_at, finished_at,
+                      rows_read, rows_written, error_message, metadata_json
+               FROM ingestion_runs WHERE run_id IN ({",".join("?" * len(run_ids))})""",
+            tuple(run_ids),
+        )
+        by_id = {row["run_id"]: row for row in rows}
+        return [by_id[run_id] for run_id in run_ids if run_id in by_id]
+
+    def _decorate_runs(self, runs: list[dict]) -> list[dict]:
         if not runs:
             return []
         tally = self._manifest_rows(
@@ -643,12 +887,57 @@ class LakeView:
         by_run: dict[str, dict[str, int]] = {}
         for row in tally:
             by_run.setdefault(row["run_id"], {})[row["status"]] = int(row["n"])
+        failures = self._run_failures(tuple(run["run_id"] for run in runs))
         for run in runs:
             counts = by_run.get(run["run_id"], {})
             run["batches"] = sum(counts.values())
             run["batch_status"] = counts
             run["datasets"] = []
+            run["failures"] = failures.get(run["run_id"], [])
+            run["launch_id"] = _launch_id(run.pop("metadata_json", None))
+            run["has_staging"] = self._has_staging(run["run_id"])
         return runs
+
+    def _run_failures(self, run_ids: tuple[str, ...]) -> dict[str, list[dict]]:
+        """Batch errors for the runs list.
+
+        The run row often says only ``one or more core steps failed``. The
+        sentence that names the host, status and page lives on the batch, and
+        a degraded run stores it there with no run-level message at all.
+        A batch that was retried to success, superseded by that retry, or
+        marked stale is no longer something to handle, so it is not counted.
+        """
+        if not run_ids:
+            return {}
+        actionable = ",".join("?" * len(_ACTIONABLE_BATCH_STATUSES))
+        rows = self._manifest_rows(
+            f"""SELECT run_id, dataset, status, error_message
+               FROM ingestion_batches
+               WHERE run_id IN ({",".join("?" * len(run_ids))})
+                 AND status IN ({actionable})
+                 AND error_message IS NOT NULL AND TRIM(error_message) != ''
+               ORDER BY COALESCE(started_at, '')""",
+            (*run_ids, *_ACTIONABLE_BATCH_STATUSES),
+        )
+        grouped: dict[str, list[dict]] = {}
+        seen: dict[str, set[tuple[str, str]]] = {}
+        for row in rows:
+            text = _failure_line(row["error_message"])
+            if not text:
+                continue
+            key = (str(row["dataset"]), text)
+            bag = seen.setdefault(row["run_id"], set())
+            if key in bag:
+                continue
+            bag.add(key)
+            grouped.setdefault(row["run_id"], []).append(
+                {
+                    "dataset": row["dataset"],
+                    "status": row["status"],
+                    "error_message": text,
+                }
+            )
+        return grouped
 
     def run_detail(self, run_id: str) -> dict | None:
         """One run and every batch in it, with a stalled flag per batch.
@@ -693,7 +982,16 @@ class LakeView:
             batch["stalled"] = silent >= threshold
         run["batches"] = batches
         run["stale_after_seconds"] = threshold
+        run["launch_id"] = _launch_id(run.get("metadata_json"))
+        run["has_staging"] = self._has_staging(run_id)
         return run
+
+    def _has_staging(self, run_id: str) -> bool:
+        staging = self.config.staging_root / run_id
+        try:
+            return staging.is_dir() and any(staging.iterdir())
+        except OSError:
+            return False
 
     def run_fingerprint(self, run_id: str) -> str:
         """Cheap value that changes whenever the run's batches do.
@@ -776,9 +1074,9 @@ class LakeView:
             # The per-partition series is not inlined: daily_bars alone is 6,202
             # rows, and the detail payload is loaded on every tab switch while
             # the series is only needed for one chart. `/partitions` serves it.
-            "gaps": self._gaps(spec, parts),
+            "gaps": (gaps := self._gaps(spec, parts)),
             "findings": mine,
-            "commands": self._commands(spec, row["freshness"]),
+            "commands": self._commands(spec, row["freshness"], gaps),
             "batches": self.recent_batches(dataset),
         }
 

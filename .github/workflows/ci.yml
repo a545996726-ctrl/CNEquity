@@ -154,6 +154,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e . --group dev
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Check dashboard on Windows
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run check
+
       - name: Test
         # bash: PowerShell has been seen to surface leftover process-pool
         # atexit as exit 1 after a fully green pytest session.

@@ -1,0 +1,223 @@
+"""Job records on disk. The serve process creates one file and then only reads it.
+
+The job process is the only later writer. A cancel request is a sibling file,
+so the two never rewrite the same bytes. A record left at ``running`` after
+the slot lock is gone is reported as interrupted or lost without being rewritten:
+the process that would have written the ending is already dead.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from cnequity.file_lock import is_locked
+from cnequity.orchestrator.scheduler_lock import pid_alive
+
+_JOB_ID = re.compile(r"[0-9a-f]{32}")
+ACTIVE = frozenset({"starting", "running"})
+TERMINAL = frozenset(
+    {
+        "rejected",
+        "succeeded",
+        "partial",
+        "failed",
+        "skipped",
+        "findings",
+        "error",
+        "interrupted",
+        "complete",
+        "lost",
+    }
+)
+LABELS = {
+    "starting": "启动中",
+    "running": "运行中",
+    "rejected": "已拒绝",
+    "succeeded": "成功",
+    "partial": "部分交付",
+    "failed": "失败",
+    "skipped": "已跳过",
+    "findings": "未通过",
+    "error": "执行出错",
+    "interrupted": "已中断",
+    "complete": "完成",
+    "lost": "已终止",
+}
+WRITE_CLASSES = frozenset({"ingest-daily", "ingest-events", "lake-write", "init"})
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _setup_root() -> Path:
+    root = Path(tempfile.gettempdir()) / "cnequity-serve" / str(os.getpid())
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def jobs_dir(config) -> Path:
+    if config is None:
+        path = _setup_root() / "jobs"
+    else:
+        path = Path(config.meta_root) / "serve_jobs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def logs_dir(config) -> Path:
+    if config is None:
+        path = _setup_root() / "logs"
+    else:
+        path = Path(config.data_root) / "logs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def slot_path(config) -> Path:
+    """The one panel-wide lock. A config-less setup keeps it beside its own jobs."""
+    if config is None:
+        return _setup_root() / "serve_ops.lock"
+    return Path(config.meta_root) / "locks" / "serve_ops.lock"
+
+
+def _check_id(job_id: str) -> str:
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        raise KeyError(job_id)
+    return job_id
+
+
+def record_path(config, job_id: str) -> Path:
+    return jobs_dir(config) / f"{_check_id(job_id)}.json"
+
+
+def cancel_path(config, job_id: str) -> Path:
+    return jobs_dir(config) / f"{_check_id(job_id)}.cancel"
+
+
+def atomic_write(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_record(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def update_record(path: Path, **changes: Any) -> dict:
+    current = read_record(path)
+    current.update(changes)
+    atomic_write(path, current)
+    return current
+
+
+def list_records(config) -> list[dict]:
+    directory = jobs_dir(config)
+    records = []
+    for path in directory.glob("*.json"):
+        if path.name.endswith(".tmp"):
+            continue
+        try:
+            records.append(read_record(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+    records.sort(key=lambda record: record.get("created_at") or "", reverse=True)
+    return records
+
+
+def _age_seconds(record: dict) -> float:
+    raw = record.get("created_at")
+    if not raw:
+        return 1e9
+    try:
+        started = datetime.fromisoformat(raw)
+    except ValueError:
+        return 1e9
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds()
+
+
+def live_holder(config) -> dict | None:
+    """The job that currently holds the panel slot, if its record says so."""
+    if not is_locked(slot_path(config)):
+        return None
+    active = [record for record in list_records(config) if record.get("state") in ACTIVE]
+    alive = [record for record in active if record.get("pid") and pid_alive(int(record["pid"]))]
+    pool = alive or [record for record in active if not record.get("pid")]
+    if not pool:
+        return None
+    return max(pool, key=lambda record: record.get("created_at") or "")
+
+
+def effective(config, record: dict) -> dict:
+    """How *record* should be shown. Does not write it back."""
+    state = record.get("state")
+    if state not in ACTIVE:
+        shown = dict(record)
+        shown["label"] = LABELS.get(state, state)
+        return shown
+    holder = live_holder(config)
+    if holder and holder.get("job_id") == record.get("job_id"):
+        shown = dict(record)
+        shown["label"] = LABELS.get(state, state)
+        return shown
+    # The caller may have read "running" just before the child wrote its
+    # ending and released the slot. Re-read before interpreting the unlocked
+    # slot as a crash, or a fast successful command can briefly look lost.
+    try:
+        latest = read_record(record_path(config, record["job_id"]))
+    except (KeyError, OSError, ValueError):
+        pass
+    else:
+        if latest.get("state") in TERMINAL:
+            return effective(config, latest)
+    if state == "starting" and not record.get("pid") and _age_seconds(record) < 15:
+        shown = dict(record)
+        shown["label"] = LABELS["starting"]
+        return shown
+    shown = dict(record)
+    try:
+        cancelled = cancel_path(config, record["job_id"]).exists()
+    except KeyError:
+        cancelled = False
+    shown["state"] = "interrupted" if cancelled else "lost"
+    shown["label"] = LABELS[shown["state"]]
+    shown["finished_at"] = shown.get("finished_at") or _now()
+    if not shown.get("outcome"):
+        shown["outcome"] = {
+            "kind": shown["state"],
+            "message": (
+                "已取消。进程没有自行收尾。"
+                if cancelled
+                else "进程已经不在。若是强制结束，以关联 run 的状态为准。"
+            ),
+        }
+    return shown
+
+
+def public_record(config, record: dict) -> dict:
+    shown = effective(config, record)
+    shown["label"] = LABELS.get(shown.get("state"), shown.get("state"))
+    return shown
+
+
+def purge_blocked_reason(config) -> str | None:
+    """Why a storage purge must wait, or None when the slot is free of writers."""
+    if not is_locked(slot_path(config)):
+        return None
+    holder = live_holder(config)
+    if holder is None:
+        return "面板有任务正在执行，请等它结束后再确认删除。"
+    if holder.get("lock_class") in WRITE_CLASSES:
+        title = holder.get("title") or holder.get("op") or "写入"
+        return f"面板正在执行「{title}」，请等它结束后再确认删除。"
+    return None

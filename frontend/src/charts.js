@@ -10,6 +10,7 @@ import {
   VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import { ds, dsWithCode, getLang, tr } from "./i18n.js";
 
 echarts.use([
   BarChart,
@@ -108,11 +109,11 @@ export function heatmap(el, data) {
   });
 
   const labels = {
-    0: "覆盖区间外",
-    1: "有分区覆盖",
-    2: "缺口（日更 by_date 源真的少了一天）",
-    3: "属其形态的间隔（非日更，或 snapshot 无法诚实补全）",
-    4: "无分区（单文件 merge）",
+    0: tr("覆盖区间外", "Outside the window"),
+    1: tr("有分区覆盖", "Partition present"),
+    2: tr("缺口（日更 by_date 源真的少了一天）", "Gap (a daily by_date source is missing a day)"),
+    3: tr("属其形态的间隔（非日更，或 snapshot 无法诚实补全）", "Expected spacing (not daily, or a snapshot cannot be backfilled)"),
+    4: tr("无分区（单文件 merge）", "No partition (single-file merge)"),
   };
 
   // Show ~90 days at a time however long the window is, so the cells keep a
@@ -123,16 +124,16 @@ export function heatmap(el, data) {
   el.style.height = `${Math.max(220, rows.length * 15 + 90)}px`;
   return mount(el, () => ({
     animation: false,
-    grid: { left: compact() ? 118 : 200, right: compact() ? 8 : 20, top: 10, bottom: 62, containLabel: false },
+    grid: { left: compact() ? 118 : getLang() === "en" ? 210 : 168, right: compact() ? 8 : 20, top: 10, bottom: 62, containLabel: false },
     tooltip: {
       backgroundColor: t.surface,
       borderColor: t.line,
       textStyle: { color: t.ink, fontSize: 12 },
       formatter: (p) => {
         const row = rows[p.value[1]];
-        const cadence = row.cadence_days > 1 ? `<br>容忍 ${row.cadence_days} 天` : "";
-        return `<b>${row.dataset}</b><br>${days[p.value[0]]}<br>${labels[p.value[2]]}`
-          + `<br>粒度 ${row.granularity || "merge"}${cadence}`;
+        const cadence = row.cadence_days > 1 ? `<br>${tr(`容忍 ${row.cadence_days} 天`, `Tolerance ${row.cadence_days} days`)}` : "";
+        return `<b>${dsWithCode(row.dataset)}</b><br>${days[p.value[0]]}<br>${labels[p.value[2]]}`
+          + `<br>${tr("粒度", "Grain")} ${row.granularity || "merge"}${cadence}`;
       },
     },
     xAxis: {
@@ -146,7 +147,7 @@ export function heatmap(el, data) {
     yAxis: {
       type: "category",
       // Rows arrive grouped by tier; the tag keeps the groups visible.
-      data: rows.map((r) => (r.tier ? `${r.tier} ${r.dataset}` : r.dataset)),
+      data: rows.map((r) => (r.tier ? `${r.tier} ${ds(r.dataset)}` : ds(r.dataset))),
       inverse: true,
       axisLine: { show: false },
       axisTick: { show: false },
@@ -290,11 +291,11 @@ export function runGantt(el, detail) {
   const t = tokens();
   const batches = detail.batches.filter((b) => b.started_at);
   if (!batches.length) {
-    el.innerHTML = '<p class="muted">这个 run 还没有 batch 记录。</p>';
+    el.innerHTML = `<p class="muted">${tr("这个 run 还没有 batch 记录。", "This run has no batches yet.")}</p>`;
     return null;
   }
 
-  const lanes = [...new Set(batches.map((b) => b.dataset))].sort();
+  const lanes = [...new Set(batches.map((b) => b.dataset))].sort((a, b) => ds(a).localeCompare(ds(b), getLang() === "en" ? "en" : "zh"));
   const laneIndex = new Map(lanes.map((d, i) => [d, i]));
   const now = Date.now();
   const ms = (s) => (s ? new Date(s).getTime() : null);
@@ -320,7 +321,7 @@ export function runGantt(el, detail) {
   el.style.height = `${Math.max(180, lanes.length * 26 + 80)}px`;
   return mount(el, () => ({
     animation: false,
-    grid: { left: compact() ? 108 : 170, right: compact() ? 8 : 24, top: 12, bottom: 40 },
+    grid: { left: compact() ? 108 : getLang() === "en" ? 190 : 150, right: compact() ? 8 : 24, top: 12, bottom: 40 },
     tooltip: {
       backgroundColor: t.surface,
       borderColor: t.line,
@@ -329,12 +330,12 @@ export function runGantt(el, detail) {
         const b = p.value[3];
         const secs = Math.round((( ms(b.finished_at) ?? now) - ms(b.started_at)) / 1000);
         const lines = [
-          `<b>${b.dataset}</b> · ${b.status}${b.stalled ? " · 静默" : ""}`,
-          `${secs}s${b.finished_at ? "" : "（进行中）"}`,
-          `写入 ${(b.rows_written ?? 0).toLocaleString()} 行`,
+          `<b>${dsWithCode(b.dataset)}</b> · ${b.status}${b.stalled ? tr(" · 静默", " · silent") : ""}`,
+          `${secs}s${b.finished_at ? "" : tr("（进行中）", " (running)")}`,
+          tr(`写入 ${(b.rows_written ?? 0).toLocaleString()} 行`, `${(b.rows_written ?? 0).toLocaleString()} rows written`),
         ];
-        if (b.retry_count) lines.push(`重试 ${b.retry_count} 次`);
-        if (b.window_start) lines.push(`窗口 ${b.window_start} → ${b.window_end}`);
+        if (b.retry_count) lines.push(tr(`重试 ${b.retry_count} 次`, `${b.retry_count} retries`));
+        if (b.window_start) lines.push(tr(`窗口 ${b.window_start} → ${b.window_end}`, `Window ${b.window_start} → ${b.window_end}`));
         if (b.error_message) lines.push(`<span style="opacity:.8">${b.error_message.slice(0, 120)}</span>`);
         return lines.join("<br>");
       },
@@ -347,7 +348,7 @@ export function runGantt(el, detail) {
     },
     yAxis: {
       type: "category",
-      data: lanes,
+      data: lanes.map(ds),
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel: compact()
@@ -395,7 +396,7 @@ const SEVERITY = [
 export function severityTimeline(el, runs) {
   const t = tokens();
   if (!runs.length) {
-    el.innerHTML = '<p class="muted">还没有审计产物。请跑一次 <code>cne audit</code>。</p>';
+    el.innerHTML = `<p class="muted">${tr("还没有审计产物。请跑一次", "No audit output yet. Run")} <code>cne audit</code>.</p>`;
     return null;
   }
   // Oldest first: a timeline that reads right-to-left is a timeline nobody reads.

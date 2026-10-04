@@ -61,11 +61,11 @@ class MaintenanceGate:
 
 
 class StorageMaintenance:
-    def __init__(self, config: Config, *, invalidate=lambda: None):
+    def __init__(self, config: Config, *, invalidate=lambda: None, csrf: str | None = None):
         self.config = config
         self.store = LifecycleStore(config.meta_root)
         self.gate = MaintenanceGate()
-        self.csrf = secrets.token_urlsafe(32)
+        self.csrf = csrf or secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.busy = False
@@ -116,6 +116,7 @@ class StorageMaintenance:
                 {
                     "object_id": obj["object_id"],
                     "kind": "revisions",
+                    "current": bool(obj["current"]),
                     "label": f"{obj['dataset']} · 第 {obj['revision']} 版",
                     "status": status,
                     "logical_bytes": obj["logical_bytes"],
@@ -155,6 +156,7 @@ class StorageMaintenance:
                 {
                     "object_id": oid,
                     "kind": "experiments",
+                    "current": False,
                     "label": Path(obj["path"]).name,
                     "status": status,
                     "logical_bytes": obj.get("logical_bytes", 0),
@@ -255,7 +257,13 @@ class StorageMaintenance:
             raise
         return initial
 
-    def review(self, kind: Kind, phase: Phase, resume_plan_id: str | None = None) -> dict:
+    def review(
+        self,
+        kind: Kind,
+        phase: Phase,
+        resume_plan_id: str | None = None,
+        object_ids: list[str] | None = None,
+    ) -> dict:
         def prepare():
             if resume_plan_id:
                 if phase != "purge" or not any(
@@ -275,6 +283,23 @@ class StorageMaintenance:
                 if plan["phase"] != "purge":
                     raise LifecycleError("无效的恢复计划。")
                 plan = {**plan, "plan_id": resume_plan_id}
+            elif object_ids:
+                if phase != "purge" or resume_plan_id:
+                    raise LifecycleError("手动选择只能用于新的删除，不能和标记或恢复记录一起用。")
+                if len(object_ids) > 200 or len(object_ids) != len(set(object_ids)):
+                    raise LifecycleError("请选择 1 到 200 个不重复的历史版本。")
+                if any(
+                    not oid or len(oid) > 300 or any(ch.isspace() for ch in oid)
+                    for oid in object_ids
+                ):
+                    raise LifecycleError("版本编号无效。")
+                plan = (
+                    self.store.plan(phase="purge", selected_ids=object_ids)
+                    if kind == "revisions"
+                    else ExperimentRetirement(self.store).plan(
+                        phase="purge", selected_ids=object_ids
+                    )
+                )
             else:
                 plan = (
                     self.store.plan(phase=phase)
@@ -325,6 +350,12 @@ class StorageMaintenance:
                 raise LifecycleError("本次没有可执行的对象。")
             if review["phase"] == "purge" and not maintenance:
                 raise LifecycleError("请先确认外部查询、服务、调度和试验写入已停止。")
+            if review["phase"] == "purge":
+                from cnequity.serve.ops.records import purge_blocked_reason
+
+                reason = purge_blocked_reason(self.config)
+                if reason:
+                    raise LifecycleError(reason)
             if self.busy:
                 raise LifecycleError("已有存储操作正在执行。")
             review["_used"] = True

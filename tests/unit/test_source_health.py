@@ -400,6 +400,37 @@ def test_a_corrupt_report_is_skipped_not_fatal(config):
     assert "大陆出口" in body
 
 
+def test_dashboard_does_not_render_the_incident_ledger_as_a_vantage(config):
+    """``incidents.json`` sits beside the reports. Missing vantage used to become
+    an empty ``unknown`` column of 未探测."""
+    _store(config, "cn", _report("cn", {}).to_dict())
+    ledger = config.meta_root / "source_health" / "incidents.json"
+    ledger.write_text(
+        json.dumps(
+            {
+                "format": "cnequity.source-incidents",
+                "version": 1,
+                "threshold": 3,
+                "open_incidents": [],
+                "open_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    body = _serve_client(config).get("/source-health").text
+    assert "大陆出口" in body
+    assert "<b>unknown</b>" not in body
+
+
+def test_incident_ledger_alone_is_not_a_report(config):
+    root = config.meta_root / "source_health"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "incidents.json").write_text("{}", encoding="utf-8")
+    resp = _serve_client(config).get("/source-health")
+    assert resp.status_code == 404
+    assert "cne sources" in resp.text
+
+
 def test_probe_writes_into_the_lake_by_default(config, monkeypatch, tmp_path):
     from click.testing import CliRunner
 

@@ -123,6 +123,33 @@ def prepare(store, report: dict) -> dict:
     return report
 
 
+def explicit_deletable(obj: dict) -> bool:
+    """Operator-chosen history. Current, holds, references and broken receipts stay."""
+    if obj.get("current"):
+        return False
+    return set(obj.get("blocked_reasons") or []) <= {"recent_generation"}
+
+
+def prepare_selected(store, report: dict, object_ids: list[str]) -> dict:
+    """Purge exactly the chosen historical generations, including ones still kept or observing."""
+    if unfinished(store):
+        raise LifecycleError("An unfinished purge must be resumed before creating another plan")
+    if not object_ids or len(object_ids) != len(set(object_ids)):
+        raise LifecycleError("请选择不重复的历史版本。")
+    by_id = {o["object_id"]: o for o in report["objects"]}
+    selected = []
+    for oid in object_ids:
+        obj = by_id.get(oid)
+        if obj is None or not explicit_deletable(obj):
+            raise LifecycleError(f"不能删除 {oid}：它是当前版本，或仍被引用、保留、缺少收据。")
+        verify_content(store, obj, store.meta / obj["path"])
+        selected.append(obj)
+    report["purge_ids"] = [o["object_id"] for o in selected]
+    report["logical_bytes_to_purge"] = sum(o["logical_bytes"] for o in selected)
+    report["explicit_selection"] = True
+    return report
+
+
 def execute(store, plan_id: str, *, maintenance: bool, manifest: Path | None = None) -> dict:
     if not maintenance:
         raise LifecycleError(
@@ -209,6 +236,7 @@ def execute(store, plan_id: str, *, maintenance: bool, manifest: Path | None = N
                 "phase",
                 "purge_ids",
                 "logical_bytes_to_purge",
+                "explicit_selection",
             )
         }
         expected["objects"] = [
@@ -225,8 +253,12 @@ def execute(store, plan_id: str, *, maintenance: bool, manifest: Path | None = N
         if actual != expected:
             raise LifecycleError("Purge plan is stale; protections or contents changed")
         now = datetime.now(timezone.utc)
+        explicit = plan.get("explicit_selection") is True
         for obj in selected:
-            if not eligible(obj, now):
+            if explicit:
+                if not explicit_deletable(obj):
+                    raise LifecycleError(f"不能删除 {obj['object_id']}：保护条件已变化。")
+            elif not eligible(obj, now):
                 raise LifecycleError("Observation period is incomplete or content changed")
             if obj["object_id"] not in removed_from_source:
                 verify_content(store, obj, store.meta / obj["path"])

@@ -34,10 +34,12 @@ class ExperimentRetirement:
     def _unfinished(self) -> list[Path]:
         return unfinished(self.store)
 
-    def _candidates(self, registry: dict) -> list[dict]:
+    def _candidates(self, registry: dict, *, only: set[str] | None = None) -> list[dict]:
         result = []
         for obj in registry["experiments"]:
             oid = obj["object_id"]
+            if only is not None and oid not in only:
+                continue
             source = _absolute(obj["path"])
             if obj.get("status") == "active" or obj.get("references") or oid in registry["holds"]:
                 continue
@@ -90,16 +92,32 @@ class ExperimentRetirement:
             raise LifecycleError("Invalid experiment observation period")
         return datetime.now(timezone.utc) >= after
 
-    def plan(self, *, phase: str = "mark") -> dict:
+    def plan(self, *, phase: str = "mark", selected_ids: list[str] | None = None) -> dict:
         if phase not in {"mark", "purge"}:
             raise LifecycleError("Unknown experiment lifecycle phase")
+        if selected_ids is not None and (
+            phase != "purge" or len(selected_ids) != len(set(selected_ids))
+        ):
+            raise LifecycleError("手动选择只能用于删除，且不能重复。")
         with lake_mutation_lock(self.store.meta, timeout=30):
             if self._unfinished():
                 raise LifecycleError("Resume unfinished experiment purge first")
             registry = self.store.registry(required=True)
             self._references(registry)
-            objects = self._candidates(registry)
-            if phase == "purge":
+            explicit = selected_ids is not None
+            objects = self._candidates(registry, only=set(selected_ids) if explicit else None)
+            if explicit:
+                by_id = {o["object_id"]: o for o in objects}
+                picked = []
+                for oid in selected_ids:
+                    obj = by_id.get(oid)
+                    if obj is None:
+                        raise LifecycleError(
+                            f"不能删除试验 {oid}：仍在使用、被引用、被保留，或还没有可核对的归档。"
+                        )
+                    picked.append(obj)
+                objects = picked
+            elif phase == "purge":
                 objects = [
                     o for o in objects if self._mature(o, registry.get("experiment_pending", {}))
                 ]
@@ -113,6 +131,8 @@ class ExperimentRetirement:
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "logical_bytes_selected": sum(o["logical_bytes"] for o in objects),
             }
+            if explicit:
+                plan["explicit_selection"] = True
             plan_id = digest(plan)
             path = self.store.root / "experiment-plans" / f"{plan_id}.json"
             _absolute(path)
@@ -208,7 +228,9 @@ class ExperimentRetirement:
         }
         with ExitStack() as locks:
             for obj in plan["objects"]:
-                if not self._mature(obj, registry.get("experiment_pending", {})):
+                if not plan.get("explicit_selection") and not self._mature(
+                    obj, registry.get("experiment_pending", {})
+                ):
                     raise LifecycleError("Experiment observation period has not elapsed")
                 self.artifacts.verify(obj["artifact_id"])
                 source = _absolute(obj["path"])

@@ -1,13 +1,15 @@
-"""Lake dashboard with an explicit browser-confirmed storage maintenance flow.
+"""Lake dashboard.
 
-Data views remain read-only. Storage cleanup alone supports reviewed POSTs,
-with same-origin CSRF checks, expiring approval and lifecycle revalidation.
-Stats refresh remains a background cache write and is drained before cleanup.
+Data views stay read-only. Storage cleanup, the whitelisted operations page,
+and the lake switches are the writes, all behind same-origin checks.
+``--read-only`` registers none of them. A server started without a config file
+answers only the setup wizard until ``activate_lake`` installs one.
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -18,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from cnequity.config import Config
-from cnequity.serve.lake import LakeView
+from cnequity.serve.lake import RUN_STATUSES, LakeView
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +173,8 @@ class Gaps(BaseModel):
 class Command(BaseModel):
     cmd: str
     why: str
+    op: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class Batch(BaseModel):
@@ -231,17 +235,48 @@ class RowPage(BaseModel):
     limit: int
 
 
+class RunFailure(BaseModel):
+    dataset: str
+    status: str
+    error_message: str = Field(
+        description="The batch's own error, first line only. This is the reason "
+        "a failed or degraded run stopped, not the run-level summary."
+    )
+
+
 class RunSummary(BaseModel):
     run_id: str
     job_name: str
     status: str
     started_at: str
     finished_at: str | None
+    launch_id: str | None = None
     rows_read: int | None
     rows_written: int | None
     error_message: str | None
     batches: int
     batch_status: dict[str, int]
+    failures: list[RunFailure] = Field(
+        default_factory=list,
+        description="Distinct batch failures that still need action. A batch already "
+        "retried to success, superseded, or marked stale is omitted.",
+    )
+    has_staging: bool = False
+
+
+class RunPage(BaseModel):
+    total: int = Field(
+        description="Runs matching the status filter, or every run when the filter is omitted. "
+        "With open=true, only runs that still need attention."
+    )
+    offset: int
+    limit: int
+    runs: list[RunSummary]
+    failed_daily_groups: int | None = Field(
+        default=None,
+        description="When open=true, daily schedule groups whose latest attempt failed. "
+        "Null on an ordinary list.",
+    )
 
 
 class RunBatch(BaseModel):
@@ -276,6 +311,8 @@ class RunDetail(BaseModel):
     metadata_json: str | None
     stale_after_seconds: float
     batches: list[RunBatch]
+    launch_id: str | None = None
+    has_staging: bool = False
 
 
 class FindingsRun(BaseModel):
@@ -368,7 +405,55 @@ class Heatmap(BaseModel):
 
 
 def get_view(request: Request) -> LakeView:
-    return request.app.state.view
+    view = request.app.state.view
+    if view is None:
+        raise HTTPException(409, "尚未配置")
+    return view
+
+
+def activate_lake(app: FastAPI, config: Config) -> None:
+    """Switch a setup-mode server onto a config it just wrote.
+
+    Routes read ``app.state`` on each request, so this does not require a
+    restart and does not recapture a closed-over maintenance object.
+    """
+    from cnequity.serve.storage import StorageMaintenance
+
+    view = LakeView(config)
+    maintenance = StorageMaintenance(config, invalidate=view.invalidate, csrf=app.state.csrf)
+    view.maintenance_gate = maintenance.gate
+    app.state.config = config
+    app.state.view = view
+    app.state.storage_maintenance = maintenance
+    app.state.setup = False
+    if config.config_path is not None:
+        app.state.config_path = Path(config.config_path).resolve()
+    app.state.ops.bind(config)
+
+
+def reload_lake_config(app: FastAPI) -> Config:
+    """Point the running server at the config file after a settings write."""
+    from cnequity.config import load_config
+    from cnequity.serve.ops.catalog import OpsError
+
+    path = app.state.config_path
+    if path is None:
+        raise OpsError("没有可写入的配置文件。")
+    try:
+        config = load_config(path)
+    except (OSError, ValueError) as exc:
+        raise OpsError("配置已写入，但服务没能重新加载，请重启 serve。") from exc
+    app.state.config = config
+    if app.state.view is not None:
+        app.state.view.config = config
+    if app.state.storage_maintenance is not None:
+        app.state.storage_maintenance.config = config
+    if config.config_path is not None:
+        app.state.config_path = Path(config.config_path).resolve()
+    app.state.ops.bind(config)
+    app.state.schedule_service = None
+    app.state.settings_service = None
+    return config
 
 
 # Annotated rather than a `= Depends(...)` default: the same wiring, but the call
@@ -377,28 +462,73 @@ def get_view(request: Request) -> LakeView:
 View = Annotated[LakeView, Depends(get_view)]
 
 
-def create_app(config: Config, *, token: str | None = None) -> FastAPI:
+def create_app(
+    config: Config | None,
+    *,
+    token: str | None = None,
+    read_only: bool = False,
+    allow_remote_ops: bool = False,
+    setup: bool = False,
+    config_path: Path | None = None,
+) -> FastAPI:
     """Build the dashboard app for *config*.
 
     *token*, when set, is required as ``Authorization: Bearer <token>`` or
     ``?token=``. The CLI makes it mandatory for a non-loopback bind — this
     service has no other access control and should not be reachable without one.
+
+    ``setup`` is the first-run wizard, used only when the default config file
+    does not exist yet. ``read_only`` registers none of the write routes.
+    Remote ingestion stays off unless ``allow_remote_ops`` is set; storage
+    cleanup keeps its existing token rule.
     """
+    if config is not None:
+        setup = False
     app = FastAPI(
         title="cnequity dashboard",
-        description="Lake coverage, freshness and provenance; storage cleanup requires explicit web confirmation.",
+        description=(
+            "Lake coverage, freshness and provenance. Whitelisted ingestion can "
+            "be started from the operations page. Lake switches are previewed "
+            "and written back to the config file. Storage cleanup still requires "
+            "explicit web confirmation."
+        ),
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
-    app.state.view = LakeView(config)
     app.state.token = token
+    app.state.read_only = read_only
+    app.state.allow_remote_ops = allow_remote_ops
+    app.state.setup = setup
+    app.state.csrf = secrets.token_urlsafe(32)
+    app.state.config = None if setup else config
+    app.state.view = None if setup or config is None else LakeView(config)
+    if config is not None and config.config_path is not None:
+        app.state.config_path = Path(config.config_path).resolve()
+    elif config_path is not None:
+        app.state.config_path = Path(config_path).expanduser().resolve()
+    else:
+        app.state.config_path = None
+    from cnequity.serve.ops.routes import install_ops_routes
+    from cnequity.serve.ops.runner import OpsService
     from cnequity.serve.storage import StorageMaintenance
     from cnequity.serve.storage_routes import install_storage_routes
 
-    maintenance = StorageMaintenance(config, invalidate=app.state.view.invalidate)
-    app.state.storage_maintenance = maintenance
-    app.state.view.maintenance_gate = maintenance.gate
-    install_storage_routes(app, maintenance)
+    if app.state.view is None:
+        app.state.storage_maintenance = None
+    else:
+        maintenance = StorageMaintenance(
+            config, invalidate=app.state.view.invalidate, csrf=app.state.csrf
+        )
+        app.state.storage_maintenance = maintenance
+        app.state.view.maintenance_gate = maintenance.gate
+    install_storage_routes(app, mutations=not read_only)
+    app.state.ops = OpsService(
+        None if setup else config,
+        storage_busy=lambda: bool(
+            app.state.storage_maintenance and app.state.storage_maintenance.busy
+        ),
+    )
+    install_ops_routes(app, mutations=not read_only)
 
     @app.middleware("http")
     async def _authenticate(request: Request, call_next):
@@ -411,14 +541,27 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
                 from fastapi.responses import JSONResponse
 
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
-        is_storage = request.url.path.startswith("/api/storage")
-        if is_storage:
+        path = request.url.path
+        # Operations and storage answer while a purge has closed the read gate,
+        # and they must not count as readers the purge is waiting on.
+        unguarded = (
+            path.startswith("/api/storage")
+            or path.startswith("/api/ops")
+            or path.startswith("/api/setup")
+            or path.startswith("/api/stream/ops")
+        )
+        if unguarded:
             response = await call_next(request)
             response.headers["Cache-Control"] = "no-store"
             return response
-        if not request.url.path.startswith("/api/"):
+        if not path.startswith("/api/"):
             return await call_next(request)
-        if not maintenance.gate.enter():
+        if request.app.state.setup or request.app.state.view is None:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse({"detail": "尚未配置"}, status_code=409)
+        maintenance = request.app.state.storage_maintenance
+        if maintenance is None or not maintenance.gate.enter():
             from fastapi.responses import JSONResponse
 
             return JSONResponse(
@@ -453,28 +596,38 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
         html = page.read_text(encoding="utf-8")
         for source in _STATIC_ASSETS:
             html = html.replace(source, f"{source}?v={_asset_stamp(source)}")
-        return HTMLResponse(html)
+        # The shell itself is not version-stamped. Revalidate it so a browser
+        # does not keep an empty page from the previous build.
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/source-health", response_class=HTMLResponse, include_in_schema=False)
     def source_health(request: Request) -> HTMLResponse:
         """Render whatever `cne sources probe` last wrote into the lake.
 
         Reads, never probes. Probing reaches out to a dozen third-party hosts,
-        and a GET that does it turns an unauthenticated local service into
-        something a stray browser tab can point at other people's endpoints —
-        the same reason nothing here triggers ingestion. The CLI owns that.
+        and a GET that does it turns a page view into traffic those hosts did
+        not ask for. The operations page can start ``cne sources probe
+        --stale-only``; this page only renders the report that command wrote.
         """
         import json as _json
 
         from cnequity.diagnostics.health_page import render_page
         from cnequity.diagnostics.source_health import HealthReport
 
+        if request.app.state.view is None:
+            return HTMLResponse("尚未配置。", status_code=409)
         root = request.app.state.view.config.meta_root / "source_health"
         reports = []
+        # Latest reports are ``<vantage>.json``. The incident ledger and any
+        # other object without a vantage share this directory and are not columns.
         for path in sorted(root.glob("*.json")) if root.exists() else []:
             try:
-                reports.append(HealthReport.from_dict(_json.loads(path.read_text("utf-8"))))
-            except (ValueError, OSError) as exc:  # a half-written or hand-edited file
+                raw = _json.loads(path.read_text("utf-8"))
+                vantage = raw.get("vantage") if isinstance(raw, dict) else None
+                if not isinstance(vantage, str) or not vantage.strip():
+                    continue
+                reports.append(HealthReport.from_dict(raw))
+            except (ValueError, OSError, TypeError) as exc:  # half-written or hand-edited
                 logger.warning("skipping source-health report %s: %s", path.name, exc)
         if not reports:
             return HTMLResponse(
@@ -484,7 +637,8 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
                 "<h1>还没有探测记录</h1>"
                 "<p>先跑一次探测，报告会写进湖里，这个页面读它：</p>"
                 "<pre><code>cne sources probe --vantage cn</code></pre>"
-                "<p>探测放在 CLI 上是有意的——健康页只展示已有报告，不会替你去请求十几个第三方主机。</p>",
+                "<p>这个页面只展示已有报告，打开它不会去请求第三方主机。"
+                "要探测，在操作页启动，或运行 <code>cne sources probe</code>。</p>",
                 status_code=404,
             )
         return HTMLResponse(render_page(reports))
@@ -628,12 +782,43 @@ def create_app(config: Config, *, token: str | None = None) -> FastAPI:
             raise HTTPException(404, f"no quality artefacts for run {run_id!r}")
         return QualityRun(**detail)
 
-    @app.get("/api/runs", response_model=list[RunSummary])
+    @app.get("/api/runs", response_model=RunPage)
     def runs(
         view: View,
-        limit: Annotated[int, Query(ge=1, le=200)] = 40,
-    ) -> list[RunSummary]:
-        return [RunSummary(**row) for row in view.runs(limit=limit)]
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        status: Annotated[
+            str,
+            Query(description="Comma-separated run statuses. Omit to list every run."),
+        ] = "",
+        open_runs: Annotated[
+            bool,
+            Query(
+                alias="open",
+                description="Only runs that still need attention. An older failure is left "
+                "out once a later attempt of the same job succeeded, is running, or replaced "
+                "it. A skipped session does not replace it. An init is left out once a later "
+                "run completed the steps it missed.",
+            ),
+        ] = False,
+    ) -> RunPage:
+        chosen = tuple(dict.fromkeys(part.strip() for part in status.split(",") if part.strip()))
+        unknown = [part for part in chosen if part not in RUN_STATUSES]
+        if unknown:
+            raise HTTPException(422, "unknown run status: " + ", ".join(unknown))
+        total, rows, failed_daily = view.runs(
+            limit=limit,
+            offset=offset,
+            statuses=chosen or None,
+            open_only=open_runs,
+        )
+        return RunPage(
+            total=total,
+            offset=offset,
+            limit=limit,
+            runs=[RunSummary(**row) for row in rows],
+            failed_daily_groups=failed_daily,
+        )
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)
     def run_detail(run_id: str, view: View) -> RunDetail:

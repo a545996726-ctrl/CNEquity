@@ -1,7 +1,23 @@
 // Lake dashboard. Two views routed on the hash: the tier overview (#/) and one
 // dataset (#/dataset/<name>[/state|meta]).
 import { renderStorage, closeStorage } from "./storage.js";
+import { renderOps, closeOps } from "./ops.js";
+import { closeRunStream, renderRunDetail, renderRuns } from "./runs.js";
 import { disposeAll, heatmap, provenanceSeries, runGantt, severityTimeline } from "./charts.js";
+import {
+  ds,
+  dsMarkup,
+  dsSearch,
+  getLang,
+  grainText as partitionText,
+  historyText,
+  modeLabel,
+  onLanguageChange,
+  setLang,
+  statusText,
+  tierText,
+  tr,
+} from "./i18n.js";
 
 const qs = new URLSearchParams(location.search);
 const TOKEN = qs.get("token");
@@ -11,29 +27,39 @@ const TOKEN = qs.get("token");
 const DAYS = Number(qs.get("days") || 90);
 const app = document.getElementById("app");
 
-const NAV_ITEMS = [
-  ["overview", "概览", "#/"],
-  ["datasets", "数据集", "#/datasets"],
-  ["runs", "跑批", "#/runs"],
-  ["quality", "质量", "#/quality"],
-  ["storage", "存储运维", "#/storage"],
-];
+function navItems() {
+  return [
+    ["overview", tr("概览", "Overview"), "#/"],
+    ["ops", tr("操作", "Operations"), "#/ops"],
+    ["datasets", tr("数据集", "Datasets"), "#/datasets"],
+    ["runs", tr("跑批", "Runs"), "#/runs"],
+    ["quality", tr("质量", "Quality"), "#/quality"],
+    ["storage", tr("存储运维", "Storage"), "#/storage"],
+  ];
+}
 
 function pageShell(content, active = "overview") {
-  const nav = NAV_ITEMS.map(
-    ([key, label, href]) =>
-      `<a class="nav-link ${active === key ? "active" : ""}" href="${href}" data-nav="${key}">${label}</a>`,
-  ).join("");
+  const nav = navItems()
+    .map(
+      ([key, label, href]) =>
+        `<a class="nav-link ${active === key ? "active" : ""}" href="${href}" data-nav="${key}">${label}</a>`,
+    )
+    .join("");
+  const current = getLang();
   return `<div class="app-shell">
     <header class="topbar">
-      <a class="brand-lockup" href="#/" aria-label="返回概览">
+      <a class="brand-lockup" href="#/" aria-label="${tr("返回概览", "Back to overview")}">
         <span class="brand-mark">CNE</span>
         <span class="brand-copy"><strong>CNEquity</strong><small>research lake</small></span>
       </a>
       <span class="rail-label">Workspace</span>
-      <nav class="nav" aria-label="主导航">${nav}</nav>
-      <div class="topbar-meta"><span class="console-mode">清理需网页确认</span>
-        <button class="button button-ghost" id="refresh-page" type="button">刷新</button>
+      <nav class="nav" aria-label="${tr("主导航", "Main")}">${nav}</nav>
+      <div class="topbar-meta"><span class="console-mode">…</span>
+        <div class="lang-switch" role="group" aria-label="${tr("界面语言", "Language")}">
+          <button class="lang-option${current === "zh" ? " on" : ""}" type="button" data-set-lang="zh" aria-pressed="${current === "zh"}">中文</button>
+          <button class="lang-option${current === "en" ? " on" : ""}" type="button" data-set-lang="en" aria-pressed="${current === "en"}">EN</button>
+        </div>
+        <button class="button button-ghost" id="refresh-page" type="button">${tr("刷新", "Refresh")}</button>
       </div>
     </header>
     <main class="page-main">${content}</main>
@@ -43,6 +69,39 @@ function pageShell(content, active = "overview") {
 function setPage(content, active = "overview") {
   app.innerHTML = pageShell(content, active);
   document.getElementById("refresh-page")?.addEventListener("click", () => location.reload());
+  paintMode();
+}
+
+let modePaint = 0;
+async function paintMode() {
+  const ticket = ++modePaint;
+  try {
+    const body = await api("/api/ops");
+    if (ticket !== modePaint) return;
+    const el = document.querySelector(".console-mode");
+    if (el) el.textContent = modeLabel(body.mode?.label || "");
+    const slot = body.occupancy?.slot;
+    const meta = document.querySelector(".topbar-meta");
+    if (meta && slot && (slot.state === "running" || slot.state === "starting") && !meta.querySelector(".ops-live")) {
+      const link = document.createElement("a");
+      link.className = "ops-live";
+      link.href = `#/ops/jobs/${encodeURIComponent(slot.job_id)}`;
+      link.textContent = tr("任务进行中", "Job running");
+      meta.prepend(link);
+    }
+  } catch {
+    /* a page that cannot read /api/ops still renders its own error */
+  }
+}
+
+function opsHref(op, params) {
+  const query = new URLSearchParams();
+  query.set("op", op);
+  for (const [key, value] of Object.entries(params || {})) {
+    if (Array.isArray(value)) query.set(key, value.join(","));
+    else if (value != null && value !== "") query.set(key, String(value));
+  }
+  return `#/ops?${query}`;
 }
 
 async function api(path, options) {
@@ -65,11 +124,19 @@ async function api(path, options) {
   return res.json();
 }
 
-const fmt = (n) => (n ?? 0).toLocaleString();
-const compact = (n) => new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(n ?? 0);
+const fmt = (n) => (n ?? 0).toLocaleString(getLang() === "en" ? "en" : "zh-CN");
+const compact = (n) =>
+  new Intl.NumberFormat(getLang() === "en" ? "en" : "zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(n ?? 0);
 const mb = (b) => (!b ? "-" : b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${(b / 1e6).toFixed(0)} MB`);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/** First line of a batch error, without the HTTP client's docs trailer. */
+function failureLine(message) {
+  const line = String(message || "").split("\n")[0];
+  const cut = line.indexOf(" For more information check:");
+  return cut === -1 ? line : line.slice(0, cut).trimEnd();
+}
 
 // --- overview ---------------------------------------------------------------
 
@@ -86,11 +153,11 @@ const kpi = (n, label, note = "", tone = "") =>
  * chip rather than guessing at it. */
 const TONE = {
   fresh: "fresh", success: "fresh", running: "running",
-  failed: "error", error: "error", stale: "stale", warning: "stale",
+  failed: "error", error: "error", stale: "stale", warning: "stale", degraded: "stale",
   empty: "empty", info: "",
 };
 
-const statusPill = (status, label = status) => {
+const statusPill = (status, label = statusText(status)) => {
   const tone = TONE[status] || "empty";
   return `<span class="status-pill status-pill-${tone}"><span class="dot ${tone === "running" ? "" : tone}"></span>${esc(label)}</span>`;
 };
@@ -107,7 +174,7 @@ const chipRow = (items, empty = "-") =>
  * one run-on grey string, so a failed batch read exactly like a successful one
  * until the whole cell went red. That said "something here is wrong"
  * without saying which. Per-status chips carry that on the status itself. */
-const tally = (counts) => chipRow(Object.entries(counts || {}).map(([k, n]) => chip(k, TONE[k], n)));
+const tally = (counts) => chipRow(Object.entries(counts || {}).map(([k, n]) => chip(statusText(k), TONE[k], n)));
 
 /** A zero is a result, not an absence. */
 const num = (n, cls = "") => (n ? (cls ? `<span class="${cls}">${fmt(n)}</span>` : fmt(n)) : '<span class="muted">0</span>');
@@ -141,10 +208,14 @@ const panelNote = (html) => `<p class="panel-note">${html}</p>`;
 // storage/stats.py emits exactly two of these; anything else falls through
 // unchanged rather than being silently mistranslated.
 function statsReason(reason) {
-  if (!reason) return "原因未知";
-  if (reason.includes("landed after the stats were built")) return "有新的采集批次晚于度量表";
-  if (reason.includes("no stats yet")) return "尚未生成过度量表";
+  if (!reason) return tr("原因未知", "Unknown reason");
+  if (reason.includes("landed after the stats were built")) return tr("有新的采集批次晚于度量表", "A newer batch landed after the stats snapshot");
+  if (reason.includes("no stats yet")) return tr("尚未生成过度量表", "No stats snapshot yet");
   return reason;
+}
+
+function dsLink(id) {
+  return `<span class="ds-link" data-ds="${esc(id)}">${dsMarkup(id)}</span>`;
 }
 
 async function renderOverview() {
@@ -160,33 +231,102 @@ async function renderOverview() {
   // run UUID in them. Fine in a log, wrong in the banner of a Chinese page.
   // the id is not something the reader can act on. Translate the ones that can
   // actually appear, keep the original as a tooltip for anyone debugging.
-  if (h.stats_stale) notes.push(`度量表过期（${esc(statsReason(h.stats_reason))}）。已在后台重建，稍后刷新。`);
+  if (h.stats_stale) {
+    notes.push({
+      tone: "info",
+      title: tr("度量表过期", "Stats are stale"),
+      detail: tr(
+        `已在后台重建（${esc(statsReason(h.stats_reason))}）。稍后刷新。`,
+        `A rebuild is already running (${esc(statsReason(h.stats_reason))}). Refresh shortly.`,
+      ),
+    });
+  }
   if (h.stale_datasets.length) {
-    notes.push(
-      `STALE：${h.stale_datasets.map((d) => `<code class="ds-link" data-ds="${esc(d)}">${esc(d)}</code>`).join(" ")}`,
-    );
+    notes.push({
+      tone: "stale",
+      title: tr(`${h.stale_datasets.length} 个数据集落后`, `${h.stale_datasets.length} stale datasets`),
+      chips: h.stale_datasets.map((d) => dsLink(d)).join(""),
+      action: { href: "#/ops?op=daily.stale", label: tr("补抓落后数据集", "Catch up stale datasets") },
+    });
+  }
+  let primaryHref = "#/quality";
+  let primaryLabel = tr("查看质量", "Open quality");
+  try {
+    const ops = await api("/api/ops");
+    const pending = ops.occupancy?.incomplete_init;
+    if (ops.occupancy?.lake_empty) {
+      notes.push({
+        tone: "stale",
+        title: tr("湖里还没有 curated 数据", "The lake has no curated data yet"),
+        detail: tr("初始化会下载全市场行情主干。", "Initialization downloads the full-market price spine."),
+        action: { href: "#/ops?op=init.start", label: tr("初始化数据湖", "Initialize the lake") },
+      });
+    }
+    if (pending && !pending.running) {
+      notes.push({
+        tone: "stale",
+        title: tr("初始化没跑完", "Initialization did not finish"),
+        detail: tr("已成功的批次会保留。", "Batches that succeeded are kept."),
+        action: {
+          href: `#/ops?op=init.resume&run_id=${encodeURIComponent(pending.run_id)}`,
+          label: tr("继续初始化", "Resume initialization"),
+        },
+      });
+      primaryHref = `#/ops?op=init.resume&run_id=${encodeURIComponent(pending.run_id)}`;
+      primaryLabel = tr("继续初始化", "Resume initialization");
+    } else if (ops.occupancy?.lake_empty) {
+      primaryHref = "#/ops?op=init.start";
+      primaryLabel = tr("初始化数据湖", "Initialize the lake");
+    } else if (h.stale_datasets.length) {
+      primaryHref = "#/ops?op=daily.stale";
+      primaryLabel = tr("补抓落后数据集", "Catch up stale datasets");
+    }
+  } catch {
+    /* overview still renders without the operations summary */
   }
   if (h.empty_required.length) {
-    notes.push(`必需但为空：${h.empty_required.map((d) => `<code>${esc(d)}</code>`).join(" ")}`);
+    notes.push({
+      tone: "error",
+      title: tr("必需数据集为空", "Required datasets are empty"),
+      chips: h.empty_required.map((d) => dsLink(d)).join(""),
+    });
   }
 
   const byTier = {};
   for (const d of datasets) (byTier[d.tier] ||= []).push(d);
 
   const state = sev.error ? "error" : notes.length ? "attention" : "healthy";
-  const stateLabel = { healthy: "运行正常", attention: "需要关注", error: "存在错误" }[state];
-  const actionItems = notes.length
-    ? notes.map((note) => `<li class="issue-item">${note}</li>`).join("")
-    : `<li class="empty-state"><span class="empty-icon">✓</span><span><strong>没有待处理事项</strong><small>数据、度量表与审计快照均在预期状态。</small></span></li>`;
+  const stateLabel = {
+    healthy: tr("运行正常", "Healthy"),
+    attention: tr("需要关注", "Needs attention"),
+    error: tr("存在错误", "Errors"),
+  }[state];
+  const attentionRow = (note) => {
+    const body = note.chips
+      ? `<div class="attention-chips">${note.chips}</div>`
+      : `<p class="attention-detail">${note.detail || ""}</p>`;
+    const action = note.action
+      ? `<a class="button ${note.tone === "info" ? "button-ghost" : "button-primary"}" href="${note.action.href}">${esc(note.action.label)}</a>`
+      : "";
+    return `<li class="attention-row tone-${note.tone}"><div class="attention-copy"><strong>${esc(note.title)}</strong>${body}</div>${action}</li>`;
+  };
+  const attention = notes.length
+    ? `<section class="surface-panel attention-band" aria-labelledby="attention-title"><div class="panel-header"><div><div class="eyebrow">Attention</div><h2 id="attention-title">${tr("行动项", "Action items")}</h2></div><span class="panel-meta">${notes.length}</span></div><ul class="attention-list">${notes.map(attentionRow).join("")}</ul></section>`
+    : "";
   const tierCards = tiers
-    .map(
-      (t) => `<details class="tier-card" ${t.stale || t.empty ? "open" : ""}>
-        <summary><span class="tier-summary"><span class="tier-name"><span class="tier-tag">${esc(t.tier)}</span>${esc(t.label)}</span>
-          <span class="tier-counts"><b>${t.datasets}</b> 个数据集 · <b>${fmt(t.rows)}</b> 行</span>
-          <span class="tier-status ${t.stale ? "is-stale" : t.empty ? "is-empty" : "is-fresh"}">${t.stale ? `${t.stale} stale` : t.empty ? `${t.empty} empty` : "全部 fresh"}</span></span></summary>
-        <div class="tier-members">${membersTable(byTier[t.tier] || [])}</div>
-      </details>`,
-    )
+    .map((tier) => {
+      const status = tier.stale
+        ? tr(`${tier.stale} 个落后`, `${tier.stale} stale`)
+        : tier.empty
+          ? tr(`${tier.empty} 个为空`, `${tier.empty} empty`)
+          : tr("全部最新", "All fresh");
+      return `<details class="tier-card" ${tier.stale || tier.empty ? "open" : ""}>
+        <summary><span class="tier-summary"><span class="tier-name"><span class="tier-tag">${esc(tier.tier)}</span>${esc(tierText(tier.tier, tier.label))}</span>
+          <span class="tier-counts"><b>${tier.datasets}</b> ${tr("个数据集", "datasets")} · <b>${fmt(tier.rows)}</b> ${tr("行", "rows")}</span>
+          <span class="tier-status ${tier.stale ? "is-stale" : tier.empty ? "is-empty" : "is-fresh"}">${status}</span></span></summary>
+        <div class="tier-members">${membersTable(byTier[tier.tier] || [])}</div>
+      </details>`;
+    })
     .join("");
 
   const visibleHeatmapRows = hm.rows.filter((row) => /[#.]/.test(row.cells));
@@ -195,50 +335,78 @@ async function renderOverview() {
 
   setPage(`
     <section class="page-heading">
-      <div class="eyebrow">数据湖控制台 / 概览</div>
-      <div class="heading-row"><div><h1>湖状态</h1>
-        <p class="sub">最后交易日 ${esc(h.anchor)} · ${h.datasets} 个注册数据集 · 审计快照 ${esc(h.audit_trade_date || "无")}</p></div>
-        <div class="action-row"><a class="button button-ghost" href="#/runs">查看跑批</a><a class="button button-primary" href="#/quality">查看质量</a></div>
+      <div class="eyebrow">${tr("数据湖控制台 / 概览", "Lake console / Overview")}</div>
+      <div class="heading-row"><div><h1>${tr("湖状态", "Lake status")}</h1>
+        <p class="sub">${tr(`最后交易日 ${esc(h.anchor)} · ${h.datasets} 个注册数据集 · 审计快照 ${esc(h.audit_trade_date || "无")}`, `Last session ${esc(h.anchor)} · ${h.datasets} registered datasets · audit snapshot ${esc(h.audit_trade_date || "none")}`)}</p></div>
+        <div class="action-row"><a class="button button-ghost" href="#/runs">${tr("查看跑批", "View runs")}</a><a class="button button-primary" href="${primaryHref}">${esc(primaryLabel)}</a></div>
       </div>
     </section>
     <section class="status-hero status-${state}" aria-live="polite">
       <span class="status-icon" aria-hidden="true">${state === "healthy" ? "✓" : state === "error" ? "!" : "•"}</span>
-      <div><strong>${stateLabel}</strong><span>${state === "healthy" ? "核心数据集已覆盖最新交易日。" : `${notes.length} 项事项需要核查，数据仍可只读访问。`}</span></div>
+      <div><strong>${stateLabel}</strong><span>${state === "healthy" ? tr("核心数据集已覆盖最新交易日。", "Core datasets cover the latest session.") : tr(`${notes.length} 项事项需要核查，数据仍可只读访问。`, `${notes.length} items need a look. Data stays readable.`)}</span></div>
       <span class="status-anchor">anchor ${esc(h.anchor || "-")}</span>
     </section>
-    <section class="metric-grid" aria-label="关键指标">
-      ${kpi(num(h.datasets), "数据集", "已注册")}
-      ${kpi(num(h.fresh), "Fresh", "最新水位")}
-      ${kpi(num(h.stale, "err"), "Stale", "超过容忍窗口", h.stale ? "alert" : "")}
-      ${kpi(`<span title="${fmt(h.rows)} 行">${compact(h.rows)}</span>`, "行数", "curated")}
-      ${kpi(mb(h.bytes), "存储", "curated")}
-      ${kpi(`${num(sev.error, "err")}<span class="metric-secondary"> / ${fmt(sev.warning)}</span>`, "审计", "error / warning", sev.error ? "alert" : "")}
+    <section class="metric-grid" aria-label="${tr("关键指标", "Key metrics")}">
+      ${kpi(num(h.datasets), tr("数据集", "Datasets"), tr("已注册", "Registered"))}
+      ${kpi(num(h.fresh), tr("最新", "Fresh"), tr("最新水位", "Current watermark"))}
+      ${kpi(num(h.stale, "err"), tr("落后", "Stale"), tr("超过容忍窗口", "Past the tolerance window"), h.stale ? "alert" : "")}
+      ${kpi(`<span title="${fmt(h.rows)} ${tr("行", "rows")}">${compact(h.rows)}</span>`, tr("行数", "Rows"), "curated")}
+      ${kpi(mb(h.bytes), tr("存储", "Storage"), "curated")}
+      ${kpi(`${num(sev.error, "err")}<span class="metric-secondary"> / ${fmt(sev.warning)}</span>`, tr("审计", "Audit"), "error / warning", sev.error ? "alert" : "")}
     </section>
-    <section class="overview-grid">
-      <article class="surface-panel heat-panel"><div class="panel-header"><div><div class="eyebrow">Coverage</div><h2>覆盖热力</h2></div><span class="panel-meta">${visibleHeatmapRows.length}/${hm.rows.length} 个数据集 · ${hm.days.length} 个交易日</span></div>
-        <div id="heat" aria-label="覆盖热力图"></div>
-        <p class="legend"><span><i class="swatch" style="background:var(--cell-covered)"></i> 有分区覆盖</span><span><i class="swatch" style="background:var(--cell-gap)"></i> 日更源缺口</span><span><i class="swatch" style="background:var(--cell-cadence)"></i> 按源节奏间隔</span><span><i class="swatch" style="background:var(--cell-outside)"></i> 区间外</span></p>
-        <p class="heatmap-note">灰色表示当前窗口外，或该数据集按快照 / 月度 / 季度节奏采集，不等同于采集失败。${hiddenHeatmapRows ? ` ${hiddenHeatmapRows} 个当前没有分区的数据集已留在“数据层”中。` : ""}</p>
-      </article>
-      <aside class="surface-panel action-panel"><div class="panel-header"><div><div class="eyebrow">Attention</div><h2>行动项</h2></div><span class="panel-meta">${notes.length || 0} 项</span></div><ul class="issue-list">${actionItems}</ul></aside>
-    </section>
-    <section class="surface-panel dataset-panel" id="dataset-list"><div class="panel-header"><div><div class="eyebrow">Data catalog</div><h2>数据层</h2></div><a class="panel-link" href="#/datasets">查看全部数据集 →</a></div><div class="tier-grid">${tierCards}</div></section>
+    ${attention}
+    <article class="surface-panel heat-panel"><div class="panel-header"><div><div class="eyebrow">Coverage</div><h2>${tr("覆盖热力", "Coverage")}</h2></div><span class="panel-meta">${visibleHeatmapRows.length}/${hm.rows.length} ${tr("个数据集", "datasets")} · ${hm.days.length} ${tr("个交易日", "sessions")}</span></div>
+      <div id="heat" aria-label="${tr("覆盖热力图", "Coverage heatmap")}"></div>
+      <p class="legend"><span><i class="swatch" style="background:var(--cell-covered)"></i> ${tr("有分区覆盖", "Partition present")}</span><span><i class="swatch" style="background:var(--cell-gap)"></i> ${tr("日更源缺口", "Daily-source gap")}</span><span><i class="swatch" style="background:var(--cell-cadence)"></i> ${tr("按源节奏间隔", "Expected cadence")}</span><span><i class="swatch" style="background:var(--cell-outside)"></i> ${tr("区间外", "Outside window")}</span></p>
+      <p class="heatmap-note">${tr("灰色表示当前窗口外，或该数据集按快照 / 月度 / 季度节奏采集，不等同于采集失败。", "Grey means outside this window, or the dataset is collected as a snapshot or on a monthly or quarterly cadence. It is not a failed fetch.")}${hiddenHeatmapRows ? tr(` ${hiddenHeatmapRows} 个当前没有分区的数据集已留在“数据层”中。`, ` ${hiddenHeatmapRows} datasets with no partition in this window stay in the catalog.`) : ""}</p>
+    </article>
+    <section class="surface-panel dataset-panel" id="dataset-list"><div class="panel-header"><div><div class="eyebrow">Data catalog</div><h2>${tr("数据层", "Layers")}</h2></div><a class="panel-link" href="#/datasets">${tr("查看全部数据集 →", "All datasets →")}</a></div><div class="tier-grid">${tierCards}</div></section>
   `);
   heatmap(document.getElementById("heat"), heatmapData);
 }
 
+function datasetOpLabel(op, why) {
+  const labels = {
+    "backfill.run": tr("回填这个数据集", "Backfill this dataset"),
+    "daily.stale": tr("补抓落后数据", "Catch up stale data"),
+    "derive.run": tr("重算派生", "Recompute derived data"),
+  };
+  return labels[op] || why;
+}
+
+function datasetActionButtons(dataset) {
+  const runnable = (dataset.commands || []).filter((command) => command.op).slice(0, 2);
+  const buttons = [`<a class="button button-ghost" href="#/datasets">${tr("← 返回数据集", "← Datasets")}</a>`];
+  for (const [index, command] of runnable.entries()) {
+    const tone = index === 0 ? "button button-primary" : "button button-ghost";
+    buttons.push(`<a class="${tone}" href="${opsHref(command.op, command.params)}">${esc(datasetOpLabel(command.op, command.why))}</a>`);
+  }
+  return buttons.join("");
+}
+
 async function renderDatasets() {
   const datasets = await api("/api/datasets");
-  const rows = (items) => items.map((d) => `<tr class="dataset-row"><td><span class="dot ${d.freshness === "fresh" ? "fresh" : d.freshness === "stale" ? "stale" : "empty"}"></span><span class="ds-link" data-ds="${esc(d.dataset)}">${esc(d.dataset)}</span></td><td>${esc(d.tier_label || d.tier)}</td><td>${esc(d.history_mode)}</td><td>${esc(d.granularity || "merge")}</td><td>${esc(d.watermark || "-")}</td><td class="n">${fmt(d.row_count)}</td><td class="n">${mb(d.bytes)}</td></tr>`).join("");
-  setPage(`<section class="page-heading"><div class="eyebrow">数据湖控制台 / 数据集</div><div class="heading-row"><div><h1>数据集</h1><p class="sub">按注册契约浏览 ${datasets.length} 个数据集，点击名称查看状态、元数据与数据。</p></div></div></section>
-    <section class="surface-panel catalog-panel"><div class="catalog-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="dataset-search" type="search" placeholder="搜索数据集、层级或语义" autocomplete="off"></label><span class="panel-meta" id="dataset-count">${datasets.length} 个结果</span></div><div class="scroll"><table id="dataset-table"><thead><tr><th>数据集</th><th>分层</th><th>语义</th><th>粒度</th><th>水位</th><th class="n">行</th><th class="n">体积</th></tr></thead><tbody></tbody></table></div></section>`, "datasets");
+  const stale = datasets.filter((d) => d.freshness === "stale").length;
+  const rows = (items) =>
+    items
+      .map(
+        (d) => `<tr class="dataset-row"><td><span class="dot ${d.freshness === "fresh" ? "fresh" : d.freshness === "stale" ? "stale" : "empty"}"></span>${dsLink(d.dataset)}</td><td>${esc(tierText(d.tier, d.tier_label))}</td><td>${esc(historyText(d.history_mode))}</td><td>${esc(partitionText(d.granularity))}</td><td>${esc(d.watermark || "-")}</td><td class="n">${fmt(d.row_count)}</td><td class="n">${mb(d.bytes)}</td></tr>`,
+      )
+      .join("");
+  setPage(`<section class="page-heading"><div class="eyebrow">${tr("数据湖控制台 / 数据集", "Lake console / Datasets")}</div><div class="heading-row"><div><h1>${tr("数据集", "Datasets")}</h1><p class="sub">${tr(`按注册契约浏览 ${datasets.length} 个数据集，点击名称查看状态、元数据与数据。`, `Browse ${datasets.length} registered datasets. Open a name for status, metadata, and rows.`)}</p></div>
+    ${stale ? `<div class="action-row"><a class="button button-primary" href="#/ops?op=daily.stale">${tr(`补抓 ${stale} 个落后数据集`, `Catch up ${stale} stale datasets`)}</a></div>` : ""}</div></section>
+    <section class="surface-panel catalog-panel"><div class="catalog-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="dataset-search" type="search" placeholder="${tr("搜索数据集、层级或语义", "Search name, layer, or semantics")}" autocomplete="off"></label><span class="panel-meta" id="dataset-count">${datasets.length} ${tr("个结果", "results")}</span></div><div class="scroll"><table id="dataset-table"><thead><tr><th>${tr("数据集", "Dataset")}</th><th>${tr("分层", "Layer")}</th><th>${tr("语义", "Semantics")}</th><th>${tr("粒度", "Grain")}</th><th>${tr("水位", "Watermark")}</th><th class="n">${tr("行", "Rows")}</th><th class="n">${tr("体积", "Size")}</th></tr></thead><tbody></tbody></table></div></section>`, "datasets");
   const table = document.querySelector("#dataset-table tbody");
   const count = document.getElementById("dataset-count");
   const render = (query = "") => {
     const q = query.trim().toLowerCase();
-    const filtered = datasets.filter((d) => [d.dataset, d.tier, d.tier_label, d.history_mode, d.granularity].some((v) => String(v || "").toLowerCase().includes(q)));
-    table.innerHTML = filtered.length ? rows(filtered) : '<tr><td colspan="7" class="empty-table"><span>没有匹配的数据集。</span></td></tr>';
-    count.textContent = `${filtered.length} 个结果`;
+    const filtered = datasets.filter((d) =>
+      [dsSearch(d.dataset), d.tier, tierText(d.tier, d.tier_label), historyText(d.history_mode), d.history_mode, partitionText(d.granularity), d.granularity].some((v) =>
+        String(v || "").toLowerCase().includes(q),
+      ),
+    );
+    table.innerHTML = filtered.length ? rows(filtered) : `<tr><td colspan="7" class="empty-table"><span>${tr("没有匹配的数据集。", "No matching dataset.")}</span></td></tr>`;
+    count.textContent = `${filtered.length} ${tr("个结果", "results")}`;
   };
   document.getElementById("dataset-search").addEventListener("input", (e) => render(e.target.value));
   render();
@@ -248,23 +416,23 @@ function membersTable(rows) {
   const body = rows.map((d) => {
     const cls = d.freshness === "fresh" ? "fresh" : d.freshness === "stale" ? "stale" : "empty";
     const cover = d.coverage_start ? `${d.coverage_start} → ${d.coverage_end}` : "-";
-    const opt = d.required ? "" : " <span style='opacity:.6'>(可选)</span>";
-    return `<tr class="data-row"><td><span class="dot ${cls}"></span><span class="ds-link" data-ds="${esc(d.dataset)}">${esc(d.dataset)}</span>${opt}</td>
-      <td>${d.history_mode}</td><td>${d.granularity || "merge"}</td><td class="cell-time">${cover}</td>
+    const opt = d.required ? "" : ` <span style='opacity:.6'>(${tr("可选", "optional")})</span>`;
+    return `<tr class="data-row"><td><span class="dot ${cls}"></span>${dsLink(d.dataset)}${opt}</td>
+      <td>${esc(historyText(d.history_mode))}</td><td>${esc(partitionText(d.granularity))}</td><td class="cell-time">${cover}</td>
       <td class="cell-time">${d.watermark || "-"}</td><td class="n">${fmt(d.row_count)}</td>
       <td class="n">${mb(d.bytes)}</td></tr>`;
   });
   return dataTable(
-    ["数据集", "语义", "粒度", "覆盖", "水位", { h: "行", n: true }, { h: "体积", n: true }],
+    [tr("数据集", "Dataset"), tr("语义", "Semantics"), tr("粒度", "Grain"), tr("覆盖", "Coverage"), tr("水位", "Watermark"), { h: tr("行", "Rows"), n: true }, { h: tr("体积", "Size"), n: true }],
     body,
-    "这一层还没有注册数据集。",
+    tr("这一层还没有注册数据集。", "This layer has no registered datasets."),
   );
 }
 
 // --- dataset detail ---------------------------------------------------------
 
 function coverageBar(d) {
-  if (!d.coverage_start) return '<p class="muted">尚无分区。</p>';
+  if (!d.coverage_start) return `<p class="muted">${tr("尚无分区。", "No partitions yet.")}</p>`;
   const start = new Date(d.coverage_start).getTime();
   const end = new Date(d.coverage_end).getTime();
   const span = Math.max(end - start, 1);
@@ -273,7 +441,7 @@ function coverageBar(d) {
     const h = new Date(d.earliest_available).getTime();
     if (h > start && h < end) {
       const pct = ((h - start) / span) * 100;
-      horizon = `<div class="horizon" style="left:${pct}%" title="源端历史天花板 ${d.earliest_available}"></div>`;
+      horizon = `<div class="horizon" style="left:${pct}%" title="${tr(`源端历史天花板 ${d.earliest_available}`, `Source history ceiling ${d.earliest_available}`)}"></div>`;
     }
   }
   return `<div class="cover"><div class="fill" style="left:0;right:0"></div>${horizon}</div>
@@ -282,22 +450,27 @@ function coverageBar(d) {
 
 function gapsNote(d) {
   const g = d.gaps;
-  if (!g.total) return '<p class="muted">覆盖区间内无缺口。</p>';
+  if (!g.total) return `<p class="muted">${tr("覆盖区间内无缺口。", "No gaps inside the covered range.")}</p>`;
   const cadence =
-    d.max_staleness_days > 1 ? `　该源非日更（容忍 ${d.max_staleness_days} 天），间隔属其节奏。` : "";
-  return `<p class="${d.max_staleness_days > 1 ? "muted" : "err"}">${g.total} 个 ${g.unit} 无分区${cadence}</p>
+    d.max_staleness_days > 1
+      ? tr(
+          `　该源非日更（容忍 ${d.max_staleness_days} 天），间隔属其节奏。`,
+          ` This source is not daily (tolerance ${d.max_staleness_days} days); the spacing is its cadence.`,
+        )
+      : "";
+  return `<p class="${d.max_staleness_days > 1 ? "muted" : "err"}">${tr(`${g.total} 个 ${g.unit} 无分区`, `${g.total} ${g.unit} without a partition`)}${cadence}</p>
     <p class="muted">${g.missing.slice(0, 12).map(esc).join("、")}${g.total > 12 ? " …" : ""}</p>`;
 }
 
 function stateTab(d, prov) {
   const provTable = dataTable(
-    ["source", "data_version", { h: "行", n: true }, "fetched_at 跨度"],
+    ["source", "data_version", { h: tr("行", "Rows"), n: true }, tr("fetched_at 跨度", "fetched_at span")],
     prov.map(
       (p) => `<tr class="data-row"><td>${esc(p.source)}</td><td>${esc(p.data_version)}</td>
       <td class="n">${fmt(p.row_count)}</td>
       <td class="muted cell-time">${esc((p.fetched_at_min || "").slice(0, 10))} → ${esc((p.fetched_at_max || "").slice(0, 10))}</td></tr>`,
     ),
-    "无溯源度量。",
+    tr("无溯源度量。", "No provenance stats."),
   );
 
   const findings = dataTable(
@@ -306,27 +479,27 @@ function stateTab(d, prov) {
       (f) => `<tr class="data-row"><td>${chip(f.severity, TONE[f.severity])}</td>
       <td>${esc(f.check)}</td><td>${esc(f.message)}</td></tr>`,
     ),
-    "上次审计没有该数据集的 findings。",
+    tr("上次审计没有该数据集的 findings。", "The last audit has no findings for this dataset."),
   );
 
   const batches = dataTable(
-    ["状态", "窗口", { h: "写入", n: true }, { h: "重试", n: true }, "开始", "错误"],
+    [tr("状态", "Status"), tr("窗口", "Window"), { h: tr("写入", "Written"), n: true }, { h: tr("重试", "Retries"), n: true }, tr("开始", "Started"), tr("错误", "Error")],
     d.batches.map(
       (b) => `<tr class="data-row"><td>${statusPill(b.status)}</td>
       <td class="muted cell-time">${esc(b.window_start || "-")} → ${esc(b.window_end || "-")}</td>
       <td class="n">${fmt(b.rows_written)}</td><td class="n">${num(b.retry_count)}</td>
       <td class="muted cell-time">${esc((b.started_at || "").slice(0, 19))}</td>
-      <td class="muted cell-truncate"${b.error_message ? ` title="${esc(b.error_message)}"` : ""}><span>${esc(b.error_message || "") || "-"}</span></td></tr>`,
+      <td class="cell-failures">${b.error_message ? esc(failureLine(b.error_message)) : '<span class="muted">-</span>'}</td></tr>`,
     ),
-    "manifest 中没有该数据集的 batch。",
+    tr("manifest 中没有该数据集的 batch。", "The manifest has no batch for this dataset."),
   );
 
   return `
-    <h3>覆盖</h3>${coverageBar(d)}${gapsNote(d)}
-    <h3>溯源分布（按时间）</h3><div id="prov"></div><p class="muted" id="provnote"></p>
-    <h3>溯源合计</h3>${provTable}
-    <h3>审计 findings</h3>${findings}
-    <h3>最近 batch</h3>${batches}`;
+    <h3>${tr("覆盖", "Coverage")}</h3>${coverageBar(d)}${gapsNote(d)}
+    <h3>${tr("溯源分布（按时间）", "Provenance over time")}</h3><div id="prov"></div><p class="muted" id="provnote"></p>
+    <h3>${tr("溯源合计", "Provenance totals")}</h3>${provTable}
+    <h3>${tr("审计 findings", "Audit findings")}</h3>${findings}
+    <h3>${tr("最近 batch", "Recent batches")}</h3>${batches}`;
 }
 
 const fact = (k, v) => `<div class="fact"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
@@ -338,10 +511,10 @@ const fact = (k, v) => `<div class="fact"><span class="k">${esc(k)}</span><span 
  * printed a dash, making intraday transaction records look like a daily
  * dataset. `row_grain` is set for all three intraday datasets.
  */
-function grainText(d) {
-  if (d.row_grain === "tick") return "分笔（3 秒快照聚合，非 bar）";
+function rowGrainText(d) {
+  if (d.row_grain === "tick") return tr("分笔（3 秒快照聚合，非 bar）", "Ticks (3-second snapshots, not bars)");
   if (d.row_grain) return `${esc(d.row_grain)} bar`;
-  return "日";
+  return tr("日", "Day");
 }
 
 /** How far back the *source* still serves, and by which mechanism.
@@ -353,22 +526,22 @@ function grainText(d) {
  * directly contradicting the 最早可得 line right underneath it.
  */
 function horizonText(d) {
-  if (d.history_floor_date) return `自 ${esc(d.history_floor_date)} 起（固定底，不滚动）`;
-  if (d.history_horizon_days) return `${d.history_horizon_days} 个交易日（滚动）`;
-  return "无上限";
+  if (d.history_floor_date) return tr(`自 ${esc(d.history_floor_date)} 起（固定底，不滚动）`, `From ${esc(d.history_floor_date)} (fixed floor)`);
+  if (d.history_horizon_days) return tr(`${d.history_horizon_days} 个交易日（滚动）`, `${d.history_horizon_days} sessions (rolling)`);
+  return tr("无上限", "No declared limit");
 }
 
 function metaTab(d) {
   // Flags read as state, not as prose: "是" beside "否" in the same grey
   // column made the reader parse four identical rows to find the set one.
-  const yn = (b) => chip(b ? "是" : "否", b ? "fresh" : "");
+  const yn = (b) => chip(b ? tr("是", "Yes") : tr("否", "No"), b ? "fresh" : "");
   const contract = [
-    fact("分层", `${d.tier} ${esc(d.tier_label)}`),
-    fact("存储层", d.layer),
-    fact("分区键", d.partition_col ? `<code>${esc(d.partition_col)}</code>` : "单文件 merge"),
-    fact("分区粒度", d.granularity || "-"),
-    fact("查询日期列", d.date_col ? `<code>${esc(d.date_col)}</code>` : "-"),
-    fact("主键", d.primary_key.map((c) => `<code>${esc(c)}</code>`).join(" ")),
+    fact(tr("分层", "Layer"), `${d.tier} ${esc(tierText(d.tier, d.tier_label))}`),
+    fact(tr("存储层", "Storage"), d.layer),
+    fact(tr("分区键", "Partition key"), d.partition_col ? `<code>${esc(d.partition_col)}</code>` : tr("单文件 merge", "Single-file merge")),
+    fact(tr("分区粒度", "Partition grain"), partitionText(d.granularity)),
+    fact(tr("查询日期列", "Query date column"), d.date_col ? `<code>${esc(d.date_col)}</code>` : "-"),
+    fact(tr("主键", "Primary key"), d.primary_key.map((c) => `<code>${esc(c)}</code>`).join(" ")),
   ].join("");
   const semantics = [
     fact("fetch_semantics", d.fetch_semantics),
@@ -377,26 +550,26 @@ function metaTab(d) {
     fact("维护水位", yn(d.watermarked)),
   ].join("");
   const sources = [
-    fact("回填源", d.backfill_source ? esc(d.backfill_source) : "-"),
-    fact("源端历史视野", horizonText(d)),
-    fact("最早可得", d.earliest_available || "不受源端限制"),
+    fact(tr("回填源", "Backfill source"), d.backfill_source ? esc(d.backfill_source) : "-"),
+    fact(tr("源端历史视野", "Source horizon"), horizonText(d)),
+    fact(tr("最早可得", "Earliest available"), d.earliest_available || tr("不受源端限制", "Not limited by the source")),
   ].join("");
   const ops = [
-    fact("staleness 容忍", `${d.max_staleness_days} 天`),
+    fact(tr("staleness 容忍", "Staleness tolerance"), tr(`${d.max_staleness_days} 天`, `${d.max_staleness_days} days`)),
     fact("required", yn(d.required)),
-    fact("行粒度", grainText(d)),
+    fact(tr("行粒度", "Row grain"), rowGrainText(d)),
     fact(
-      "回填分块",
+      tr("回填分块", "Backfill chunks"),
       d.backfill_chunk_days
-        ? `${d.backfill_chunk_days} 天`
+        ? tr(`${d.backfill_chunk_days} 天`, `${d.backfill_chunk_days} days`)
         : d.backfill_chunk_symbols
-          ? `${d.backfill_chunk_symbols} 标的`
-          : '<span class="muted">不分块</span>',
+          ? tr(`${d.backfill_chunk_symbols} 标的`, `${d.backfill_chunk_symbols} symbols`)
+          : `<span class="muted">${tr("不分块", "Not chunked")}</span>`,
     ),
   ].join("");
 
   const schema = `<div class="scroll"><table>
-    <tr><th>列</th><th>类型</th><th>主键</th></tr>
+    <tr><th>${tr("列", "Column")}</th><th>${tr("类型", "Type")}</th><th>${tr("主键", "Key")}</th></tr>
     ${d.schema
       .map(
         (c) => `<tr><td><code>${esc(c.column)}</code></td><td class="muted">${esc(c.dtype)}</td>
@@ -405,31 +578,34 @@ function metaTab(d) {
       .join("")}</table></div>`;
 
   const cmds = d.commands
-    .map(
-      (c, i) => `<div class="cmd"><code id="cmd${i}">${esc(c.cmd)}</code>
-      <button data-copy="cmd${i}">复制</button><span class="muted">${esc(c.why)}</span></div>`,
-    )
+    .map((c, i) => {
+      const href = c.op ? opsHref(c.op, c.params) : "";
+      return `<div class="cmd"><code id="cmd${i}">${esc(c.cmd)}</code>
+      <button data-copy="cmd${i}">${tr("复制", "Copy")}</button>${href ? `<a href="${href}">${tr("在操作页运行", "Run on the operations page")}</a>` : ""}<span class="muted">${esc(c.why)}</span></div>`;
+    })
     .join("");
 
   return `
-    <h3>契约</h3><div class="facts">${contract}</div>
-    <h3>语义</h3><div class="facts">${semantics}</div>
-    <h3>来源</h3><div class="facts">${sources}</div>
-    <h3>运维</h3><div class="facts">${ops}</div>
+    <h3>${tr("契约", "Contract")}</h3><div class="facts">${contract}</div>
+    <h3>${tr("语义", "Semantics")}</h3><div class="facts">${semantics}</div>
+    <h3>${tr("来源", "Sources")}</h3><div class="facts">${sources}</div>
+    <h3>${tr("运维", "Operations")}</h3><div class="facts">${ops}</div>
     <h3>Schema</h3>${schema}
-    <h3>命令</h3>${cmds}
-    <p class="muted">以上全部来自 <code>domain/datasets.py</code> 与 <code>domain/schemas.py</code>；面板不复制一份。</p>`;
+    <h3>${tr("命令", "Commands")}</h3>${cmds}
+    <p class="muted">${tr("以上全部来自", "Taken from")} <code>domain/datasets.py</code> ${tr("与", "and")} <code>domain/schemas.py</code>${tr("；面板不复制一份。", ". The page does not keep a second copy.")}</p>`;
 }
 
 // --- data tab ---------------------------------------------------------------
 
-const KIND_LABEL = {
-  trading_day: "交易日",
-  event_day: "事件日",
-  period: "周期",
-  report_period: "报告期",
-  none: "",
-};
+function kindLabel(kind) {
+  return {
+    trading_day: tr("交易日", "Session"),
+    event_day: tr("事件日", "Event day"),
+    period: tr("周期", "Period"),
+    report_period: tr("报告期", "Report period"),
+    none: "",
+  }[kind] || "";
+}
 
 /**
  * The date control is chosen by the server's `kind`, not assumed.
@@ -443,30 +619,30 @@ function dataControls(d, dates) {
   const picker =
     dates.kind === "none"
       ? ""
-      : `<label>${KIND_LABEL[dates.kind]}
+      : `<label>${kindLabel(dates.kind)}
         <select id="q-period">${dates.values
           .map((v) => `<option value="${esc(v)}">${esc(v)}</option>`)
           .join("")}</select></label>`;
-  const symbol = `<label>标的 <input id="q-symbol" placeholder="600519.SH" size="12"></label>`;
+  const symbol = `<label>${tr("标的", "Symbol")} <input id="q-symbol" placeholder="600519.SH" size="12"></label>`;
   // PIT datasets have no default "current" view. load() refuses without a
   // cutoff, on purpose. Seed it with today so the tab opens on something, and
   // say what it means.
   const asOf = d.pit
-    ? `<label title="PIT：只保留在该日之前已披露的事实，并取当时现行的那一版">
+    ? `<label title="${tr("PIT：只保留在该日之前已披露的事实，并取当时现行的那一版", "PIT: keep facts announced on or before this date, at the version current then")}">
          as_of <input id="q-asof" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>`
     : "";
   const adjust = d.adjustable
-    ? `<label>复权 <select id="q-adjust">
-         <option value="">不复权</option><option value="hfq">hfq</option>
+    ? `<label>${tr("复权", "Adjust")} <select id="q-adjust">
+         <option value="">${tr("不复权", "None")}</option><option value="hfq">hfq</option>
          <option value="qfq">qfq</option></select></label>`
     : "";
   const note = dates.note ? `<p class="muted">${esc(dates.note)}</p>` : "";
   return `<div class="controls">${picker}${symbol}${asOf}${adjust}
-    <button id="q-run">查询</button></div>${note}`;
+    <button id="q-run">${tr("查询", "Query")}</button></div>${note}`;
 }
 
 function rowTable(page, primaryKey) {
-  if (!page.rows.length) return '<p class="muted">没有匹配的行。</p>';
+  if (!page.rows.length) return `<p class="muted">${tr("没有匹配的行。", "No matching rows.")}</p>`;
   const head = page.columns
     .map((c) => `<th${primaryKey.includes(c) ? ' class="pk"' : ""}>${esc(c)}</th>`)
     .join("");
@@ -476,8 +652,8 @@ function rowTable(page, primaryKey) {
   const shown = `${page.offset + 1}-${page.offset + page.rows.length} / ${fmt(page.total)}`;
   return `<div class="scroll"><table class="rows"><tr>${head}</tr>${body}</table></div>
     <div class="controls">
-      <button id="q-prev" ${page.offset === 0 ? "disabled" : ""}>上一页</button>
-      <button id="q-next" ${page.offset + page.limit >= page.total ? "disabled" : ""}>下一页</button>
+      <button id="q-prev" ${page.offset === 0 ? "disabled" : ""}>${tr("上一页", "Previous")}</button>
+      <button id="q-next" ${page.offset + page.limit >= page.total ? "disabled" : ""}>${tr("下一页", "Next")}</button>
       <span class="muted">${shown}</span>
     </div>`;
 }
@@ -501,7 +677,7 @@ async function dataTab(d, host) {
     if (asOf) params.set("as_of", asOf);
     if (adjust) params.set("adjust", adjust);
     params.set("offset", String(state.offset));
-    out.innerHTML = '<p class="muted">查询中…</p>';
+    out.innerHTML = `<p class="muted">${tr("查询中…", "Querying…")}</p>`;
     try {
       const page = await api(`/api/datasets/${enc}/rows?${params}`);
       out.innerHTML = rowTable(page, d.primary_key);
@@ -522,7 +698,7 @@ async function dataTab(d, host) {
 }
 
 async function renderDetail(name, tab) {
-  setPage(`<div class="loading-state"><span>加载 ${esc(name)}…</span></div>`, "datasets");
+  setPage(`<div class="loading-state"><span>${tr(`加载 ${esc(ds(name))}…`, `Loading ${esc(ds(name))}…`)}</span></div>`, "datasets");
   const enc = encodeURIComponent(name);
   const [d, series, prov] = await Promise.all([
     api(`/api/datasets/${enc}`),
@@ -532,25 +708,25 @@ async function renderDetail(name, tab) {
   const cls = d.freshness === "fresh" ? "fresh" : d.freshness === "stale" ? "stale" : "empty";
   setPage(`
     <section class="page-heading">
-      <div class="eyebrow">数据湖控制台 / 数据集 / ${esc(d.tier)}</div>
-      <div class="heading-row"><div><div class="page-title-with-status"><h1>${esc(d.dataset)}</h1>${statusPill(cls)}</div>
-        <p class="sub">${esc(d.tier_label)} · ${esc(d.layer)} · ${esc(d.history_mode)}${d.required ? "" : " · 可选数据集"}</p></div>
-        <div class="action-row"><a class="button button-ghost" href="#/datasets">← 返回数据集</a></div>
+      <div class="eyebrow">${tr("数据湖控制台 / 数据集", "Lake console / Datasets")} / ${esc(d.tier)}</div>
+      <div class="heading-row"><div><div class="page-title-with-status"><h1>${dsMarkup(d.dataset)}</h1>${statusPill(cls)}</div>
+        <p class="sub">${esc(tierText(d.tier, d.tier_label))} · ${esc(d.layer)} · ${esc(historyText(d.history_mode))}${d.required ? "" : tr(" · 可选数据集", " · optional")}</p></div>
+        <div class="action-row">${datasetActionButtons(d)}</div>
       </div>
     </section>
-    <section class="metric-grid detail-metrics" aria-label="数据集关键指标">
-      ${kpi(`<span title="${fmt(d.row_count)} 行">${compact(d.row_count)}</span>`, "行数", "curated")}
-      ${kpi(mb(d.bytes), "存储", "curated")}
-      ${kpi(esc(d.watermark || "-"), "水位", d.watermarked ? "维护中" : "不维护水位")}
-      ${kpi(esc(d.coverage_end || "-"), "覆盖至", d.granularity || "merge")}
+    <section class="metric-grid detail-metrics" aria-label="${tr("数据集关键指标", "Dataset metrics")}">
+      ${kpi(`<span title="${fmt(d.row_count)} ${tr("行", "rows")}">${compact(d.row_count)}</span>`, tr("行数", "Rows"), "curated")}
+      ${kpi(mb(d.bytes), tr("存储", "Storage"), "curated")}
+      ${kpi(esc(d.watermark || "-"), tr("水位", "Watermark"), d.watermarked ? tr("维护中", "Maintained") : tr("不维护水位", "No watermark"))}
+      ${kpi(esc(d.coverage_end || "-"), tr("覆盖至", "Covered through"), partitionText(d.granularity))}
     </section>
     <section class="surface-panel detail-workspace">
-    <nav class="tabs" aria-label="数据集详情标签页">
+    <nav class="tabs" aria-label="${tr("数据集详情标签页", "Dataset tabs")}">
       ${["state", "meta", "data"]
         .map(
-          (t) =>
-            `<a class="tab ${tab === t ? "on" : ""}" href="#/dataset/${enc}/${t}" aria-current="${tab === t ? "page" : "false"}">${
-              { state: "状态", meta: "元数据", data: "数据" }[t]
+          (name) =>
+            `<a class="tab ${tab === name ? "on" : ""}" href="#/dataset/${enc}/${name}" aria-current="${tab === name ? "page" : "false"}">${
+              { state: tr("状态", "Status"), meta: tr("元数据", "Metadata"), data: tr("数据", "Data") }[name]
             }</a>`,
         )
         .join("")}
@@ -560,7 +736,7 @@ async function renderDetail(name, tab) {
 
   if (tab === "state") {
     provenanceSeries(document.getElementById("prov"), series);
-    document.getElementById("provnote").textContent = `每点跨度：${series.bucket}`;
+    document.getElementById("provnote").textContent = tr(`每点跨度：${series.bucket}`, `Each point spans ${series.bucket}`);
   } else if (tab === "data") {
     await dataTab(d, document.getElementById("tabbody"));
   }
@@ -570,175 +746,6 @@ async function renderDetail(name, tab) {
   });
 }
 
-// --- runs -------------------------------------------------------------------
-
-const AGO = (iso) => {
-  if (!iso) return "-";
-  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (secs < 90) return `${Math.round(secs)} 秒前`;
-  if (secs < 5400) return `${Math.round(secs / 60)} 分钟前`;
-  if (secs < 172800) return `${Math.round(secs / 3600)} 小时前`;
-  return `${Math.round(secs / 86400)} 天前`;
-};
-
-const DURATION = (a, b) => {
-  if (!a) return "-";
-  const secs = Math.max(0, ((b ? new Date(b) : new Date()).getTime() - new Date(a).getTime()) / 1000);
-  return secs < 90 ? `${Math.round(secs)}s` : `${Math.round(secs / 60)}m`;
-};
-
-async function renderRuns() {
-  const runs = await api("/api/runs?limit=40");
-  const succeeded = runs.filter((r) => r.status === "success").length;
-  const running = runs.filter((r) => r.status === "running").length;
-  const failed = runs.filter((r) => r.status === "failed").length;
-  const written = runs.reduce((sum, r) => sum + (r.rows_written || 0), 0);
-  const rows = runs.map((r) => {
-    // The full message goes in the title. Slicing to 60 chars was the only
-    // thing standing between the reader and the rest of a stack trace, and it
-    // cut without saying it had cut.
-    const err = r.error_message || "";
-    return `<tr class="data-row">
-      <td><a class="table-link" href="#/runs/${encodeURIComponent(r.run_id)}">${esc(r.job_name)}</a></td>
-      <td>${statusPill(r.status)}</td>
-      <td class="muted cell-time">${AGO(r.started_at)}</td>
-      <td class="n">${DURATION(r.started_at, r.finished_at)}</td>
-      <td class="n">${fmt(r.rows_written)}</td>
-      <td class="cell-tally">${tally(r.batch_status)}</td>
-      <td class="muted cell-truncate"${err ? ` title="${esc(err)}"` : ""}><span>${esc(err) || "-"}</span></td>
-    </tr>`;
-  });
-
-  setPage(`
-    <section class="page-heading"><div class="eyebrow">数据湖控制台 / 跑批</div><div class="heading-row"><div><h1>跑批</h1><p class="sub">最近 ${runs.length} 个 run，查看执行状态、写入规模与 batch 时间线。</p></div></div></section>
-    <section class="metric-grid run-metrics" aria-label="跑批关键指标">
-      ${kpi(num(runs.length), "最近运行", "最多 40 个")}
-      ${kpi(num(succeeded), "成功", "success")}
-      ${kpi(num(running), "运行中", "running", running ? "live" : "")}
-      ${kpi(num(failed), "失败", "failed", failed ? "alert" : "")}
-      ${kpi(`<span title="${fmt(written)} 行">${compact(written)}</span>`, "累计写入", "当前列表")}
-    </section>
-    <section class="surface-panel table-panel"><div class="panel-header"><div><div class="eyebrow">Run history</div><h2>运行记录</h2></div><span class="panel-meta">点击任务名查看详情</span></div>
-    ${dataTable(
-      ["job", "状态", "开始", { h: "耗时", n: true }, { h: "写入", n: true }, "batch", "错误"],
-      rows,
-      "还没有运行记录。",
-      "data-table",
-    )}</section>`, "runs");
-}
-
-let runStream = null;
-let runTicker = null;
-let lastRunDetail = null;
-
-function closeRunStream() {
-  if (runStream) {
-    runStream.close();
-    runStream = null;
-  }
-  if (runTicker) {
-    clearInterval(runTicker);
-    runTicker = null;
-  }
-  lastRunDetail = null;
-}
-
-/**
- * Advance the clock between stream frames.
- *
- * The stream only fires when the manifest changes, and a batch heartbeats far
- * less often than once a second, measured at one frame in 70s on an intraday
- * backfill. Without a local tick the elapsed time and the running bar's leading
- * edge sit frozen under a badge that says 实时, which is worse than not
- * claiming it. The data still comes from the stream; only "now" moves here.
- */
-function startRunTicker() {
-  if (runTicker) clearInterval(runTicker);
-  let ticks = 0;
-  runTicker = setInterval(() => {
-    if (!lastRunDetail || lastRunDetail.status !== "running") return;
-    const el = document.getElementById("run-status");
-    if (!el) return closeRunStream();
-    paintRunStatus(lastRunDetail);
-    // The bar's right edge is "now" too, but redrawing a canvas every second
-    // to move it a few pixels is not worth it.
-    if (++ticks % 5 === 0) runGantt(document.getElementById("run-gantt"), lastRunDetail);
-  }, 1000);
-}
-
-function paintRunStatus(detail) {
-  const live = detail.status === "running";
-  document.getElementById("run-status").innerHTML =
-    `${esc(detail.status)}${live ? ' <span class="live">● 实时</span>' : ""}
-     · ${DURATION(detail.started_at, detail.finished_at)}
-     · ${fmt(detail.rows_written)} 行`;
-}
-
-function paintRun(detail) {
-  lastRunDetail = detail;
-  paintRunStatus(detail);
-
-  const stalled = detail.batches.filter((b) => b.stalled);
-  document.getElementById("run-note").innerHTML = stalled.length
-    ? `<div class="banner">${stalled.length} 个 batch 仍是 running 但已静默超过
-       ${Math.round(detail.stale_after_seconds / 60)} 分钟。下次 run 会把它们判为 failed：
-       ${stalled.map((b) => `<code>${esc(b.dataset)}</code>`).join(" ")}</div>`
-    : "";
-
-  runGantt(document.getElementById("run-gantt"), detail);
-
-  const failed = detail.batches.filter((b) => b.error_message);
-  document.getElementById("run-errors").innerHTML = failed.length
-    ? `<section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Failures</div><h2>失败的 Batch</h2></div><span class="panel-meta">${failed.length} 项</span></div>
-       ${dataTable(
-         ["数据集", "状态", { h: "重试", n: true }, "错误"],
-         failed.map(
-           (b) => `<tr><td><code>${esc(b.dataset)}</code></td><td>${statusPill(b.status)}</td>
-             <td class="n">${num(b.retry_count)}</td>
-             <td class="muted">${esc(b.error_message)}</td></tr>`,
-         ),
-         "",
-       )}</section>`
-    : "";
-}
-
-async function renderRunDetail(runId) {
-  const detail = await api(`/api/runs/${encodeURIComponent(runId)}`);
-  setPage(`
-    <section class="page-heading"><div class="eyebrow">数据湖控制台 / 跑批 / 运行详情</div><div class="heading-row"><div><h1>${esc(detail.job_name)}</h1><p class="sub"><span id="run-status"></span> · <code>${esc(detail.run_id)}</code></p></div><div class="action-row"><a class="button button-ghost" href="#/runs">← 返回跑批</a></div></div></section>
-    <section class="metric-grid detail-metrics" aria-label="运行关键指标">
-      ${kpi(DURATION(detail.started_at, detail.finished_at), "耗时", detail.status === "running" ? "持续更新" : "已结束")}
-      ${kpi(`<span title="${fmt(detail.rows_written)} 行">${compact(detail.rows_written)}</span>`, "写入", "行")}
-      ${kpi(num(detail.batches.length), "Batch", "数据集任务")}
-      ${kpi(AGO(detail.started_at), "开始", esc((detail.started_at || "").slice(0, 19)))}
-    </section>
-    <div id="run-note"></div>
-    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Timeline</div><h2>Batch 时间线</h2></div><span class="panel-meta">按数据集分道</span></div><div id="run-gantt"></div>
-    <p class="legend">
-      <span><i class="swatch" style="background:var(--cell-covered)"></i> success</span>
-      <span><i class="swatch" style="background:var(--series-1)"></i> running</span>
-      <span><i class="swatch" style="background:var(--cell-gap)"></i> failed</span>
-      <span><i class="swatch" style="background:var(--series-4)"></i> stale</span>
-      <span>橙色描边 = 有重试；斜纹 = 已静默</span>
-    </p></section>
-    <div id="run-errors" class="report-stack"></div>`, "runs");
-  paintRun(detail);
-
-  // Only a running job can change. Subscribing to a finished one would hold a
-  // connection open for events that can never arrive.
-  if (detail.status !== "running") return;
-  startRunTicker();
-  const url = TOKEN
-    ? `/api/stream/runs/${encodeURIComponent(runId)}?token=${encodeURIComponent(TOKEN)}`
-    : `/api/stream/runs/${encodeURIComponent(runId)}`;
-  runStream = new EventSource(url);
-  runStream.onmessage = (e) => {
-    // Ignore late frames for a run the user has already navigated away from.
-    if (!location.hash.includes(runId)) return closeRunStream();
-    paintRun(JSON.parse(e.data));
-  };
-  runStream.onerror = () => closeRunStream();
-}
 
 // --- quality ----------------------------------------------------------------
 
@@ -778,52 +785,63 @@ async function renderQuality() {
   );
 
   const onDemandRows = q.on_demand.map(
-    (e) => `<tr class="data-row"><td>${esc(e.dataset)}</td><td class="n">${fmt(e.entries)}</td>
+    (e) => `<tr class="data-row"><td>${dsLink(e.dataset)}</td><td class="n">${fmt(e.entries)}</td>
       <td class="n">${mb(e.bytes)}</td><td class="muted cell-time">${esc((e.newest || "").slice(0, 10)) || "-"}</td></tr>`,
   );
 
   setPage(`
-    <section class="page-heading"><div class="eyebrow">数据湖控制台 / 质量</div><div class="heading-row"><div><h1>质量</h1><p class="sub">审计、跨源比对、隔离区与按需缓存的只读证据面板。</p></div></div></section>
-    <section class="metric-grid quality-metrics" aria-label="质量关键指标">
-      ${kpi(num(q.findings_runs.length), "审计快照", q.findings_runs[0]?.trade_date || "暂无")}
-      ${kpi(num(latestFindings.error, "err"), "最新错误", "error", latestFindings.error ? "alert" : "")}
-      ${kpi(num(latestFindings.warning), "最新警告", "warning")}
-      ${kpi(num(quarantineFiles), "隔离文件", mb(quarantineBytes))}
-      ${kpi(num(cacheEntries), "按需缓存", "entries")}
+    <section class="page-heading"><div class="eyebrow">${tr("数据湖控制台 / 质量", "Lake console / Quality")}</div><div class="heading-row"><div><h1>${tr("质量", "Quality")}</h1><p class="sub">${tr("审计、跨源比对、隔离区与按需缓存的只读证据面板。", "Read-only evidence for audits, cross-source diffs, quarantine, and on-demand cache.")}</p></div>
+      <div class="action-row"><a class="${latestFindings.error ? "button button-primary" : "button button-ghost"}" href="#/ops?op=check.audit">${tr("全湖审计", "Full-lake audit")}</a></div></div></section>
+    <section class="metric-grid quality-metrics" aria-label="${tr("质量关键指标", "Quality metrics")}">
+      ${kpi(num(q.findings_runs.length), tr("审计快照", "Audit snapshots"), q.findings_runs[0]?.trade_date || tr("暂无", "None yet"))}
+      ${kpi(num(latestFindings.error, "err"), tr("最新错误", "Latest errors"), "error", latestFindings.error ? "alert" : "")}
+      ${kpi(num(latestFindings.warning), tr("最新警告", "Latest warnings"), "warning")}
+      ${kpi(num(quarantineFiles), tr("隔离文件", "Quarantine files"), mb(quarantineBytes))}
+      ${kpi(num(cacheEntries), tr("按需缓存", "On-demand cache"), "entries")}
     </section>
     <div class="report-stack">
-    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Audit findings</div><h2>审计趋势</h2></div><span class="panel-meta">按审计日</span></div>
+    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Audit findings</div><h2>${tr("审计趋势", "Audit trend")}</h2></div><span class="panel-meta">${tr("按审计日", "By audit date")}</span></div>
     <div id="sev-chart"></div>
     ${dataTable(
-      ["审计日", { h: "error", n: true }, { h: "warning", n: true }, { h: "info", n: true }, "主要 check"],
+      [tr("审计日", "Audit date"), { h: "error", n: true }, { h: "warning", n: true }, { h: "info", n: true }, tr("主要 check", "Top checks")],
       findingsRows,
-      "还没有 findings。",
+      tr("还没有 findings。", "No findings yet."),
     )}</section>
 
-    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Cross-source</div><h2>跨源比对</h2></div><span class="panel-meta">主源 vs 备源</span></div>
-    ${panelNote(`主源与备源在同一天同一字段上的分歧。<strong><code>no_overlap</code> 是「两边没有共同主键可比」，
-      不是「一致」</strong>。这是这张表最容易被读反的一行。`)}
+    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Cross-source</div><h2>${tr("跨源比对", "Cross-source")}</h2></div><span class="panel-meta">${tr("主源 vs 备源", "Primary vs backup")}</span></div>
+    ${panelNote(tr(
+      `主源与备源在同一天同一字段上的分歧。<strong><code>no_overlap</code> 是「两边没有共同主键可比」，不是「一致」</strong>。这是这张表最容易被读反的一行。`,
+      `Disagreement between the primary and backup source on the same day and field. <strong><code>no_overlap</code> means there is no shared key to compare, not that they agree</strong>.`,
+    ))}
     ${dataTable(
-      ["审计日", { h: "差异", n: true }, "按 check"],
+      [tr("审计日", "Audit date"), { h: tr("差异", "Diffs"), n: true }, tr("按 check", "By check")],
       diffRows,
-      "还没有跨源比对产物。",
+      tr("还没有跨源比对产物。", "No cross-source output yet."),
     )}</section>
 
-    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Quarantine</div><h2>隔离区</h2></div><span class="panel-meta">保留问题证据</span></div>
-    ${panelNote(`<strong>不是垃圾桶。</strong>这些是因为有问题而被撤出 curated 的数据，留着当证据。
-      删之前先看清楚是什么。`)}
+    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Quarantine</div><h2>${tr("隔离区", "Quarantine")}</h2></div><span class="panel-meta">${tr("保留问题证据", "Kept as evidence")}</span></div>
+    ${panelNote(tr(
+      `<strong>不是垃圾桶。</strong>这些是因为有问题而被撤出 curated 的数据，留着当证据。删之前先看清楚是什么。`,
+      `<strong>Not a trash bin.</strong> These rows were pulled out of curated because something was wrong, and they are kept as evidence. Read them before deleting.`,
+    ))}
     ${dataTable(
-      ["目录", { h: "文件", n: true }, { h: "体积", n: true }, "最后修改"],
+      [tr("目录", "Directory"), { h: tr("文件", "Files"), n: true }, { h: tr("体积", "Size"), n: true }, tr("最后修改", "Modified")],
       quarantineRows,
-      "隔离区是空的。",
+      tr("隔离区是空的。", "Quarantine is empty."),
     )}</section>
 
-    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">On-demand</div><h2>按需缓存</h2></div><span class="panel-meta">不进入 curated</span></div>
-    ${panelNote(`按 symbol 抓取、缓存在 <code>meta/on_demand/</code>，不进 curated。面板别处看不到它们。`)}
+    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">On-demand</div><h2>${tr("按需缓存", "On-demand cache")}</h2></div><span class="panel-meta">${tr("不进入 curated", "Not curated")}</span></div>
+    ${panelNote(tr(
+      `按 symbol 抓取、缓存在 <code>meta/on_demand/</code>，不进 curated。面板别处看不到它们。`,
+      `Fetched per symbol and cached under <code>meta/on_demand/</code>. They are not curated and do not appear elsewhere.`,
+    ))}
     ${dataTable(
-      ["数据集", { h: "条目", n: true }, { h: "体积", n: true }, "最新"],
+      [tr("数据集", "Dataset"), { h: tr("条目", "Entries"), n: true }, { h: tr("体积", "Size"), n: true }, tr("最新", "Newest")],
       onDemandRows,
-      `还没有人查过 on-demand 数据集（<code>stock_news</code> / <code>research_reports</code>）。这是正常状态，不是缺口。`,
+      tr(
+        `还没有人查过 on-demand 数据集（<code>stock_news</code> / <code>research_reports</code>）。这是正常状态，不是缺口。`,
+        `Nobody has queried the on-demand datasets (<code>stock_news</code> / <code>research_reports</code>) yet. That is expected, not a gap.`,
+      ),
     )}</section></div>`, "quality");
 
   severityTimeline(document.getElementById("sev-chart"), q.findings_runs);
@@ -841,19 +859,38 @@ async function renderQualityRun(runId) {
           .map((c) => {
             const v = r[c];
             if (v === undefined || v === null || v === "") return '<td><span class="muted">-</span></td>';
-            if (c === "severity") return `<td>${chip(v, TONE[v])}</td>`;
+            if (c === "severity") return `<td>${chip(statusText(v), TONE[v])}</td>`;
+            if (c === "dataset") return `<td>${dsLink(v)}</td>`;
             return `<td>${esc(v)}</td>`;
           })
           .join("")}</tr>`,
       ),
-      "无。",
+      tr("无。", "None."),
     );
 
   setPage(`
-    <section class="page-heading"><div class="eyebrow">数据湖控制台 / 质量 / 审计详情</div><div class="heading-row"><div><h1>${esc(d.trade_date || runId.slice(0, 8))}</h1><p class="sub"><code>${esc(d.run_id)}</code></p></div><div class="action-row"><a class="button button-ghost" href="#/quality">← 返回质量</a></div></div></section>
-    <section class="metric-grid metrics-2" aria-label="审计关键指标">${kpi(num(d.findings.length), "Findings", "审计发现")}${kpi(num(d.diffs.length), "Diffs", "跨源差异")}</section>
-    <div class="report-stack"><section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Findings</div><h2>审计发现</h2></div><span class="panel-meta">${d.findings.length} 项</span></div>${table(d.findings, ["severity", "dataset", "check", "message"])}</section>
-    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Cross-source</div><h2>跨源差异</h2></div><span class="panel-meta">${d.diffs.length} 项</span></div>${table(d.diffs, ["severity", "dataset", "check", "field", "bps", "message"])}</section></div>`, "quality");
+    <section class="page-heading"><div class="eyebrow">${tr("数据湖控制台 / 质量 / 审计详情", "Lake console / Quality / Audit")}</div><div class="heading-row"><div><h1>${esc(d.trade_date || runId.slice(0, 8))}</h1><p class="sub"><code>${esc(d.run_id)}</code></p></div><div class="action-row"><a class="button button-ghost" href="#/quality">${tr("← 返回质量", "← Quality")}</a></div></div></section>
+    <section class="metric-grid metrics-2" aria-label="${tr("审计关键指标", "Audit metrics")}">${kpi(num(d.findings.length), "Findings", tr("审计发现", "Audit findings"))}${kpi(num(d.diffs.length), "Diffs", tr("跨源差异", "Cross-source diffs"))}</section>
+    <div class="report-stack"><section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Findings</div><h2>${tr("审计发现", "Findings")}</h2></div><span class="panel-meta">${d.findings.length}</span></div>${table(d.findings, ["severity", "dataset", "check", "message"])}</section>
+    <section class="surface-panel report-panel"><div class="panel-header"><div><div class="eyebrow">Cross-source</div><h2>${tr("跨源差异", "Cross-source diffs")}</h2></div><span class="panel-meta">${d.diffs.length}</span></div>${table(d.diffs, ["severity", "dataset", "check", "field", "bps", "message"])}</section></div>`, "quality");
+}
+
+function runCtx() {
+  return {
+    api,
+    setPage,
+    esc,
+    dataTable,
+    kpi,
+    statusPill,
+    tally,
+    dsLink,
+    fmt,
+    num,
+    compact,
+    failureLine,
+    token: TOKEN,
+  };
 }
 
 // --- routing ----------------------------------------------------------------
@@ -862,31 +899,46 @@ async function route() {
   disposeAll();
   closeRunStream();
   closeStorage();
+  closeOps();
   const dataset = location.hash.match(/^#\/dataset\/([^/]+)(?:\/(state|meta|data))?/);
-  const run = location.hash.match(/^#\/runs\/(.+)$/);
+  const run = location.hash.match(/^#\/runs\/([^/?]+)/);
   const qrun = location.hash.match(/^#\/quality\/(.+)$/);
+  const opsJob = location.hash.match(/^#\/ops\/jobs\/([^/?]+)/);
+  const opsPage = location.hash === "#/ops" || location.hash.startsWith("#/ops?");
   try {
-    if (location.hash === "#/storage") await renderStorage({ api, setPage, esc, dataTable });
+    if (opsJob) await renderOps({ api, setPage, esc, dataTable, jobId: decodeURIComponent(opsJob[1]) });
+    else if (opsPage) await renderOps({ api, setPage, esc, dataTable });
+    else if (location.hash === "#/storage") await renderStorage({ api, setPage, esc, dataTable });
     else if (dataset) await renderDetail(decodeURIComponent(dataset[1]), dataset[2] || "state");
-    else if (run) await renderRunDetail(decodeURIComponent(run[1]));
-    else if (location.hash.startsWith("#/runs")) await renderRuns();
+    else if (run) await renderRunDetail(decodeURIComponent(run[1]), runCtx());
+    else if (location.hash.startsWith("#/runs")) await renderRuns(runCtx());
     else if (qrun) await renderQualityRun(decodeURIComponent(qrun[1]));
     else if (location.hash.startsWith("#/quality")) await renderQuality();
     else if (location.hash.startsWith("#/datasets")) await renderDatasets();
     else await renderOverview();
-    window.scrollTo(0, 0);
+    if (!location.hash.includes("?")) window.scrollTo(0, 0);
   } catch (err) {
-    setPage(`<section class="error-state"><div class="eyebrow">CNEquity</div><h1>加载失败</h1><p class="sub err">${esc(err.message)}</p><a class="button button-primary" href="#/">返回概览</a></section>`);
+    if (String(err.message || "").includes("尚未配置")) {
+      await renderOps({ api, setPage, esc, dataTable });
+      return;
+    }
+    setPage(`<section class="error-state"><div class="eyebrow">CNEquity</div><h1>${tr("加载失败", "Failed to load")}</h1><p class="sub err">${esc(err.message)}</p><a class="button button-primary" href="#/">${tr("返回概览", "Back to overview")}</a></section>`);
   }
 }
 
 // Delegated so it survives every re-render.
 document.addEventListener("click", (e) => {
+  const langButton = e.target.closest("[data-set-lang]");
+  if (langButton) {
+    setLang(langButton.dataset.setLang);
+    return;
+  }
   const link = e.target.closest("[data-ds]");
   if (link) {
     e.stopPropagation();
     location.hash = `#/dataset/${encodeURIComponent(link.dataset.ds)}`;
   }
 });
+onLanguageChange(() => route());
 window.addEventListener("hashchange", route);
 route();
