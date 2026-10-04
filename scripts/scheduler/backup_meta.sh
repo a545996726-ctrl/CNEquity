@@ -49,13 +49,12 @@ fi
 # metadata and accumulated acceptance evidence. Missing optional directories
 # are harmless on a newly initialized lake.
 #
-# `revisions/` is included for its RECEIPTS (`{dataset}/*.json`, a few MB) —
-# those name the generation a dataset currently points at and cannot be
-# rebuilt. `revisions/data/` is excluded: it holds the copy-on-write
-# generations themselves, which are byte-for-byte reconstructable from
-# `curated/` and are the overwhelming majority of the tree (16 GB vs ~120 MB
-# of receipts on a two-year lake). Archiving them turned a ~1 GB/day
-# generation growth into ~14 GB/day of rotating tarballs.
+# `revisions/` is included for its RECEIPTS (`{dataset}/*.json`) — those name
+# the generation a dataset currently points at and cannot be rebuilt.
+# `revisions/data/` is excluded: it holds the copy-on-write generations
+# themselves, which are reconstructable from `curated/` and are most of the
+# tree. Archiving them turns a small daily metadata copy into a full copy of
+# every generation.
 TAR_ARGS=()
 [[ -f "$TMP_DIR/manifest.db" ]] && TAR_ARGS+=(-C "$TMP_DIR" manifest.db)
 for sub in state quality revisions source_snapshots source_health stability; do
@@ -69,11 +68,9 @@ tar -czf "$ARCHIVE" --exclude 'revisions/data' "${TAR_ARGS[@]}"
 
 # Rotate by age *and* by count, whichever is stricter.
 #
-# Age alone assumed one archive a day. Nothing enforced that: any caller that
-# runs more often keeps every copy for the whole window, and a 45 MB archive
-# taken 262 times in one day is 11.8 GB that age-based rotation will not touch
-# for a fortnight. On the reference lake `backups/` had reached 14 GB — 35% of
-# the lake, larger than `curated/` itself.
+# Age alone assumed one archive a day. Nothing enforced that: a caller that
+# runs more often keeps every copy until the age window expires. The count
+# cap removes the extras.
 find "$BACKUP_DIR" -name 'meta-*.tar.gz' -type f -mtime "+$RETENTION_DAYS" -delete 2>/dev/null || true
 if [[ "$RETENTION_COUNT" -gt 0 ]]; then
   # Newest first, skip the ones we keep, delete the rest. `ls -t` is safe here:

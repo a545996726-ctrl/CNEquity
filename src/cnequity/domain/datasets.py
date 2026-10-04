@@ -783,20 +783,17 @@ _SPECS = [
         partial_rows=True,
         primary_source="tdx_protocol",
         backup_source="eastmoney",
-        # Measured on the reference lake for 2026-09-15: exchange 5,181 rows,
-        # bse 327, tdx_protocol 33, eastmoney 1. Every one of these lands rows
-        # under its own label through `_finish_daily_bars`' recovery chain.
+        # Each of these lands rows under its own label through
+        # `_finish_daily_bars`' recovery chain.
         supplementary_sources=("exchange", "bse", "sina", "ths", "ths_official", "baostock"),
         tier="L1",
         partition_col="trade_date",
         reconciliation_lookback_days=5,
         # TDX bills per symbol, not per session — one request returns up to 800
-        # bars — so the 5-session reconciliation window costs the same ~5,559
-        # requests as a single session would. The tip now comes from each
-        # exchange's own whole-board publication (2 requests, 5.9s, measured at
-        # 100% of the session's rows), which is what lets the per-symbol sweep
-        # be priced separately and run on its own cadence. The tail still
-        # catches vendor revisions, just weekly rather than daily.
+        # bars — so a short reconciliation window costs about the same as one
+        # session. The tip comes from each exchange's whole-board publication,
+        # which is priced separately and runs on its own cadence. The tail still
+        # catches vendor revisions, weekly rather than daily.
         shallow_reconciliation_lookback_days=1,
         reconciliation_lookback_mode="trading_day",
         coverage_mode="session_dense",

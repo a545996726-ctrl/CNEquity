@@ -190,9 +190,9 @@ def test_provenance_cannot_be_stamped_without_naming_the_vendor():
     """The default was `"tdx_protocol"`, and it answered for callers that had
     nothing to do with TDX.
 
-    That is how 58,672 `trading_status` rows came to name a vendor serving no
-    status feed: the step called this with no source, and the default filled
-    it in. The forwarder that produced those rows still lives in this very
+    That is how `trading_status` rows came to name a vendor serving no status
+    feed: the step called this with no source, and the default filled it in.
+    The forwarder that produced those rows still lives in this very
     module — `fetch_trading_status` goes straight to EastMoney — so the next
     caller is one keyword away from repeating it. Requiring the argument is
     what makes the mistake impossible rather than merely fixed once.

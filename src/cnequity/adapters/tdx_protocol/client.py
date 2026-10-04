@@ -1253,9 +1253,9 @@ def normalize_with_source(
     (volume in 股); everything else defaults to v1.
 
     *source* is required on purpose. It used to default to ``"tdx_protocol"``,
-    which is how 58,672 `trading_status` rows came to name a vendor that serves
-    no status feed at all: the step called this without a source, and the
-    default answered for it. A caller that has to name the vendor cannot make
+    which labeled `trading_status` rows with a vendor that serves no status
+    feed: the step called this without a source, and the default answered for
+    it. A caller that has to name the vendor cannot make
     that mistake silently, and one sitting in this module is the likeliest to
     make it — `fetch_trading_status` here forwards straight to EastMoney.
     """

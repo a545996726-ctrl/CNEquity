@@ -27,8 +27,8 @@
 
   <!-- Fires every day of the week, weekends and holidays included: that is the
        point of the events job, and `cne run events` does not consult the
-       trading calendar. 14:00 host-local lands around 20:00 CST for a UTC+2/+3
-       host, late enough to catch a day's disclosures — adjust for yours.
+       trading calendar. 14:00 is the host's local time, not Beijing time.
+       Move it so the sweep runs after that day's disclosures are likely posted.
 
        Firing more often is a per-feed decision, not a free one: the disclosure
        sweep re-reads a 30-day reconciliation tail every time it runs, while the

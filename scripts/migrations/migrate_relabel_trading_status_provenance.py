@@ -7,10 +7,9 @@ feed at all. Until the step began naming its source explicitly, those rows went
 through `normalize_with_source()`, whose default is ``source="tdx_protocol"``,
 and were stored claiming a provenance they never had.
 
-On the reference lake that is 58,672 rows over 3,196 symbols, 2026-07-06 to
-2026-08-14 — the day the step started stamping `eastmoney` itself. Every row
-after that date already carries the right label, so this is a bounded, closed
-defect rather than an ongoing one.
+The mislabeled rows stop on the day the step started stamping `eastmoney`
+itself. Every row after that date already carries the right label, so this is
+a bounded, closed defect rather than an ongoing one.
 
 Row-level provenance is the lake's headline guarantee: `source`,
 `data_version` and `fetched_at` are supposed to say where a row came from. A

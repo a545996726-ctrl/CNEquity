@@ -144,9 +144,9 @@ def test_daily_bars_reconciles_five_sessions_on_its_deep_day(tmp_path):
     """The reconciliation window that catches vendor revisions.
 
     TDX bills per symbol, not per session — one request returns up to 800 bars
-    — so this window costs the same ~5,559 requests whether it spans one
-    session or five. It is therefore priced as its own job and runs on its own
-    day; `deep_reconciliation_dow` names it (default Saturday).
+    — so this window costs about the same whether it spans one session or five.
+    It is therefore priced as its own job and runs on its own day;
+    `deep_reconciliation_dow` names it (default Saturday).
     """
     cfg = _calendar_lake(tmp_path, watermark=date(2024, 6, 25))
     saturday = date(2024, 6, 29)

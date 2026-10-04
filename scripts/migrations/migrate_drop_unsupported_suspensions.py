@@ -12,10 +12,10 @@ can see. "Nobody answered" is an unknown, and the classifier says so:
     source response remains ``unknown`` and must be retried.
         — cnequity/steps/common.py, classify_daily_bar_ownership
 
-On the reference lake this labelled 1,188 rows across 175 symbols, 171 of them
-ETF/LOF quote codes no vendor serves (now outside `[universe].ingest`), and 4
-real A shares whose fetch had simply failed that day — so it recorded a halt for
-securities that traded normally.
+The label covered fund quote codes no vendor serves (now outside
+`[universe].ingest`) and a few A shares whose fetch had simply failed that
+day, so it recorded a halt for securities that traded normally. Preview the
+affected symbols before applying; another lake's row count is not this lake's.
 
 The label no longer exists anywhere in the code, which is why the audit reports
 it as a source whose terms are undetermined (`unregistered_source`). Registering

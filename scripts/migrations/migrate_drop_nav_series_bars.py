@@ -10,10 +10,10 @@ turnover aggregate and tradable-universe filter then treats them as market data.
 `[universe].ingest = "all_a"` stops new ones arriving. This removes the ones
 already stored, using the audit's own criterion rather than a looser one: a
 symbol whose maximum volume *and* maximum turnover are both zero across at
-least 20 sessions in the trailing year. On the reference lake that is exactly
-the 60 symbols `untraded_instruments` reports, and none of them is an A share —
-a real security that is merely halted still carries prints either side of the
-halt, which is what makes the test structural rather than statistical.
+least 20 sessions in the trailing year. A halted A share still carries prints
+on either side of the halt, which is what makes the test structural rather
+than statistical. Preview the symbol list before `--apply`; do not treat
+another lake's count as this lake's.
 
 Only the zero-volume rows of those symbols are removed. If one of them ever
 genuinely traded, that session is a real observation and is kept.

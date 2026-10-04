@@ -68,9 +68,8 @@ def test_second_pass_over_migrated_data_changes_nothing():
 
 
 def test_denormal_no_trade_amount_is_snapped_to_zero():
-    # TDX decodes a raw-zero quantity to 2**-127, so every suspended day landed
-    # with 5.9e-39 yuan of turnover instead of the zero the schema promises —
-    # 439,774 rows across the reference lake.
+    # TDX decodes a raw-zero quantity to 2**-127, so a suspended day landed
+    # with 5.9e-39 yuan of turnover instead of the zero the schema promises.
     df = _frame([("tdx_protocol", 0, "v1")], amount=2.0**-127)
     out, _, _, dezeroed = migrate.migrate_frame(df)
     assert out["amount"].to_list() == [0.0]

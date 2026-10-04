@@ -18,8 +18,8 @@ What this does, per curated ``daily_bars`` parquet file:
 
 It also clears a second artefact of the same vintage. TDX decodes a raw-zero
 quantity to ``2**-127`` (~5.9e-39) instead of ``0.0``, so every suspended day
-was written with that much "turnover" rather than the zero the schema promises
-— 439,774 rows in the reference lake. ``volume`` escaped it through ``int()``
+was written with that much "turnover" rather than the zero the schema promises.
+``volume`` escaped it through ``int()``
 truncation; ``amount`` is a float and kept it, which quietly turned
 ``amount > 0`` into "was quoted" instead of "traded". New rows are fixed at the
 adapter boundary (``cnequity.adapters.tdx_protocol._decode``); this pass
