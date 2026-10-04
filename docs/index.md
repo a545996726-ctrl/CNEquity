@@ -14,6 +14,7 @@ description: 从首个查询到持续采集、历史研究与数据质量验收�
 | 我想…… | 阅读路径 |
 |---|---|
 | 建立可日更的数据湖 | [快速开始](getting-started/quickstart.md) → [初始化与续跑](getting-started/initialization.md) → [运行手册](operations/runbook.md) |
+| 在浏览器里查看、日更或备份 | [快速开始 · 浏览器](getting-started/quickstart.md#browser) → [定时任务与备份](operations/runbook.md#web-schedule) |
 | 查有哪些数据、能补多远 | [数据集目录](datasets/catalog.md) → [数据源限制](datasets/sources.md) → [字段与单位](datasets/schema.md) |
 | 研究复权、历史股票池或财报 | [查询指南](datasets/query-guide.md) → [研究示例](recipes/README.md) → [Python API](reference/python-api.md) |
 | 研究商品期货与期权 | [衍生品指南](recipes/derivatives.md) |

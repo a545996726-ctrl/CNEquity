@@ -1,6 +1,6 @@
 # MCP：把湖接给 AI agent
 
-`cne serve` 把湖给人看，`cne mcp` 把湖给模型用。同样**只读**：这里没有任何触发采集、重试、清理的入口，采集仍然只在 CLI 上，由人来跑。
+`cne serve` 把湖给人看，也可以从操作页发起白名单里的取数和日更。`cne mcp` 把湖给模型用，并且**只读**：这里没有任何触发采集、重试、清理的入口。
 
 当前实现是标准 MCP over stdio，不绑定 Claude 或任何特定模型。客户端拉起
 `cne mcp` 子进程，在 stdin/stdout 管道上交换 JSON-RPC；支持 stdio MCP 的

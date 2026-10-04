@@ -88,9 +88,9 @@ cne config validate --config configs/cnequity.toml
 | `proxy`（eastmoney） | 可选 HTTP(S) 代理 URL，对所有东财主机生效。按自身网络条件设置；未设时仍可用 `HTTPS_PROXY`。不能用轮换代理代替冷却 |
 | `push2_paused`（eastmoney） | 默认关，即允许请求。开启后 push2 / push2his / push2delay 请求在本地直接失败、不发出，用于出口 IP 被封时停请求冷却；datacenter 等其他东财主机不受影响。环境变量 `CNE_PUSH2_PAUSED=1` 效果相同；日更和晚间补跑均遵循本机配置及该环境变量，补跑不会自行关闭 push2 |
 | `push2_breaker`（eastmoney） | 默认开。push2 系第一次拒绝（403 / 429 / 5xx、连接被断、超时）后，所有 push2 主机当天（本地时间，到午夜）一律不再请求，也不切备用主机 |
-| `push2_daily_budget`（eastmoney） | 默认 150。push2 系每天（本地时间）请求上限，跨进程累计，用完即停；0 表示不限。正常一天约 100 次 |
+| `push2_daily_budget`（eastmoney） | 默认 150。push2 系每天（本地时间）请求上限，跨进程累计，用完即停；0 表示不限。上限按本机账本调整，不借用别的湖的次数 |
 | `push2_shared_snapshot`（eastmoney） | 默认开。instruments、valuation_metrics、fund_flow 和 clist 行情兜底共用一次全市场翻页（取字段并集），收盘后到次日开盘前重复使用 |
-| `push2_min_interval_seconds` / `push2_max_concurrency`（eastmoney） | 默认 4.0 秒 / 1。push2 单独的限速通道，不和 datacenter 共用；一次约 60 页的全市场扫描约 4 分钟 |
+| `push2_min_interval_seconds` / `push2_max_concurrency`（eastmoney） | 默认 4.0 秒 / 1。push2 单独的限速通道，不和 datacenter 共用 |
 | `datacenter_breaker` / `datacenter_breaker_strikes`（eastmoney） | 默认开 / 3。datacenter 连续 3 次被拒（403 / 429 / 5xx、连接被拒/重置/断开）当天停用；读超时不算；「请求过于频繁」退避后仍在则立即停用 |
 | `datacenter_daily_budget`（eastmoney） | 默认 0：只计数、不设上限（计数在 `CNE_RATE_LIMIT_ROOT/eastmoney_guard.json`，默认本湖 `meta/rate_limits/`）。按实测用量设上限 |
 | `daily_budget`（eastmoney） | 默认 0：只计数；设置后对同一出口的 push2 与 datacenter 请求实施共享日上限，避免分别未超额但厂商总请求过多。共享账本位于 `CNE_RATE_LIMIT_ROOT`。 |
@@ -99,6 +99,8 @@ cne config validate --config configs/cnequity.toml
 | `verify`（ths_official） | 默认 **开**。只允许写 `meta/source_snapshots` 与 findings，从不碰 curated 行，所以有 key 就可以安全开着 |
 | `backfill`（ths_official） | 默认 **关**。它会改变湖里的内容，所以必须显式打开。持有凭证、启用源、允许它改数据是三个决定 |
 | `api_key`（ths_official） | 建议用环境变量 `HITHINK_FINANCE_API_KEY` 而非写进配置 |
+
+`cne serve` 的取数设置只改通达信、东财、新浪日线、Baostock、北交所官网、同花顺页面和巨潮的 `enabled`，以及东财的 `push2_paused`。分钟线、分笔、期货开关和 `[universe] ingest` / `ingest_eligible_etfs` 也在那一页。确认前先列出差异，写入前备份；间隔、预算、熔断和凭据不动。环境变量 `CNE_PUSH2_PAUSED=1` 仍优先于配置里的暂停开关。
 
 模板请求间隔（客户端保守设置，不是源方安全配额保证）：
 

@@ -32,7 +32,7 @@
 | `cne run daily` | 执行时 | 增量取数并写湖；默认含全部调度组与事件流 |
 | `cne run events` | 执行时 | 事件取数并写湖 |
 | `cne run retry` | 执行时 | 重试失败范围并写湖 |
-| `cne serve` | 无 | 启动湖面板；存储页检查、确认后可标记或删除历史数据 |
+| `cne serve` | 条件 | 启动湖面板。回环地址可从操作页发起白名单内的取数与日更；--read-only 关闭写入口；远程取数须 --allow-remote-ops；存储清理仍须网页确认；取数开关经预览确认后写回配置并备份，不因此启动取数 |
 | `cne snapshot create` | 无 | 创建本地快照 |
 | `cne snapshot delta apply` | 无 | 应用本地增量包；--dry-run 仅校验 |
 | `cne snapshot delta create` | 无 | 创建本地增量包 |

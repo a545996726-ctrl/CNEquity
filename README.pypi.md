@@ -125,7 +125,7 @@ print(bars.tail())
 - **少写重复的数据工程。** 代码、字段、分区和增量窗口由数据层管理；中断后保留成功批次，按失败范围续跑。22 条源探针路由帮助诊断可达性（高成本端点需显式选择）。
 - **把研究口径说清楚。** 原始价与复权因子分开存；历史股票池保留退市身份；财报查询区分严格 PIT 与事后重建。
 - **结果有来源，也有版本。** 行级 `source`、`data_version`、`fetched_at` 配合不可变数据版本与研究快照，支持复查和重现。
-- **数据留在自己手里。** 开放的 Parquet 文件，通过 Python、DuckDB、Polars、只读 MCP 和控制台消费。
+- **数据留在自己手里。** 开放的 Parquet 文件，通过 Python、DuckDB、Polars、控制台和只读 MCP 消费。
 
 ### 幸存者偏差：今天的名单不能代替历史股票池
 
@@ -137,7 +137,7 @@ print(bars.tail())
 
 CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口径进入查询契约，避免下游研究在无意中丢掉这些标的。
 
-![CNEquity 只读控制台：健康状态、数据覆盖与待处理问题](https://raw.githubusercontent.com/rootSunc/CNEquity/main/docs/assets/cne-serve-hero-demo.png)
+![CNEquity 控制台：健康状态、数据覆盖与待处理问题](https://raw.githubusercontent.com/rootSunc/CNEquity/main/docs/assets/cne-serve-hero-demo.png)
 
 *控制台示意截图（标有 ILLUSTRATIVE DEMO）；图中的 42/42、行数和容量均为虚构展示值，不是当前注册数量或实际覆盖。*
 

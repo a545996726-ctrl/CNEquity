@@ -12,6 +12,8 @@ cne init
 
 连不上数据源时先运行 `cne doctor`（离线体检），再看[排障指南](../operations/troubleshooting.md)。
 
+也可以不先开终端做这件事：默认配置还不存在时，`cne serve` 会进入首次配置，在本机页面上填写数据目录、看体检结果，再启动和上面相同的 `cne init`。缺少的目录会自动建立。体检还在跑时不能开始初始化。页面会先显示将执行的命令，核对后再点“开始初始化”。目录里已经有数据湖时，页面会说明将接管该目录且不会清空，确认后才给出这条命令。如果配置已生成，但初始化参数有误或任务暂时被占用，可以修正参数或等占用结束后重新预览。改了深度、起点或“失败后继续”之后，也要重新预览。已经在跑的初始化关掉页面也不会停。没跑完的初始化在操作页上可以直接续跑。
+
 `init` 按 `[job.init.phases]` 建目录、manifest、视图并回填证券、日历、公司行为、日线、指数、交易状态及派生数据。只建布局可用 `cne init --layout-only`；它不产生研究数据。
 
 <a id="init-scope"></a>
@@ -43,7 +45,15 @@ cne backfill trading_status --start 2016-01-01 --end YYYY-MM-DD --config configs
 
 # 之后每天执行一次：全部日更组 + 事件流
 cne run daily --config configs/cnequity.toml
+
+# 只保持行情和基本面时：初始化下载不变，日更只跑对应调度组
+cne init --pack market --pack fundamentals --schedule
+cne check --pack market --pack fundamentals
 ```
+
+`--pack` 不改变这次初始化下载的内容。`market` 是行情主干，`fundamentals` 是财报、股本和披露日程（日更组还会带上指数成分、行业成分和股东人数；估值历史另用 `cne backfill valuation_metrics`），`universe` 只标记需要历史 ST，不增加日更请求。不写 `--pack` 时沿用已保存的选择，第一次是 `market`。`--schedule` 在初始化成功结束后，为这些研究包安装当前用户的定时日更和收尾补抓，不含公告和资讯；安装失败不会把已经建好的湖判成失败。交易状态这类快照漏掉当天，下一次按日期的日更补不回这一天。
+
+日线某一批封存之后，`load("daily_bars", symbols=[...])` 可以读到已经完成的未复权行情。不写 `symbols` 的查询仍只看已发布数据，所以半程扫描不会被当成全市场。复权因子在初始化收尾、`adj_factors` 发布之后才可用。
 
 历史 ST checkpoint 按起止日与 universe 区分；跨天续跑请保持这三个范围不变。当前交易状态和日线派生停牌不等于完整历史 ST 证据。
 
@@ -105,7 +115,7 @@ cne backfill daily_bars --symbols 600519.SH,000001.SZ --start 2026-09-15 --end 2
 cne check
 ```
 
-一条命令依次给出新鲜度与覆盖（同 `cne status --datasets --gate`）、数据质量（最近一次 run 的审计和全湖审计快照）和规模，最后给出结论；退出码 0 可用、1 有缺口或质量 error、2 证明不了。全湖审计要读每个历史分区，默认读最近一次的结果，需要当场重跑时加 `--full`。
+一条命令依次给出新鲜度与覆盖（同 `cne status --datasets --gate`）、数据质量（最近一次 run 的审计和全湖审计快照）和规模，最后给出结论；退出码 0 可用、1 有缺口或质量 error、2 证明不了。全湖审计要读每个历史分区，默认读最近一次的结果，需要当场重跑时加 `--full`。`--pack` 另按研究包给出窗口、缺口和下一步，缺数据或历史 ST 未覆盖会使退出码变差；不写 `--pack` 时结论与以前相同。
 
 `fresh` 是新鲜度；审计健康也不等于任意历史窗口都可研究。全量审计会写报告，且按源开关执行外部核验，详见[命令副作用](../reference/cli-surface.md)。需要历史股票池时，再按真实研究窗口执行 `audit --full --research-start ... --research-end ...`，或使用严格 profile 查询。
 

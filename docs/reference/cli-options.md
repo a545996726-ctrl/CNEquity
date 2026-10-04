@@ -57,6 +57,7 @@
 |---|---|---|
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
 | `--full` | `False` | 立即重跑全湖审计（读每个历史分区，大湖可能要数小时）；默认读最近一次的审计结果。 |
+| `--pack` | `—` | 按研究包给出窗口、缺口和下一步。可重复。指定后，缺数据或历史 ST 未覆盖会使退出码变差。 |
 
 ## `cne config`
 
@@ -172,6 +173,8 @@
 | `--keep-going` | `False` | 某个阶段失败后继续往下跑，而不是停下来。 |
 | `--since` | `—` | 显式指定历史起点（YYYY-MM-DD）；覆盖 --profile。 |
 | `--quiet` | `False` | 只留 warning 及以上，不打逐批进度。 |
+| `--pack` | `—` | 研究包：market 行情、fundamentals 基本面、universe 历史 ST。不改变这次初始化下载的内容。决定结束后要保持更新的调度组，以及 `cne check --pack` 的结论。可重复。不写则沿用已保存的选择，第一次是 market。 |
+| `--schedule` | `False` | 初始化成功结束后，为所选研究包安装定时日更和收尾补抓。不含公告和资讯。 |
 
 ## `cne mcp`
 
@@ -276,6 +279,7 @@
 | `--quiet` | `False` | 只留 warning 及以上，不打逐步进度。 |
 | `--stale-only` | `False` | 只重抓仍然落后于最后交易日的数据集。挂在主 pipeline 几小时之后跑：snapshot 类数据集一旦因源端中断丢掉当天窗口，第二天就补不回来了。 |
 | `--snapshots-only` | `False` | 配合 --stale-only：只重抓 snapshot 类数据集；历史类留给下一次日更按日期补。 |
+| `--pack` | `—` | 只跑这些研究包对应的日更调度组，不跑事件流。不写则仍跑全部调度组和事件流。可重复。 |
 
 ## `cne run events`
 
@@ -299,9 +303,11 @@
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
-| `--host` | `127.0.0.1` | — |
+| `--host` | `127.0.0.1` | 回环地址会同时监听 127.0.0.1 和 localhost。非回环地址必须配 --token。 |
 | `--port` | `8787` | — |
 | `--token` | `—` | 要求这个 bearer token（或 ?token=）。--host 不是回环地址时必须设置。 |
+| `--read-only` | `False` | 只浏览。不注册操作页和存储清理的写入口。 |
+| `--allow-remote-ops` | `False` | 非回环地址上也可以从面板发起取数。默认远程只能浏览和做存储清理；令牌在网址里，局域网又是明文。 |
 
 ## `cne snapshot create`
 

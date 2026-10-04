@@ -54,12 +54,11 @@ cne run clean
 **用途**：7x24 事件流（公告、监管事件、资讯）。`cne run events` 一次跑完
 `[job.events.groups]` 里的所有组，或用 `CNE_EVENTS_GROUP` 指定一个。
 
-**和 `daily_pipeline.sh` 分开的两个理由**，都不是风格问题：
+**和 `daily_pipeline.sh` 分开的原因：**
 
-- 这些源**周末和节假日照发**，而 `cne run daily` 在非交易日直接跳过整个任务；
-- 它拿自己的 shell 锁（`events`）和自己的 ingestion 锁（`events_ingestion`），
-  所以晚间批处理正在跑并不会让这一次事件抓取被跳过。两个任务写的数据集不相交，
-  这一点由 `validate_config` 保证。
+- 仓库日更脚本按组调用 `cne run daily --group`，这一条不包含事件流。不带参数的 `cne run daily` 会在调度组之后自己跑事件流；非交易日跳过调度组，事件流仍然运行。
+- 事件流使用单独的 shell 锁（`events`）和 `events_ingestion` 锁，可以和按组日更重叠。两边写入的数据集不相交，由配置校验保证。
+- 公告和资讯在周末、节假日也会发布，所以这个任务按自然日调度，不看交易日历。
 
 **环境变量**：`CNE_CONFIG`、`CNE_LOG_DIR`、`CNE_BIN`、`CNE_TRADE_DATE`、
 `CNE_EVENTS_GROUP`（默认全部组）、`CNE_SCHEDULER_LOCK_DIR`。
@@ -89,7 +88,7 @@ macOS 不带 `flock`，而 Python 那把 run lock 的作用域只有一次 `cne`
 ### install_scheduler.sh / uninstall_scheduler.sh
 
 从 `scripts/scheduler/launchd/com.cnequity.daily.plist.template` 生成用户 launchd plist，加载 `daily_pipeline.sh`。
-同时安装 `com.cnequity.stale`（收尾补抓）与 `com.cnequity.events`（事件流，每个自然日 14:00 本机时区）。
+同时安装 `com.cnequity.stale`（收尾补抓）与 `com.cnequity.events`（事件流，每个自然日 14:00，按本机时区，不是北京时间；可按自己的披露节奏改）。
 安装时用 `CNE_SOURCE_VANTAGE=cn scripts/scheduler/install_scheduler.sh` 固化真实出口标签；省略时
 使用 `local`。标签仅允许字母、数字、点、下划线和连字符，防止生成无效 plist。
 

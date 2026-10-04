@@ -14,6 +14,7 @@
 
 | 能力 | 脚本 | 作用 |
 |------|------|------|
+| 调度 | `cne serve` → 操作 → 定时任务 | 跨平台启用、暂停或改时间；日更和收尾补抓的结果统一在 Web 查看 |
 | 调度 | `scripts/scheduler/daily_pipeline.sh` | 按配置顺序串行跑已启用日更组 + 健康检查 + 备份 |
 | 调度 | `scripts/scheduler/install_scheduler.sh` | 安装 macOS launchd（每个交易日北京时间 `[job.daily] run_at` 之后跑一次，与本机时区无关） |
 | 调度 | `scripts/scheduler/uninstall_scheduler.sh` | 卸载 launchd |
@@ -77,9 +78,7 @@ soft 组仍按失败次数升级，但同一日期重试不会重复计为多天
 - 每小时唤醒，**每个交易日北京时间 `[job.daily] run_at`（默认 17:30）之后跑一次**；
   与本机时区、夏令时无关，重装不保留旧的本机时间。
 - 非交易日自动跳过（退出 0）
-- **漏跑 / 周末补数**：`uv run python scripts/run_catchup.py`（门禁 core + breadth；水位已齐则
-  `skipped_already_fresh`），或 `scripts/scheduler/daily_pipeline.sh YYYY-MM-DD` /
-  `CNE_TRADE_DATE=...`（全组定点）
+- **漏跑 / 周末补数**：`python scripts/run_catchup.py` 补最近一个交易日的 core 与 breadth；水位已到目标日的部分记为 `skipped_already_fresh`。要按日重跑全部调度组，用 `scripts/scheduler/daily_pipeline.sh YYYY-MM-DD` 或 `CNE_TRADE_DATE=...`。
 - **按当前出口选择调度组**：先检查源健康，再启用实际能够维护的组。一个出口的失败不能推出某个地域都不可用；出现拒绝先冷却，不通过换出口继续同一轮抓取。见[取数与源保护](fetch-policy.md)。
 
 ```bash
@@ -88,7 +87,19 @@ launchctl start com.cnequity.daily   # 手动触发
 scripts/scheduler/uninstall_scheduler.sh
 ```
 
-**Linux cron**：
+<a id="web-schedule"></a>
+
+### Web 管理跨平台定时任务
+
+安装包用户可在 `cne serve` 的操作页设置定时任务，无需复制仓库脚本：选择自动日更、收尾补抓、每日数据备份或独立事件流，设置时间和范围，先预览再确认。日更与补抓每个交易日各尝试一次；备份按北京时间的自然日到点后尝试一次，选择数据集及备份目录；事件流选择配置中的事件组，按 1–1440 分钟间隔运行，包含周末和节假日。系统每分钟检查一次，结果和日志显示在最近任务中，关闭 serve 后仍会运行。所有 Web 任务共享单任务槽，占用时等待后续检查；事件流不累积补跑，失败也从尝试开始时计算间隔。
+
+macOS 使用当前用户的 launchd，Windows 使用当前登录用户的任务计划程序，两者均须用户保持登录；Linux 使用当前用户的 crontab，并须 cron 服务运行。系统睡眠时不执行，恢复后的下一次检查会在交易日窗口内补跑日更与补抓；备份只补当天，事件流按当前间隔判断。页面同时显示系统任务状态和最近检查；超过 20 分钟未检查时，排查用户登录、机器休眠和 cron 服务。系统注册成功表示任务定义已安装，最近检查记录才说明系统实际触发过。
+
+日更与补抓时间保存在原配置的 `[job.daily] run_at` / `[job.stale] run_at`，首次改动前保存 `.schedule.bak`，其他设置和注释保留。备份和事件流设置随湖保存；备份不自动删除旧副本，需关注存储空间。暂停阻止后续自动执行，已经启动的任务在任务详情里另行取消。即使系统任务因权限变化无法删除，暂停设置仍能阻止随包入口继续取数；页面会提示手动核对系统任务。
+
+Web 只管理自己创建的系统任务，不接管已有 launchd 脚本或其他 cron / Windows 任务。迁移前核对并停用重复入口。Web 日更执行 `cne run daily`，每日备份执行所选数据集的 `cne snapshot create`，独立事件流执行所选组的 `cne run events`。仓库脚本的额外健康通知、元数据 tar 归档仍由原调度负责，Web 不自动附加这些脚本。系统任务固定使用创建时的 Python 环境、工作目录及配置路径；移动环境后重新设置，数据源所需配置也须在无人值守环境中可用。
+
+**Linux cron（手动配置方案）**：
 
 ```cron
 # 每小时唤醒；CNE_SCHEDULED=1 让脚本自己按北京时间 run_at 判断每个交易日只跑一次
@@ -153,12 +164,18 @@ cne sources resilience --enforce      # 核心数据集独立备援门禁与单�
 cne verify --runs --days 20 --enforce # 连续交易日运行证据
 ```
 
+`cne serve` 的操作页可以启动其中的新鲜度、全湖审计和 `cne verify`，以及下面的重跑、重试和补抓。页面同一时间只跑一个任务，并且会占用调度脚本的同一把锁，定时任务碰到它会跳过并在下一小时再判断。
+
+
+
 ## 失败处置
 
 1. 查看 `daily-*.log` 定位失败组
-2. 重跑单组：`cne run daily --group <name>`
-3. 批级失败：`cne status` → `cne run retry --run-id <id>`
+2. 重跑单组：`cne run daily --group <name>`（操作页的「跑一个调度组」是同一条命令）
+3. 批级失败：`cne status` → `cne run retry --run-id <id>`（跑批详情里的「重试此 run」）
 4. 复核：`cne audit --full` + `cne status --datasets --gate`
+
+从操作页启动的日更和定时任务用同一把调度锁，目录是 `{data.root}/locks`（`CNE_SCHEDULER_LOCK_DIR` 或 `CNE_LOCK_DIR` 仍可改到别处）。只跑一个调度组、补跑或 stale-only 不会把这一天记成“定时日更已跑过”；跑完全部调度组、而且已经过了当天的 `run_at`，才会写这个标记。
 
 `degraded` 表示覆盖受限；写命令返回 0，显式质量门禁可返回 2，仍需要查看缺口步骤：成功发布的表仍可读取，但不代表组内全部数据到齐。
 例如暂停 push2 后，资金流会尝试把同花顺口径写入 `fund_flow_ths` / `sector_fund_flow_ths`；
@@ -177,13 +194,17 @@ cne verify --runs --days 20 --enforce # 连续交易日运行证据
 
 ## 备份与恢复
 
+操作页提供“创建数据备份”、备份目录与列表、“校验”及“恢复到新目录”。创建时明确选择已发布的数据集；可选择湖外磁盘目录，也可在定时设置中启用每日备份。湖内新备份仅允许放在 `meta/snapshots` 或 `backups`，避免混入业务数据目录。列表只读取清单，不代表文件已经通过完整校验。校验和恢复均作为独立任务运行，进度与结果可在任务详情查看。
+
+Web 备份复用可移植湖快照，包含所选数据及对应状态、契约、修订与血缘信息，不包含原 TOML 配置、凭据或完整运行数据库；它不等于整个系统的容灾镜像。恢复先展示备份范围和目标，确认后完整校验文件摘要，再复制到当前数据湖和备份目录之外的新目录或空目录。清单在预览后变化须重新预览，校验失败不恢复。恢复后 serve 仍使用原数据湖；用独立配置验收恢复目标，确认后再切换。备份不会自动删除旧副本；磁盘级容灾需选用外部存储并另行保存配置和凭据。
+
 `backup_meta.sh` 只备份 manifest、state、quality、revision 收据、来源快照和运行证据；
 **不包含** `curated/`、`derived/` 或 `meta/revisions/data/` 中的数据版本文件。
 有些历史可重采，有些快照型数据错过窗口后无法从原源补回，因此不能把元数据归档当作
 完整湖备份。需要恢复研究数据时，另建并校验可移植快照，或对整个湖做一致性备份。
 
 ```bash
-scripts/scheduler/backup_meta.sh /abs/path/to/lake /Volumes/ext/cne-bak 30 30
+scripts/scheduler/backup_meta.sh /abs/path/to/lake /path/to/offsite/cne-meta 30 30
 ```
 
 `DATA_ROOT` 是湖目录，不是 TOML 配置路径；省略时脚本使用 `CNE_DATA_ROOT`，
@@ -195,7 +216,7 @@ scripts/scheduler/backup_meta.sh /abs/path/to/lake /Volumes/ext/cne-bak 30 30
 
 ```bash
 mkdir -p /tmp/cnequity-meta-review
-tar -xzf /Volumes/ext/cne-bak/meta-YYYYMMDD-HHMMSS.tar.gz \
+tar -xzf /path/to/offsite/cne-meta/meta-YYYYMMDD-HHMMSS.tar.gz \
   -C /tmp/cnequity-meta-review
 ```
 
