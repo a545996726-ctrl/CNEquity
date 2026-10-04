@@ -276,7 +276,9 @@ def _missing_dataset_message(dataset: str, root, data_root) -> str:
     on a lake that has bars but no factors yet, where the missing dataset is
     one the reader asked for rather than one the caller named.
     """
-    remedy = (
+    from cnequity.research.packs import next_command_for_dataset
+
+    remedy = next_command_for_dataset(dataset) or (
         f"cne derive {dataset}"
         if dataset in {"adj_factors", "industry_index"}
         else f"cne backfill {dataset}"
@@ -293,6 +295,32 @@ def _dataset_root(config: Config, dataset: str) -> Path:
     if dataset in CURATED_DATASETS:
         return config.curated_root / dataset
     raise ReaderError(f"unknown dataset {dataset!r}")
+
+
+def _day_has_traded_bar(config: Config, day: date) -> bool:
+    """Whether one daily-bar session contains a real print.
+
+    Coverage only needs the first and last such session. Opening every
+    partition footer to answer that question is what made the dashboard's
+    first paint scan the whole price history.
+    """
+    try:
+        found = (
+            scan_parquet_root(
+                _dataset_root(config, "daily_bars"),
+                partition_col="trade_date",
+                start=day,
+                end=day,
+                traded_only=True,
+                dataset="daily_bars",
+                meta_root=config.meta_root,
+            )
+            .limit(1)
+            .collect()
+        )
+    except FileNotFoundError:
+        return False
+    return found.height > 0
 
 
 def _catalog_coverage_bounds(config: Config, dataset: str) -> tuple[date | None, date | None]:
@@ -327,13 +355,21 @@ def _catalog_coverage_bounds(config: Config, dataset: str) -> tuple[date | None,
         return parts[0].start, parts[-1].end
     if parts and spec.query_date_col != spec.partition_col and not root_files:
         return parts[0].start, parts[-1].end
-    if (
-        dataset != "daily_bars"
-        and parts
-        and all(part.start == part.end for part in parts)
-        and not root_files
-    ):
-        return parts[0].start, parts[-1].end
+    if parts and all(part.start == part.end for part in parts) and not root_files:
+        if dataset != "daily_bars":
+            return parts[0].start, parts[-1].end
+        # An empty or all-zero day must not extend coverage, but the days in
+        # between are not needed to name the two endpoints.
+        start = next(
+            (part.start for part in parts if _day_has_traded_bar(config, part.start)), None
+        )
+        if start is None:
+            return None, None
+        end = next(
+            (part.start for part in reversed(parts) if _day_has_traded_bar(config, part.start)),
+            None,
+        )
+        return start, end
 
     date_col = spec.query_date_col
     if date_col is None:
@@ -403,6 +439,51 @@ def _drop_otc_quotes(
     )
 
 
+def _preview_can_answer(dataset: str, symbols, revision, read_context) -> bool:
+    """Finished symbols are readable on the live lake, not on a pinned revision.
+
+    ``load`` always captures the current committed roots. That capture is not a
+    historical pin; a pin arrives as ``revision``.
+    """
+    del read_context
+    return dataset == "daily_bars" and bool(symbols) and revision is None
+
+
+def _with_daily_bar_preview(
+    config: Config,
+    df: pl.DataFrame,
+    *,
+    dataset: str,
+    symbols: list[str] | None,
+    start: date | None,
+    end: date | None,
+    revision: RevisionRef | None,
+    read_context: ReadContext | None,
+) -> pl.DataFrame:
+    """Add sealed, not-yet-published bars for an explicit symbol list.
+
+    A sweep publishes the whole market in one compact. Until then, finished
+    batches are readable only when the caller names symbols and does not pin a
+    revision. Adjusted columns still require published ``adj_factors``.
+    """
+    if not _preview_can_answer(dataset, symbols, revision, read_context):
+        return df
+    have: set[str] = set()
+    if not df.is_empty() and "symbol" in df.columns:
+        have = set(df.get_column("symbol").to_list())
+    missing = [symbol for symbol in symbols or [] if symbol not in have]
+    if not missing:
+        return df
+    from cnequity.research.preview import read_daily_bar_preview
+
+    extra = read_daily_bar_preview(config, missing, start, end)
+    if extra.is_empty():
+        return df
+    if df.is_empty():
+        return extra
+    return pl.concat([df, extra], how="diagonal_relaxed")
+
+
 def _read_dataset(
     config: Config,
     dataset: str,
@@ -417,30 +498,45 @@ def _read_dataset(
     include_otc: bool = True,
 ) -> pl.DataFrame:
     root = read_context.roots[dataset] if read_context else _dataset_root(config, dataset)
-    if not dataset_has_parquet(
+    published = dataset_has_parquet(
         root,
         dataset=dataset,
         meta_root=config.meta_root,
         revision=revision,
         committed=read_context is None,
-    ):
+    )
+    if not published and not _preview_can_answer(dataset, symbols, revision, read_context):
         raise ReaderError(_missing_dataset_message(dataset, root, config.data_root))
 
     partition_col = DATE_COLUMNS.get(dataset) or partition_col_for_dataset(dataset)
-    try:
-        df = collect_parquet_root(
-            root,
-            partition_col=partition_col,
-            start=start,
-            end=end,
-            symbols=symbols,
-            dataset=dataset,
-            meta_root=config.meta_root,
-            revision=revision,
-            committed=read_context is None,
-        )
-    except FileNotFoundError as exc:
-        raise ReaderError(_missing_dataset_message(dataset, root, config.data_root)) from exc
+    df = pl.DataFrame()
+    if published:
+        try:
+            df = collect_parquet_root(
+                root,
+                partition_col=partition_col,
+                start=start,
+                end=end,
+                symbols=symbols,
+                dataset=dataset,
+                meta_root=config.meta_root,
+                revision=revision,
+                committed=read_context is None,
+            )
+        except FileNotFoundError as exc:
+            raise ReaderError(_missing_dataset_message(dataset, root, config.data_root)) from exc
+    df = _with_daily_bar_preview(
+        config,
+        df,
+        dataset=dataset,
+        symbols=symbols,
+        start=start,
+        end=end,
+        revision=revision,
+        read_context=read_context,
+    )
+    if df.is_empty() and not published:
+        raise ReaderError(_missing_dataset_message(dataset, root, config.data_root))
     if not include_otc and dataset in OTC_SCOPED_DATASETS and not df.is_empty():
         df = _drop_otc_quotes(df, config, read_context, DATE_COLUMNS.get(dataset, "trade_date"))
     # Apply semantic scope before strict schema validation.  Live snapshots

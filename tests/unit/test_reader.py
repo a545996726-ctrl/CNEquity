@@ -674,6 +674,32 @@ def test_list_datasets_does_not_count_empty_daily_bar_partition_as_coverage(tmp_
     assert row["coverage_end"] is None
 
 
+def test_daily_bar_coverage_stops_at_the_last_traded_session(tmp_path):
+    import polars as pl
+
+    from cnequity.config import Config
+    from cnequity.query.reader import list_datasets
+
+    cfg = Config(data_root=tmp_path)
+    traded = date(2024, 6, 27)
+    empty = date(2024, 6, 28)
+    for day, volume in ((traded, 100), (empty, 0)):
+        root = cfg.curated_root / "daily_bars" / f"trade_date={day.isoformat()}"
+        root.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "symbol": ["600519.SH"],
+                "trade_date": [day],
+                "volume": [volume],
+            }
+        ).write_parquet(root / "part.parquet")
+
+    row = list_datasets(config=cfg).filter(pl.col("dataset") == "daily_bars").to_dicts()[0]
+
+    assert row["coverage_start"] == traded
+    assert row["coverage_end"] == traded
+
+
 def test_list_datasets_clamps_partial_derived_dense_tip(tmp_path):
     from cnequity.query.reader import list_datasets
 

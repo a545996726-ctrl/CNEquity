@@ -287,6 +287,7 @@ def _run_all_groups(
     repairs: list,
     include_events: bool = False,
     audit_after: bool = False,
+    only: list[str] | None = None,
 ):
     """Run every schedule group in config order, one at a time.
 
@@ -316,7 +317,19 @@ def _run_all_groups(
     from cnequity.orchestrator.cadence import due_steps
 
     schedule_date = td or _last_trading_day(cfg, shanghai_today())
-    for name, group in cfg.schedule_groups.items():
+    selected = (
+        cfg.schedule_groups.items()
+        if only is None
+        else [(name, cfg.schedule_groups[name]) for name in only if name in cfg.schedule_groups]
+    )
+    if only is not None:
+        missing = [name for name in only if name not in cfg.schedule_groups]
+        if missing:
+            click.echo("配置里没有这些调度组：" + "、".join(missing), err=True)
+        if not selected:
+            click.echo(json.dumps({"groups": [], "repairs": repairs}, indent=2))
+            return
+    for name, group in selected:
         if not _group_is_runnable(cfg, group):
             click.echo(f"调度组 {name}：跳过（它要抓的数据集全部处于关闭状态）", err=True)
             results.append({"group": name, "status": "skipped_disabled"})
@@ -598,6 +611,13 @@ def datasets_outside_the_daily_waves(cfg) -> list[str]:
     is_flag=True,
     help="配合 --stale-only：只重抓 snapshot 类数据集；历史类留给下一次日更按日期补。",
 )
+@click.option(
+    "--pack",
+    "pack_names",
+    multiple=True,
+    type=click.Choice(["market", "fundamentals", "universe"]),
+    help=("只跑这些研究包对应的日更调度组，不跑事件流。不写则仍跑全部调度组和事件流。可重复。"),
+)
 def run_daily(
     config_path: str,
     group_name: str | None,
@@ -611,6 +631,7 @@ def run_daily(
     snapshots_only: bool = False,
     core_only: bool = False,
     no_events: bool = False,
+    pack_names: tuple[str, ...] = (),
 ):
     """跑一天的更新：全部日更调度组，再跑事件流。
 
@@ -642,6 +663,10 @@ def run_daily(
         raise click.ClickException(
             "--core-only 只跑核心骨架，不能和 --group / --all-groups / --stale-only 同用。"
         )
+    if pack_names and (group_name or all_groups or stale_only or core_only):
+        raise click.ClickException(
+            "--pack 只选择研究包的调度组，不能和 --group / --all-groups / --stale-only / --core-only 同用。"
+        )
     if no_events and (group_name or all_groups or stale_only or core_only):
         raise click.ClickException(
             "--no-events 只用于不带 --group / --all-groups / --stale-only / --core-only 的完整日更。"
@@ -671,6 +696,31 @@ def run_daily(
         repairs = _auto_repair_gaps(cfg, _last_trading_day(cfg, td or shanghai_today()))
     if all_groups:
         _run_all_groups(cfg, engine, td, backfill=backfill, repairs=repairs)
+        return
+    if pack_names:
+        from cnequity.research.packs import SNAPSHOT_NOTE, groups_for, snapshot_steps
+
+        selected_groups = groups_for(pack_names)
+        click.echo(SNAPSHOT_NOTE, err=True)
+        snapshots = snapshot_steps(cfg, selected_groups)
+        if snapshots:
+            click.echo("漏一天就补不回：" + "、".join(snapshots), err=True)
+        if not selected_groups:
+            click.echo(
+                "这些研究包没有日更调度组。历史 ST 用 `cne backfill trading_status`。", err=True
+            )
+            click.echo(json.dumps({"groups": [], "repairs": repairs}, indent=2))
+            return
+        _run_all_groups(
+            cfg,
+            engine,
+            td,
+            backfill=backfill,
+            repairs=repairs,
+            include_events=False,
+            audit_after=True,
+            only=selected_groups,
+        )
         return
     if not group_name and not core_only and cfg.schedule_groups:
         _warn_schedule_drift(config_path)

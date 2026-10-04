@@ -476,7 +476,9 @@ def apply_universe_filter(
                 f"{universe} universe requires a complete historical ST evidence receipt for "
                 f"{requested[date_col].min().isoformat()}.."
                 f"{requested[date_col].max().isoformat()} "
-                f"({evidence.get('reason') or 'no_matching_complete_receipt'})"
+                f"({evidence.get('reason') or 'no_matching_complete_receipt'}). "
+                "Current trading_status does not replace it. "
+                "Next: `cne backfill trading_status`"
             )
 
     bad = (

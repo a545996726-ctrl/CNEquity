@@ -539,6 +539,30 @@ def fetch_daily_bars_parallel(
     # instead — from the moment the first full round drained — and offer no
     # number until there is a round to measure.
     first_round_at: float | None = None
+    announced_preview = False
+
+    def _expose_batch(batch_id: str) -> None:
+        """Make a sealed daily-bar batch readable by symbol before compact."""
+        nonlocal announced_preview
+        if dataset != "daily_bars":
+            return
+        try:
+            from cnequity.research.preview import publish_daily_bar_preview
+
+            symbols_ready = publish_daily_bar_preview(config, run_id, batch_id)
+        except Exception as exc:  # noqa: BLE001 — a preview miss must not fail a sealed batch
+            logger.warning("daily_bars preview skipped for %s: %s", batch_id, exc)
+            return
+        if not symbols_ready:
+            return
+        if not announced_preview:
+            announced_preview = True
+            logger.info(
+                "daily_bars: finished symbols can be loaded before this sweep ends, "
+                'for example load("daily_bars", symbols=[%r]). '
+                "Adjusted prices publish with adj_factors at the end of init.",
+                symbols_ready[0],
+            )
 
     def _progress(batch_symbols: list[str], failed_symbols: list[str] | None = None) -> None:
         nonlocal done, first_round_at
@@ -626,6 +650,7 @@ def fetch_daily_bars_parallel(
                 total_written += int(existing["rows_written"] or 0)
                 metrics["rows_read"] += int(existing["rows_read"] or 0)
                 metrics["rows_written"] += int(existing["rows_written"] or 0)
+                _expose_batch(batch_id)
                 _progress(batch_symbols)
                 continue
             try:
@@ -633,6 +658,7 @@ def fetch_daily_bars_parallel(
                 total_read += result["rows_read"]
                 total_written += result["rows_written"]
                 _merge_metrics(result)
+                _expose_batch(batch_id)
                 _progress(batch_symbols)
             except Exception as exc:
                 had_error = True
@@ -679,6 +705,7 @@ def fetch_daily_bars_parallel(
         metrics["rows_read"] += int(existing["rows_read"] or 0)
         metrics["rows_written"] += int(existing["rows_written"] or 0)
         pending.pop(batch_id, None)
+        _expose_batch(batch_id)
         _progress(batch[1])
     if not pending:
         return _outcome(False)
@@ -707,6 +734,7 @@ def fetch_daily_bars_parallel(
                             total_read += result["rows_read"]
                             total_written += result["rows_written"]
                             _merge_metrics(result)
+                            _expose_batch(batch_id)
                             _progress(batch[1] if batch else [])
                         except Exception as exc:
                             had_error = True
@@ -744,6 +772,7 @@ def fetch_daily_bars_parallel(
                     total_written += result["rows_written"]
                     _merge_metrics(result)
                     pending.pop(batch[0], None)
+                    _expose_batch(batch[0])
                     _progress(batch[1])
                 except Exception as retry_exc:
                     failed_scope = _failed_symbols_for_error(retry_exc, batch[1])
@@ -784,6 +813,7 @@ def fetch_daily_bars_parallel(
                         total_written += result["rows_written"]
                         _merge_metrics(result)
                         batch = pending.pop(batch_id, None)
+                        _expose_batch(str(result.get("batch_id") or batch_id))
                         _progress(batch[1] if batch else [])
                     except BrokenProcessPool:
                         # This one poisoned the pool. Leave it (and everything still

@@ -1502,8 +1502,15 @@ def _report_outstanding_keys(cfg, datasets: list[str]) -> None:
     is_flag=True,
     help="立即重跑全湖审计（读每个历史分区，大湖可能要数小时）；默认读最近一次的审计结果。",
 )
+@click.option(
+    "--pack",
+    "pack_names",
+    multiple=True,
+    type=click.Choice(["market", "fundamentals", "universe"]),
+    help="按研究包给出窗口、缺口和下一步。可重复。指定后，缺数据或历史 ST 未覆盖会使退出码变差。",
+)
 @click.pass_context
-def check(ctx: click.Context, config_path: str, full: bool):
+def check(ctx: click.Context, config_path: str, full: bool, pack_names: tuple[str, ...]):
     """验收这个湖：新鲜度与覆盖、数据质量、规模，一条命令给出结论。
 
     \b
@@ -1512,6 +1519,7 @@ def check(ctx: click.Context, config_path: str, full: bool):
       2. 数据质量 —— 最近一次 run 的审计和最近的全湖审计快照；`--full` 当场重跑全湖审计；
       3. 规模 —— 数据集、行数和体积（统计表过期时先自动重算）。
     退出码取最差的一项：0 可用；1 有缺口或质量 error；2 证明不了（缺证据或配置问题）。
+    `--pack` 另按研究包给出窗口、缺口和下一步。
     """
     cfg = _cfg(config_path)
     codes: list[int] = []
@@ -1544,6 +1552,17 @@ def check(ctx: click.Context, config_path: str, full: bool):
 
     click.echo("\n== 规模 ==")
     _check_size(cfg)
+
+    if pack_names:
+        from cnequity.research.packs import assess, format_readiness, readiness_exit_code
+
+        click.echo("\n== 研究包 ==")
+        rows = assess(cfg, pack_names)
+        click.echo(format_readiness(cfg, pack_names))
+        pack_code = readiness_exit_code(rows)
+        codes.append(pack_code)
+        if pack_code:
+            problems.append("研究包还有缺口" if pack_code == 1 else "研究包证明不了")
 
     worst = 1 if 1 in codes else max(codes, default=0)
     click.echo("\n== 结论 ==")

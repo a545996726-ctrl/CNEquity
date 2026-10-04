@@ -107,13 +107,24 @@ def _echo_init_plan(
 # flags rather than accepting and ignoring them.
 DEMO_PROFILES = ("demo", "sample")
 _DEMO_ONLY = ("symbols", "days", "data_root", "config_out", "intraday", "research", "force")
-_LAKE_ONLY = ("config_path", "layout_only", "resume", "resume_run_id", "keep_going", "since_str")
+_LAKE_ONLY = (
+    "config_path",
+    "layout_only",
+    "resume",
+    "resume_run_id",
+    "keep_going",
+    "since_str",
+    "pack_names",
+    "schedule",
+)
 _FLAG_NAMES = {
     "config_path": "--config",
     "data_root": "--data-root",
     "config_out": "--config-out",
     "resume_run_id": "--run-id",
     "since_str": "--since",
+    "pack_names": "--pack",
+    "schedule": "--schedule",
 }
 
 
@@ -235,6 +246,22 @@ def _reject_foreign_options(profile: str, names: tuple[str, ...]) -> None:
     help="显式指定历史起点（YYYY-MM-DD）；覆盖 --profile。",
 )
 @click.option("--quiet", is_flag=True, help="只留 warning 及以上，不打逐批进度。")
+@click.option(
+    "--pack",
+    "pack_names",
+    multiple=True,
+    type=click.Choice(["market", "fundamentals", "universe"]),
+    help=(
+        "研究包：market 行情、fundamentals 基本面、universe 历史 ST。"
+        "不改变这次初始化下载的内容。决定结束后要保持更新的调度组，以及 `cne check --pack` 的结论。"
+        "可重复。不写则沿用已保存的选择，第一次是 market。"
+    ),
+)
+@click.option(
+    "--schedule",
+    is_flag=True,
+    help="初始化成功结束后，为所选研究包安装定时日更和收尾补抓。不含公告和资讯。",
+)
 def init(
     config_path: str,
     profile: str,
@@ -252,6 +279,8 @@ def init(
     keep_going: bool,
     since_str: str | None,
     quiet: bool,
+    pack_names: tuple[str, ...],
+    schedule: bool,
 ):
     """初始化数据湖，并按配置跑完 init 各阶段。
 
@@ -370,6 +399,9 @@ def init(
         config_path=config_path,
         ingest_universe=cfg.ingest_universe,
     )
+    from cnequity.research.packs import format_readiness, remember_packs
+
+    chosen_packs = remember_packs(cfg, pack_names, override=bool(pack_names))
 
     result = engine.run_init_phases(
         trade_date=td,
@@ -378,9 +410,36 @@ def init(
         keep_going=keep_going,
     )
     click.echo(json.dumps(result, indent=2, default=str))
+    click.echo(format_readiness(cfg, chosen_packs), err=True)
     exit_code = _run_status_exit_code(str(result.get("status", "failed")))
+    if schedule and not exit_code:
+        click.echo(_install_pack_schedule(cfg, chosen_packs), err=True)
+    elif schedule:
+        click.echo("初始化未成功结束，未安装定时任务。", err=True)
     if exit_code:
         raise SystemExit(exit_code)
+
+
+def _install_pack_schedule(cfg, packs: tuple[str, ...]) -> str:
+    """Register the current-user timer for these packs. A failure leaves the lake."""
+    from cnequity.research.packs import SNAPSHOT_NOTE, groups_for
+    from cnequity.serve.ops.catalog import OpsError
+    from cnequity.serve.ops.scheduler import ScheduleService
+
+    try:
+        service = ScheduleService(cfg)
+        preview = service.preview(
+            daily=True,
+            stale=True,
+            daily_run_at=cfg.daily_run_at,
+            stale_run_at=cfg.stale_run_at,
+            daily_packs=list(packs),
+        )
+        service.apply(preview["token"], acknowledged=True, requested_by="cne-init")
+    except (OpsError, OSError, ValueError) as exc:
+        return f"定时任务没有安装：{exc}"
+    groups = "、".join(groups_for(packs)) or "无"
+    return f"已安装定时日更和收尾补抓，调度组：{groups}。{SNAPSHOT_NOTE}"
 
 
 #: What `cne config` does, and the spellings that used to mean one of them.

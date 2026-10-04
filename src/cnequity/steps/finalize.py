@@ -623,6 +623,26 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
             if rows:
                 compacted.add(ds)
             total += rows
+            if ds == "daily_bars" and selected_files:
+                from cnequity.research.preview import retire_preview_symbols
+
+                try:
+                    published_symbols = (
+                        pl.concat(
+                            [
+                                pl.read_parquet(path, columns=["symbol"])
+                                for path in selected_files
+                                if path.exists()
+                            ],
+                            how="vertical_relaxed",
+                        )
+                        .get_column("symbol")
+                        .unique()
+                        .to_list()
+                    )
+                except (OSError, ValueError, pl.exceptions.PolarsError):
+                    published_symbols = []
+                retire_preview_symbols(config, [str(symbol) for symbol in published_symbols])
 
         _record_dataset_result(
             config,
