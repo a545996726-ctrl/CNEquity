@@ -13,12 +13,24 @@ from cnequity.config import Config
 from cnequity.config.bootstrap import path_for_toml
 from cnequity.orchestrator.scheduler_lock import (
     SchedulerLockError,
+    _proc_state,
     lock_directory,
+    pid_alive,
     scheduler_lock,
     scheduler_lock_holder,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_an_unreaped_exit_is_not_a_live_process(monkeypatch):
+    assert _proc_state("12 (cne job) Z 1 1") == "Z"
+    assert _proc_state("12 (name) with) paren) S 1") == "S"
+    monkeypatch.setattr(
+        "cnequity.orchestrator.scheduler_lock._zombie",
+        lambda pid: True,
+    )
+    assert pid_alive(os.getpid()) is False
 
 
 def test_lock_directory_follows_the_data_root_unless_overridden(tmp_path, monkeypatch):

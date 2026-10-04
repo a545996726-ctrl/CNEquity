@@ -41,6 +41,28 @@ def lock_directory(config: Config) -> Path:
     return Path(config.data_root).resolve() / "locks"
 
 
+def _proc_state(stat_text: str) -> str | None:
+    """The state field from ``/proc/<pid>/stat``. ``comm`` may contain spaces."""
+    end = stat_text.rfind(")")
+    if end < 0:
+        return None
+    fields = stat_text[end + 1 :].split()
+    return fields[0] if fields else None
+
+
+def _zombie(pid: int) -> bool:
+    """An exited process whose parent has not waited is not doing work.
+
+    ``os.kill(pid, 0)`` still succeeds for that pid, which made a cancelled
+    panel job look running until the parent reaped it.
+    """
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _proc_state(text) == "Z"
+
+
 def pid_alive(pid: int) -> bool:
     """Whether *pid* is a live process.
 
@@ -61,7 +83,7 @@ def pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
-    return True
+    return not _zombie(pid)
 
 
 def _read_pid(path: Path) -> int | None:
