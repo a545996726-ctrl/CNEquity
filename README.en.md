@@ -59,7 +59,7 @@ Then run `cne run daily` once a day to stay current. For longer history, or what
 - **Spend less time rebuilding ingestion.** Normalize symbols and columns once, track incremental windows, and resume failed work without discarding successful batches. There are 22 source-probe routes; costly endpoints require explicit selection.
 - **Make research assumptions explicit.** Store raw prices separately from adjustment factors; preserve delisted identities; distinguish strict point-in-time evidence from reconstructed history.
 - **Keep provenance and versions.** Rows carry `source`, `data_version` and `fetched_at`; immutable generations and research snapshots support later inspection.
-- **Own the storage.** Query open Parquet files through Python, DuckDB, Polars, a read-only MCP server or the dashboard.
+- **Own the storage.** Query open Parquet files through Python, DuckDB, Polars, the dashboard and a read-only MCP server.
 
 ### Survivorship bias: today's roster is not a historical universe
 
@@ -99,7 +99,7 @@ Adapters and batch orchestration collect data into staging; validated batches be
 cne run daily
 ```
 
-Schedule this one command every day, weekends included: on trading days it runs every enabled daily group, then updates announcements, regulatory events and news; on other days it runs only the event stream. Accept the lake with `cne check`, which exits non-zero on gaps or quality errors.
+Schedule this one command every day, weekends included: on trading days it runs every enabled daily group, then updates announcements, regulatory events and news; on other days it runs only the event stream. The operations page in `cne serve` can install that daily run and the catch-up pass for the current user, without copying the repository scripts. Accept the lake with `cne check`, which exits non-zero on gaps or quality errors.
 
 When you upgrade:
 

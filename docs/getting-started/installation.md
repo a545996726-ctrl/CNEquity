@@ -127,15 +127,15 @@ TDX 线协议客户端随包内置，无需安装通达信桌面软件。依赖�
 
 迁移说明见仓库的 [contracts/migrations](https://github.com/rootSunc/CNEquity/tree/main/contracts/migrations)，常用工具见[运行脚本](../operations/scripts.md)。回退软件不一定能回退已迁移的数据，恢复时同时核对配置、软件与数据版本。
 
-### 版本清理行为迁移（待发布）
+### 存储清理
 
-`cne run clean` 改为全部只预览，包括 staging、来源快照、日志与历史版本；无 `--dry-run` 也不标记或删除。现有定时脚本不再释放空间。实际删除字段和 `bytes_freed` 为空或 0，候选大小见 `logical_bytes_selected`。`--force` 只扩大预览范围，显式 `--reconcile-runs` 仍会修改运行状态。
+`cne run clean` 只预览，包括 staging、来源快照、日志与历史版本；无 `--dry-run` 也不标记或删除。现有定时脚本不再释放空间。实际删除字段和 `bytes_freed` 为空或 0，候选大小见 `logical_bytes_selected`。`--force` 只扩大预览范围，显式 `--reconcile-runs` 仍会修改运行状态。
 
-首次标记前须通过 `cne storage import --manifest FILE` 导入经审核的引用清单。可在 serve 的“存储运维”页检查并确认标记，或使用 `storage plan` / `apply --phase mark` 开始观察期。满 7 天只产生到期提示，不能直接删除。
+物理删除在 `cne serve` 的 `#/storage`。页面先列出可以删除的历史版本，按数据集汇总。可以勾选观察期内尚未到期的历史版本，以及最近 5 代里不是当前指针的版本。当前版本、仍被引用、人工保留、仍在使用的试验，以及缺少收据或归档的项目不能选。确认单要勾选不可撤销和外部任务已停止，再点永久删除。完成后列出删掉的版本、账面大小，以及删除前后的磁盘可用空间；账面大小不是实际腾出的空间。
 
-物理删除统一从 `cne serve` 的 `#/storage` 页面检查并确认。CLI 的 `storage apply --phase purge` 及试验 purge 已禁用，`--maintenance-window` 不能绕过网页确认。操作者先停止外部查询、其他服务和采集调度，核对页面清单并勾选两项确认后执行；面板会暂停自身读取，但不会替你停止外部进程。staging、来源快照和日志目前仅报告，未提供网页删除。
+也可以先“检查待标记项目”，确认后开始至少 7 天观察期。标记不释放空间，满 7 天只产生到期提示，不会自动删除。CLI 的 `storage apply --phase purge` 及试验 purge 已禁用，`--maintenance-window` 不能绕过网页确认。操作者先停止外部查询、其他服务和采集调度。面板会暂停自身读取，但不会替你停止外部进程。staging、来源快照和日志目前仅报告，未提供网页删除。
 
-不要用旧版本程序执行清理：旧程序不识别新增网页确认边界。升级后重启 serve 才会加载新的路由和保护机制。详细约束见[版本生命周期命令](../reference/cli.md#cne-storage)。
+升级后重启 serve 才会加载新的路由和保护机制。详细约束见[版本生命周期命令](../reference/cli.md#cne-storage)。
 
 归档原目录也有独立观察期。完整快照携带保留依据和外部依赖声明，恢复后重新绑定引用；涉及生命周期登记的增量包暂时拒绝，应改用完整快照。归档和快照均不会自动解除既有保护。
 

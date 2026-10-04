@@ -34,7 +34,7 @@ backup_meta.sh
 cne run clean
 ```
 
-较晚窗口由独立的 `stale_pipeline.sh` 只补仍落后的 snapshot 数据集，与主日更共用调度锁。主脚本保留旧的进程内等待开关供兼容，但默认关闭。详见 [runbook · 收尾补抓](runbook.md#收尾补抓)。
+较晚窗口由独立的 `stale_pipeline.sh` 只补仍落后的 snapshot 数据集，与主日更共用调度锁。这把锁在 `{data.root}/locks`，和 `cne serve` 操作页是同一把；`CNE_SCHEDULER_LOCK_DIR` 或 `CNE_LOCK_DIR` 可改目录。主脚本保留旧的进程内等待开关供兼容，但默认关闭。详见 [runbook · 收尾补抓](runbook.md#收尾补抓)。
 
 **环境变量**（`CNE_CONFIG` / `CNE_LOG_DIR` 同时被 `cne` 本身读取，其余仅本脚本读取）：`CNE_CONFIG`, `CNE_LOG_DIR`（长跑命令自己也往这里写一份日志）, `CNE_GROUPS`,
 `CNE_GATE_GROUPS`（默认 `core`，失败标为 gate；其余组标 soft）、

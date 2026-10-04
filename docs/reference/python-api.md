@@ -52,6 +52,8 @@ def load(
 | `revision` | revision 数字或 ID 固定主数据集；也支持按数据集映射。单个数字不固定因子或股票池依赖 |
 | `revision_map` | 固定各依赖数据集的 retained revision；显式缺失版本抛 `RevisionConsistencyError`，不退回 latest |
 
+初始化尚未结束时，`load("daily_bars", symbols=[...])` 可以读到已经封存的未复权日线。不写 `symbols` 的查询、`scan()` 和不带标的的 SQL 仍只看已发布数据。复权因子在 `adj_factors` 发布之后才可用。
+
 ### 固定组合读取的数据版本
 
 复权股票池查询可能依赖 `daily_bars`、`adj_factors`、`instruments`、`trading_status`、

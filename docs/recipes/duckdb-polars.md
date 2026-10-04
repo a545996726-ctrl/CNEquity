@@ -70,4 +70,4 @@ print(raw.select("symbol", "trade_date", "close").limit(10).collect())
 cne mcp --config /abs/path/to/cnequity.toml
 ```
 
-MCP 服务只读，返回值会声明 `origin`、截断状态、复权与 PIT 口径；采集和维护仍由 `cne` CLI 执行。其它 MCP 客户端可复用同一条 `command` / `args` 配置，完整工具契约见 [MCP 参考](../reference/mcp.md)。
+MCP 服务只读，返回值会声明 `origin`、截断状态、复权与 PIT 口径。采集和维护由 `cne` CLI 执行；本机 `cne serve` 的操作页可以预览并启动同一白名单里的命令。其它 MCP 客户端可复用同一条 `command` / `args` 配置，完整工具契约见 [MCP 参考](../reference/mcp.md)。

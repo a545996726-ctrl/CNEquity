@@ -72,6 +72,7 @@ cne status --datasets
 | 分组 run 未 compact | 组 steps 是否含 `compact` | 配置修正后重跑组 |
 | compact 被 gate 跳过 | `cne status` 看 failed batch | `cne run retry --run-id <id>` |
 | 路径错误 | `config.data_root` | 核对 `configs/cnequity.toml` |
+| 初始化还在跑，不带 `symbols` 的 `load("daily_bars")` 为空 | 未发布的全市场扫描不会被当成已发布数据 | 指定已经封存的代码，例如 `load("daily_bars", symbols=["600519.SH"])`；复权因子要等 `adj_factors` 发布 |
 
 ## 症状：daily_bars「interior symbol×session key(s) remain absent; refusing to checkpoint」
 
@@ -206,6 +207,15 @@ Findings 文件：`meta/quality/findings/{run_id}.json`
 ## 症状：RunLockError
 
 先用 `cne status` 和进程信息确认持锁者。活动的 `retry` / `compact` 需要等待或正常停止；进程退出后操作系统会释放锁，锁文件留在 `meta/locks/` 不表示仍持锁。不要删除锁文件绕过活跃写入。
+
+调度脚本和操作页共用的是另一把锁，目录是 `{data.root}/locks`（`CNE_SCHEDULER_LOCK_DIR` 或 `CNE_LOCK_DIR` 可改到别处）。面板上的任务还在跑时，定时日更会等到下一轮再判断。
+
+## 症状：浏览器打不开面板
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `localhost:8787` 无法连接，`127.0.0.1:8787` 可以 | 只监听了 IPv4，macOS 会先把 `localhost` 解析到 `::1` | 使用当前版本的 `cne serve`：回环地址同时接受 `127.0.0.1` 和 `localhost`，启动信息只打印 localhost |
+| 页面停在「正在打开面板」 | 首屏接口还没返回 | 等概览出现；若一直停着，看 serve 终端里的报错，并确认打开的是打印出来的那个地址 |
 
 ## 症状：磁盘不足 / staging 膨胀
 

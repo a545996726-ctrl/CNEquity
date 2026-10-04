@@ -11,7 +11,8 @@
 | `meta/quality/` | 质量检查与来源差异报告 |
 | `meta/raw/` | 原始响应归档 |
 | `meta/source_snapshots/` | 用于来源核验的快照 |
-| `meta/locks/` | 运行协调所用的锁文件 |
+| `meta/locks/` | 单次运行、发布和写入协调所用的锁 |
+| `locks/` | 调度脚本与操作页共用的调度锁。可用 `CNE_SCHEDULER_LOCK_DIR` 或 `CNE_LOCK_DIR` 改到别处 |
 | `meta/snapshots/` | 默认可移植数据快照。含所选数据集及对应状态、契约和修订，不含原配置与凭据 |
 | `meta/serve_jobs/` | 操作页任务记录与取消标记 |
 | `duckdb/` | SQL 视图数据库 |
@@ -22,6 +23,6 @@
 
 通过 Python API 或 `cne query` 读取已发布数据。不要直接修改版本指针、generation 文件或把备份放进 `curated/`。长期保存使用[研究快照](../reference/python-api.md)，日志和报告留在自己的本地目录。
 
-清理 staging 前先确认任务已完成并已合并。锁文件存在不等于仍有进程持锁，不要靠删除锁文件恢复运行。见[排障](../operations/troubleshooting.md)。
+清理 staging 前先确认任务已完成并已合并。`meta/locks/` 和 `locks/` 里的锁文件存在，都不等于仍有进程持锁；不要靠删除锁文件恢复运行。见[排障](../operations/troubleshooting.md)。
 
 分区布局发生变化时，旧目录仍可能可读，但与新目录重叠会造成重复主键。按[迁移脚本说明](../operations/scripts.md)先预演、备份，再统一布局。

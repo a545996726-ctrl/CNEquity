@@ -1,54 +1,174 @@
 ---
 title: CNEquity 文档
-description: 从首个查询到持续采集、历史研究与数据质量验收，按任务查找 CNEquity 使用指南。
+description: 从第一条查询到日更、研究和排障，按要做的事进入 CNEquity 文档。
+hide:
+  - navigation
+  - toc
 ---
 
-# CNEquity 文档
+<div class="cne-home">
+  <section class="cne-hero">
+    <div>
+      <p class="cne-eyebrow"><span></span>本地研究数据湖</p>
+      <h1>可日更、可溯源<br><em>研究数据</em></h1>
+      <p class="cne-lead">行情、财报、公司事件和资金流写入自己的 Parquet 文件。Python、DuckDB、Polars 和只读 MCP 读同一份数据；本机面板可以查看、日更和备份。</p>
+      <div class="cne-actions">
+        <a class="cne-button cne-button--primary" href="getting-started/quickstart/">快速开始</a>
+        <a class="cne-button cne-button--secondary" href="datasets/catalog/">数据集目录</a>
+      </div>
+      <ul class="cne-proof">
+        <li><strong>可续跑</strong><span>中断后重跑同一条命令</span></li>
+        <li><strong>可溯源</strong><span>行上有来源、版本和抓取时间</span></li>
+        <li><strong>留在本机</strong><span>开放文件，面板和只读 MCP</span></li>
+      </ul>
+    </div>
+    <div class="cne-console">
+      <div class="cne-console__top">
+        <span class="cne-console__lights" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>终端</span>
+        <span class="cne-console__live"><i></i>第一条命令</span>
+      </div>
+      <div class="cne-console__body">
+        <p class="cne-console__comment"># 在准备长期存放数据的目录里</p>
+        <p><b>$</b>pip install cnequity</p>
+        <p><b>$</b>cne init</p>
+        <p><b>$</b>cne check</p>
+        <p class="cne-console__comment"># 读一只股票的日线</p>
+        <p><b>&gt;&gt;&gt;</b>from cnequity.query import load</p>
+        <p><b>&gt;&gt;&gt;</b>load("daily_bars", symbols=["600519.SH"])</p>
+        <p class="cne-console__done"><span>✓</span>中断后重跑 cne init，已成功的批次会保留</p>
+      </div>
+    </div>
+  </section>
 
-把多源中国市场数据持续写入自己的 Parquet 湖，通过 Python、DuckDB、Polars 与 AI agent 使用同一份数据。
+  <section class="cne-section">
+    <div class="cne-coverage">
+      <div class="cne-section__heading">
+        <p class="cne-kicker">从这里进入</p>
+        <h2>按你要做的事</h2>
+        <p>每条路径都落到一份文档。安装包只含程序，数据在初始化时写到本机。</p>
+      </div>
+      <div class="cne-coverage__grid">
+        <a href="getting-started/quickstart/">
+          <span>01 · 开始</span>
+          <strong>建立可日更的湖</strong>
+          <small>安装、初始化、续跑。全市场第一次可能要数小时。</small>
+        </a>
+        <a href="getting-started/quickstart/#browser">
+          <span>02 · 面板</span>
+          <strong>在浏览器里查看和操作</strong>
+          <small>覆盖、日更、定时任务和备份。只浏览时用 --read-only。</small>
+        </a>
+        <a href="datasets/catalog/">
+          <span>03 · 数据</span>
+          <strong>查有哪些数据、能补多远</strong>
+          <small>目录、来源限制、字段和单位。注册不等于已经采集。</small>
+        </a>
+        <a href="datasets/query-guide/">
+          <span>04 · 研究</span>
+          <strong>复权、历史股票池、财报</strong>
+          <small>查询口径、研究示例和 Python API。严格 PIT 要显式打开。</small>
+        </a>
+        <a href="reference/cli/">
+          <span>05 · 接口</span>
+          <strong>命令、Python 和 MCP</strong>
+          <small>按任务查 CLI。MCP 只读，不触发采集或清理。</small>
+        </a>
+        <a href="operations/troubleshooting/">
+          <span>06 · 排障</span>
+          <strong>失败、限流、数据缺口</strong>
+          <small>先看 run 和日志，再按受影响的范围续跑。</small>
+        </a>
+      </div>
+    </div>
+  </section>
 
-**第一次来？** 从[快速开始](getting-started/quickstart.md)拿到第一条查询结果；了解项目价值与适用场景，见[项目 README](https://github.com/rootSunc/CNEquity#readme)。
+  <section class="cne-section">
+    <div class="cne-section__heading cne-section__heading--row">
+      <h2>从安装到每天更新</h2>
+      <p>在准备长期存放数据的目录里执行。已有配置会直接沿用。</p>
+    </div>
+    <ol class="cne-steps">
+      <li>
+        <span>01</span>
+        <h3>初始化</h3>
+        <p>生成配置，下载沪深京全市场近 3 年主干，审计后发布。</p>
+        <pre><code>pip install cnequity
+cne init</code></pre>
+        <a href="getting-started/initialization/">范围、磁盘和续跑</a>
+      </li>
+      <li>
+        <span>02</span>
+        <h3>读出结果</h3>
+        <p>同一份已发布数据，可以用 Python 或 SQL 读取。</p>
+        <pre><code>from cnequity.query import load
+load("daily_bars", symbols=["600519.SH"])</code></pre>
+        <a href="datasets/query-guide/">复权、股票池和 PIT</a>
+      </li>
+      <li>
+        <span>03</span>
+        <h3>保持更新</h3>
+        <p>每天跑一次。交易日更新行情，周末仍更新公告和资讯。</p>
+        <pre><code>cne run daily
+cne check</code></pre>
+        <a href="operations/runbook/">调度、面板和失败后续</a>
+      </li>
+    </ol>
+  </section>
 
-## 按你要做的事找文档
+  <section class="cne-section">
+    <div class="cne-principles">
+      <div class="cne-section__heading">
+        <p class="cne-kicker">使用前</p>
+        <h2>先分清四件事</h2>
+        <p>这四条决定查询结果能不能直接拿去研究。</p>
+      </div>
+      <div class="cne-principle-list">
+        <article>
+          <span>01</span>
+          <div>
+            <h3>注册不等于已采集</h3>
+            <p>当前开发树登记 52 个数据集，其中有可选和占位入口。安装不会附带行情。</p>
+            <a href="datasets/catalog/">看数据集目录</a>
+          </div>
+        </article>
+        <article>
+          <span>02</span>
+          <div>
+            <h3>新鲜不等于完整</h3>
+            <p>fresh 只说明已落盘的日期够新。历史缺口、ST、退市证据和 PIT 质量要分开核验。</p>
+            <a href="operations/runbook/">用 cne check 验收</a>
+          </div>
+        </article>
+        <article>
+          <span>03</span>
+          <div>
+            <h3>交易日不等于自然日</h3>
+            <p>日更组在交易日运行。公告和资讯每天都会跑，包括周末。每天调度一次即可。</p>
+            <a href="operations/runbook/#web-schedule">定时任务</a>
+          </div>
+        </article>
+        <article>
+          <span>04</span>
+          <div>
+            <h3>回填不等于严格 PIT</h3>
+            <p>今天补进来的财报，不能证明过去那个调仓日已经看过这一版。研究时显式使用 pit_mode="strict"。</p>
+            <a href="recipes/pit-rebalance/">PIT 示例</a>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
 
-| 我想…… | 阅读路径 |
-|---|---|
-| 建立可日更的数据湖 | [快速开始](getting-started/quickstart.md) → [初始化与续跑](getting-started/initialization.md) → [运行手册](operations/runbook.md) |
-| 在浏览器里查看、日更或备份 | [快速开始 · 浏览器](getting-started/quickstart.md#browser) → [定时任务与备份](operations/runbook.md#web-schedule) |
-| 查有哪些数据、能补多远 | [数据集目录](datasets/catalog.md) → [数据源限制](datasets/sources.md) → [字段与单位](datasets/schema.md) |
-| 研究复权、历史股票池或财报 | [查询指南](datasets/query-guide.md) → [研究示例](recipes/README.md) → [Python API](reference/python-api.md) |
-| 研究商品期货与期权 | [衍生品指南](recipes/derivatives.md) |
-| 让 AI agent 读取本地数据 | [MCP 接入与工具边界](reference/mcp.md) |
-| 查某条命令怎么用 | [CLI 按任务索引](reference/cli.md) → [参数与默认值](reference/cli-options.md) → [联网与写入清单](reference/cli-surface.md) |
-| 处理失败、限流或数据缺口 | [排障](operations/troubleshooting.md) → [源保护](operations/fetch-policy.md) → [源健康](operations/source-health.md) |
-| 升级或反馈问题 | [更新日志](changelog.md) → [升级与兼容性](getting-started/installation.md#升级与兼容性) |
-
-## 一条命令初始化
-
-```bash
-pip install cnequity
-cne init
-```
-
-第一次运行自动生成 `configs/cnequity.toml`，然后建立沪深京全市场最近 3 年的主干（含窗口内已知退市股票的日线），审计后发布到当前目录的 `data/cnequity/`。全市场初始化可能需要数小时；中断或结果有 `warning` 时，重跑同一条 `cne init` 即续跑。详见[快速开始](getting-started/quickstart.md)。
-
-## 先分清四件事
-
-| 概念 | 含义 |
-|---|---|
-| 注册 ≠ 已采集 | 当前开发树有 52 个数据集（47 curated + 5 derived），包括可选、兼容与占位入口；安装不会附带数据 |
-| 新鲜 ≠ 完整 | `fresh` 反映更新日期；历史缺口、ST 与退市证据、PIT 质量需要分别核验 |
-| 交易日 ≠ 自然日 | `run daily` 交易日跑日更组，每天（含周末）跑公告和新闻事件流；每天调度一次即可 |
-| 回填 ≠ 严格 PIT | 今日回填的财报不能证明过去已观察到该版本；研究显式使用 `pit_mode="strict"` |
-
-## 产品方向
-
-[方向与边界](architecture/overview.md)说明项目目标和能力限制；[设计原则](architecture/design-principles.md)解释数据质量、版本与可恢复性的承诺。
-
-## 版本、来源与许可
-
-文档随当前仓库实现更新，PyPI 稳定版可能落后。先运行 `cne --version`，再核对[更新日志](changelog.md)；命令参数可用本机 `cne ... --help` 确认。
-
-代码 Apache-2.0，数据受各上游条款约束，详见[数据许可](legal-and-data-sources.md)与[来源矩阵](legal-and-data-sources.md#来源合规矩阵)。论文或报告使用时，请记录软件、数据版本与查询口径，见[引用项目](legal-and-data-sources.md#引用项目)。
-
-欢迎[报告问题](https://github.com/rootSunc/CNEquity/issues)、修正文档，或在 [GitHub 点一个 Star](https://github.com/rootSunc/CNEquity)支持项目。
+  <section class="cne-cta">
+    <div>
+      <p class="cne-kicker">下一步</p>
+      <h2>从快速开始拿到第一条结果</h2>
+    </div>
+    <div class="cne-actions">
+      <a class="cne-button cne-button--primary" href="getting-started/quickstart/">快速开始</a>
+      <a class="cne-button cne-button--ghost" href="changelog/">更新日志</a>
+    </div>
+  </section>
+  <p class="cne-fine">文档对应当前仓库实现，PyPI 稳定版可能落后。先运行 <code>cne --version</code>，再核对<a href="changelog/">更新日志</a>。代码 Apache-2.0，数据受各上游条款约束，见<a href="legal-and-data-sources/">许可与来源</a>。方向和边界见<a href="architecture/overview/">产品设计</a>。问题请到 <a href="https://github.com/rootSunc/CNEquity/issues">Issues</a> 反馈。</p>
+</div>

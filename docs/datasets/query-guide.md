@@ -14,6 +14,8 @@ API 签名见 [Python API 参考](../reference/python-api.md)。
 | `cne query --sql` | 本地视图上的只读 SELECT | SQL 的口径与覆盖校验 |
 | 直读 Parquet | 脱离运行时读取开放文件 | 版本、去重、PIT、复权和股票池 |
 
+初始化进行中，只有带 `symbols` 的 `load("daily_bars", ...)` 能读到已封存、尚未发布的未复权日线。不指定标的的读取仍只看已经发布的数据。
+
 ## 基本用法
 
 ```python
