@@ -217,7 +217,7 @@ def _relogin(bs, *, sleep=time.sleep, config=None) -> None:
         pass
     _login(bs, sleep=sleep, config=config)
 
-
+# 将600519.SH转成sh.600519这种baostock的格式
 def to_baostock_symbol(symbol: str) -> str:
     """``600519.SH`` -> ``sh.600519`` (baostock's market-prefixed form)."""
     info = parse_symbol(symbol)

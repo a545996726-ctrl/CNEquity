@@ -277,7 +277,7 @@ def init(
     `--profile sample` 做同样的事，但离线且确定。两者都不是一个市场，也都不碰 `--config` ——
     它们把自己的配置写到 `--config-out`。
     """
-    if profile in DEMO_PROFILES:
+    if profile in DEMO_PROFILES: # 
         _reject_foreign_options(profile, _LAKE_ONLY)
         from cnequity.cli.demo import run_demo, run_sample_demo
 
@@ -378,12 +378,12 @@ CONFIG_ACTIONS: tuple[str, ...] = ("validate", "create", "diff")
 CONFIG_ACTIONS_MOVED: dict[str, str] = {"init": "cne config create"}
 
 
-@cli.command("config")
 # Free-form rather than a Choice, so the body can answer a moved spelling.
 # Click's own rejection — "'init' is not one of 'validate', 'create', 'diff'" —
 # names everything except what the caller needs, and `cne config init` is the
 # first command a new lake ever runs: the people most likely to type it are the
 # ones with the least context to decode that.
+@cli.command("config")
 @click.argument("action")
 @config_option
 @click.option(

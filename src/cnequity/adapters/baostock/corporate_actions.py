@@ -376,17 +376,17 @@ def fetch_corporate_actions_baostock(
     start: date,
     end: date,
     *,
-    bs=None,
-    sleep=time.sleep,
-    config=None,
-    symbol_windows: Mapping[str, tuple[date, date]] | None = None,
-    run_id: str | None = None,
-    archive: RawPayloadArchive | None = None,
-    request_scope: str | None = None,
-    repair_years: Mapping[str, set[int]] | None = None,
-    diagnostics: list[dict] | None = None,
-    metrics: dict | None = None,
-) -> tuple[pl.DataFrame, list[str]]:
+    bs=None,# BaoStock 会话对象
+    sleep=time.sleep,# 等待函数
+    config=None,# 项目配置对象，供请求限速、原始数据归档等逻辑使用
+    symbol_windows: Mapping[str, tuple[date, date]] | None = None, # 为不同股票指定各自的日期范围 补修用
+    run_id: str | None = None,# 本次运行的唯一标识，用于关联运行记录和原始响应归档
+    archive: RawPayloadArchive | None = None,# 原始响应归档对象。没有显式传入时，函数会尝试根据 config 创建归档
+    request_scope: str | None = None,# 给这批请求加一个范围标识，用于区分不同运行或补修批次
+    repair_years: Mapping[str, set[int]] | None = None,# 限定每只股票实际查询哪些年份，并尝试从归档回放已有响应。它用于历史派息补修
+    diagnostics: list[dict] | None = None,# 可传入一个列表，函数会把发现的数据冲突等问题追加进去。
+    metrics: dict | None = None,# # 可传入一个字典，函数会更新网络请求数和归档回放请求数等统计值
+) -> tuple[pl.DataFrame, list[str]]: # 返回沪深分红除权时间和下载失败的代码列表
     """Return SH/SZ dividend events and failed symbols over ``[start, end]``.
 
     The adapter intentionally does not expose allotment events: Baostock's

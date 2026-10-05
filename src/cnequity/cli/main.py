@@ -10,7 +10,7 @@ now names the group it belongs to, so a patch aimed at a command that has moved
 fails loudly instead of quietly patching a name nobody looks up.
 """
 
-from __future__ import annotations
+from __future__ import annotations # 类型注解不会因为还没定义而报错，只影响注解
 
 import cnequity.steps  # noqa: F401 — register steps
 

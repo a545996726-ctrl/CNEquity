@@ -119,10 +119,10 @@ def issued_code_space() -> list[str]:
                 out.append(symbol)
     return out
 
-
-@dataclass(frozen=True)
+# 固定数据类定义，symbol="600519.SH",code="600519",exchange="SH",
+@dataclass(frozen=True) 
 class SymbolInfo:
-    symbol: str
+    symbol: str 
     code: str
     exchange: str
 
@@ -130,7 +130,7 @@ class SymbolInfo:
 def parse_symbol(symbol: str) -> SymbolInfo:
     if "." not in symbol:
         raise ValueError(f"Invalid symbol format: {symbol}")
-    code, exchange = symbol.rsplit(".", 1)
+    code, exchange = symbol.rsplit(".", 1) # 从右往左分割
     exchange = exchange.upper()
     if exchange not in ("SH", "SZ", "BJ"):
         raise ValueError(f"Unknown exchange: {exchange}")

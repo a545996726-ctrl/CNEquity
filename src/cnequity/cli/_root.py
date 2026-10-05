@@ -272,7 +272,7 @@ class SectionedGroup(ZhHelpOption, moved_hints(MOVED, base=_LoggedFailures)):  #
 # error named no way forward. Lowercase typos still get the usual suggestion.
 CONTEXT_SETTINGS = {"token_normalize_func": str.lower, "help_option_names": ["-h", "--help"]}
 
-
+# 将cli与cne关联起来，
 @click.group(cls=SectionedGroup, context_settings=CONTEXT_SETTINGS)
 @click.version_option(package_name="cnequity", help="显示版本并退出。")
 def cli():
