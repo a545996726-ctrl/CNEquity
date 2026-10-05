@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_an_unreaped_exit_is_not_a_live_process(monkeypatch):
     assert _proc_state("12 (cne job) Z 1 1") == "Z"
     assert _proc_state("12 (name) with) paren) S 1") == "S"
+    if sys.platform == "win32":
+        return
     monkeypatch.setattr(
         "cnequity.orchestrator.scheduler_lock._zombie",
         lambda pid: True,

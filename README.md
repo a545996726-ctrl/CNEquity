@@ -5,7 +5,7 @@
 
 CNEquity 将股票行情、期货合约、财报、公司事件和资金面等多源数据整理为本地 Parquet 数据湖，提供增量采集、失败续跑、质量审计与统一查询。适合反复回测、积累历史数据。提供个人研究者和AI Agent一套完整的金融数据解决方案。
 
-[![CI](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg)](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml)
+[![CI](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cnequity?logo=pypi&logoColor=white)](https://pypi.org/project/cnequity/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/getting-started/installation.md)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)

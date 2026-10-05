@@ -25,8 +25,25 @@ def backend(tmp_path, monkeypatch):
     return value
 
 
-def test_cron_preserves_other_entries_and_escapes_paths(backend, monkeypatch):
+def _as_linux_cron(backend) -> None:
+    """Cron tests render a POSIX command line. Windows tmp paths are not valid there."""
     backend.platform = "linux"
+    backend.working_directory = "/tmp/cne work"
+    backend.argv = [
+        "/usr/bin/python",
+        "-X",
+        "utf8",
+        "-m",
+        "cnequity.serve.ops.scheduled",
+        "--config",
+        "/tmp/中文 & 50% config.toml",
+        "--scheduler-lock-dir",
+        "/tmp/cne-locks",
+    ]
+
+
+def test_cron_preserves_other_entries_and_escapes_paths(backend, monkeypatch):
+    _as_linux_cron(backend)
     table = ["# user job\nMAILTO=someone\n0 0 * * * /usr/bin/true\n"]
     original = table[0]
     monkeypatch.setattr(backend, "_crontab", lambda: table[0])
@@ -55,7 +72,7 @@ def test_cron_preserves_other_entries_and_escapes_paths(backend, monkeypatch):
 
 
 def test_cron_refuses_permission_failures_and_unknown_owned_entry(backend, monkeypatch):
-    backend.platform = "linux"
+    _as_linux_cron(backend)
     monkeypatch.setattr(
         "cnequity.serve.ops.scheduler_backend.subprocess.run",
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, b"", b"permission denied"),

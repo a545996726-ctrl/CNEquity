@@ -37,7 +37,8 @@ _LOOPBACK_FAMILIES = (
 def _address_in_use(exc: OSError) -> bool:
     if exc.errno == errno.EADDRINUSE:
         return True
-    return getattr(exc, "winerror", None) == 10048
+    # 10048 is WSAEADDRINUSE. 10013 is WSAEACCES from SO_EXCLUSIVEADDRUSE.
+    return getattr(exc, "winerror", None) in {10048, 10013}
 
 
 def bind_loopback(port: int) -> list[socket.socket]:
@@ -55,7 +56,14 @@ def bind_loopback(port: int) -> list[socket.socket]:
             try:
                 if family is socket.AF_INET6:
                     sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Windows SO_REUSEADDR lets a second socket bind a port that is
+                # already listening, so a busy port would look free. Exclusive
+                # use makes that bind fail. Other platforms still reuse the
+                # address so a restart during TIME_WAIT can bind again.
+                if sys.platform == "win32":
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                else:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind((address, chosen))
                 sock.listen(2048)
                 sock.set_inheritable(True)

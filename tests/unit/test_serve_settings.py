@@ -321,6 +321,9 @@ def test_normalize_rejects_a_partial_body():
 
 
 def tomllib_text(text: str) -> dict:
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
 
     return tomllib.loads(text)
