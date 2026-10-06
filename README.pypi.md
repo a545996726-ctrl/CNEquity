@@ -17,7 +17,7 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 
 ## 数据范围
 
-当前开发树注册 **52 个数据集：47 个 curated + 5 个 derived**，按用途分为 L0–L9。完整字段、主键、历史起点和来源集中在[数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/)与[数据源说明](https://rootsunc.github.io/CNEquity/datasets/sources/)。
+当前开发树注册 **55 个数据集：47 个 curated + 8 个 derived**，按用途分为 L0–L9。完整字段、主键、历史起点和来源集中在[数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/)与[数据源说明](https://rootsunc.github.io/CNEquity/datasets/sources/)。
 
 | 层次 | 研究用途 | 代表数据集 |
 |---|---|---|
@@ -49,6 +49,9 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 | `index_bars` | L1 | tdx_protocol | eastmoney |
 | `minute_bars` | L1 | tdx_protocol | — |
 | `minute_bars_5m` | L1 | tdx_protocol | — |
+| `minute_bars_15m` | L1 | derived | — |
+| `minute_bars_30m` | L1 | derived | — |
+| `minute_bars_60m` | L1 | derived | — |
 | `trade_ticks` | L1 | tdx_protocol | — |
 | `announcement_index` | L2 | cninfo | — |
 | `corporate_actions` | L2 | eastmoney | tdx_protocol |
@@ -141,7 +144,6 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 
 *控制台示意截图（标有 ILLUSTRATIVE DEMO）；图中的 42/42、行数和容量均为虚构展示值，不是当前注册数量或实际覆盖。*
 
-如果这正是你一直在重复搭建的数据底座，欢迎给 [CNEquity 一个 ⭐ Star](https://github.com/rootSunc/CNEquity)，方便找回，也帮助更多研究者发现它。
 
 ## 能用它研究什么
 

@@ -260,6 +260,8 @@ hourly = resample_trade_bars(history, "60m")
 
 5m 输入只能做到 5 分钟粒度的成交口径。供应商的 5m K 线由全部 1m 直接聚合，未成交分钟沿用的报价也算进开高低价。只要这根 5m 有成交，它的 OHLC 就原样参与计算，所以少数区间的开盘价、最高价、最低价会与从 1m 重采样的结果不同；收盘价和量额基本一致。1m 覆盖到的日期优先用 1m。
 
+需要用 SQL、HTTP 接口或 MCP 读取时，可以用 `cne derive minute_bars_15m`（30m、60m 同理）按同一规则算进湖，见 [15 / 30 / 60 分钟线](../recipes/minute-bars-15-30-60.md)。
+
 `resample_minute_history` 把两者拼成一条序列：某只股票某天有 1m 就用 1m，没有就用 5m，结果多一列 `resampled_from` 标明每根 K 线来自 `1m` 还是 `5m`。1m 的起点按股票各不相同，所以不按统一日期切换。只要有 1m，那一天就只用 1m；1m 不完整时照常报错，不会悄悄改用 5m。
 
 ```python

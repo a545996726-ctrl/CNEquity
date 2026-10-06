@@ -22,6 +22,7 @@ from cnequity.cli._shared import (
     parse_date_option,
 )
 from cnequity.derive.adj_factors import compute_adj_factors
+from cnequity.domain.datasets import RESAMPLED_MINUTE_DATASETS
 from cnequity.domain.market_time import shanghai_today
 from cnequity.orchestrator.engine import JobEngine
 from cnequity.orchestrator.manifest import Manifest
@@ -162,6 +163,20 @@ def _derive_trading_status(cfg, *, start: date | None, end: date | None) -> dict
     return summary
 
 
+def _require_minute_input(cfg, dataset: str) -> None:
+    """Either minute dataset will do; `_published_derive` can only demand all."""
+    from cnequity.orchestrator.outcomes import InputUnavailableError
+    from cnequity.query.parquet_scan import dataset_has_parquet
+    from cnequity.storage.read_context import read_root
+
+    if not any(
+        dataset_has_parquet(read_root(cfg, name)) for name in ("minute_bars", "minute_bars_5m")
+    ):
+        raise InputUnavailableError(
+            f"{dataset}: 湖里没有 minute_bars 或 minute_bars_5m，先开启 [minute_bars] 并回填分钟线"
+        )
+
+
 @contextmanager
 def _published_derive(cfg, dataset: str):
     """Make CLI derives visible to revision-aware readers under the writer lock."""
@@ -282,19 +297,28 @@ def _published_derive(cfg, dataset: str):
     "--full",
     is_flag=True,
     default=False,
-    help="重写 adj_factors / industry_index / option_greeks 的全部分区（默认只补增量）。",
+    help=(
+        "重写 adj_factors / industry_index / option_greeks / minute_bars_15m|30m|60m 的全部分区"
+        "（默认只补增量）。"
+    ),
 )
 @click.option(
     "--start",
     "start_str",
     default=None,
-    help="industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之后的。",
+    help=(
+        "industry_index / trading_status / option_greeks / minute_bars_15m|30m|60m："
+        "只派生这个日期（YYYY-MM-DD）及之后的。"
+    ),
 )
 @click.option(
     "--end",
     "end_str",
     default=None,
-    help="industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之前的。",
+    help=(
+        "industry_index / trading_status / option_greeks / minute_bars_15m|30m|60m："
+        "只派生这个日期（YYYY-MM-DD）及之前的。"
+    ),
 )
 @click.option(
     "--apply",
@@ -326,6 +350,8 @@ def derive(
     `futures_continuous` 和 `option_greeks` 在 `derivatives` 组里日更。
     `futures_continuous` 每次全量重算；`option_greeks` 自动检测行情、合约、利率和模型依赖变化。
     衍生品回填后自动更新合约及派生；`--full` 可显式全部重算。
+    `minute_bars_15m`、`minute_bars_30m`、`minute_bars_60m` 默认不计算，只在这里手动派生：
+    某只股票某天有 1m 就用 1m，否则用 5m。不给窗口时只重算还没算过、或分钟线输入已更新的交易日。
     """
     # Derive targets are lower case in the registry, and command names are
     # already case-insensitive; a target typed in caps should resolve the same.
@@ -392,6 +418,14 @@ def derive(
             summary = derive_option_greeks(cfg, start=start, end=end, full=full)
             outcome["rows_written"] = summary.get("rows", 0)
         click.echo(json.dumps(summary, indent=2, default=str))
+    elif name in RESAMPLED_MINUTE_DATASETS:
+        from cnequity.derive.minute_resample import derive_minute_resample
+
+        with _published_derive(cfg, name) as outcome:
+            _require_minute_input(cfg, name)
+            summary = derive_minute_resample(cfg, name, start=start, end=end, full=full)
+            outcome["rows_written"] = summary.get("rows", 0)
+        click.echo(json.dumps(summary, indent=2, default=str, ensure_ascii=False))
     elif name == "trading_status":
         summary = _derive_trading_status(cfg, start=start, end=end)
         click.echo(json.dumps(summary, indent=2, default=str))

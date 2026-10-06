@@ -85,6 +85,23 @@ function dailySessionText(schedule, opId, params) {
   return parts.join(" ");
 }
 
+// Opt-in resamples (`cne derive minute_bars_15m` …): the page is one of their
+// entry points, so the form spells out what running one does.
+const RESAMPLED_MINUTE = new Set(["minute_bars_15m", "minute_bars_30m", "minute_bars_60m"]);
+
+function deriveTargetText(opId, params) {
+  if (opId !== "derive.run" || !RESAMPLED_MINUTE.has(params.name)) return "";
+  const name = ds(params.name);
+  return tr(
+    `${name}默认不计算，在这里运行后才写进数据湖，之后可用 SQL、HTTP 接口和 MCP 读取。某只股票某天有 1m 就用 1m，否则用 5m，resampled_from 列标明来源；上午从 09:30、下午从 13:00 对齐，开高低收只计入有成交的 K 线。缺组成 K 线的股票当天跳过并在结果里计数，停牌股常见。起点终点都不填：只算还没算过、或分钟线已更新的交易日；勾选全量重写：重算全部。分钟线更新后不会自动重算，需要再运行一次。完整规则见文档「15 / 30 / 60 分钟线」。`,
+    `${name} are not computed by default; running this writes them into the lake, where SQL, the HTTP API and MCP can read them. Each stock-day is built from 1m when the lake has it and from 5m otherwise, and the resampled_from column records which. Bars align to 09:30 and 13:00 and OHLC counts only traded bars. A stock-day missing constituent bars is skipped and counted in the result, which is common for halted stocks. With no start or end, only sessions not yet computed or whose minute bars changed are rebuilt; Full rewrite rebuilds all. Nothing reruns this when minute bars update, so run it again. See the "15 / 30 / 60-minute bars" docs page for the full rules.`,
+  );
+}
+
+function formNoteText(schedule, opId, params) {
+  return dailySessionText(schedule, opId, params) || deriveTargetText(opId, params);
+}
+
 function jobStamp(job) {
   const raw = job.finished_at || job.created_at;
   if (!raw) return "";
@@ -174,7 +191,7 @@ function scopes() {
     { id: "group", label: tr("一个调度组（一个交易日）", "One schedule group (one session)"), op: "daily.group", note: tr("只跑这一组，不会把那天记成定时日更已完成。", "Runs only this group, and does not mark that session's scheduled update done.") },
     { id: "events", label: tr("事件流（一个自然日）", "Event stream (one calendar day)"), op: "events.run", note: tr("周末和节假日也可以。公告和资讯不在研究包日更里。", "Weekends and holidays are included. Announcements and news are not part of a research-pack daily update.") },
     { id: "dataset", label: tr("一个数据集（起止日期）", "One dataset (start and end)"), op: "backfill.run", note: tr("一段历史走回填。一次只能回填一个数据集。", "A history range is a backfill. One dataset at a time.") },
-    { id: "derive", label: tr("一个派生（起止日期）", "One derived dataset (start and end)"), op: "derive.run", note: tr("从已发布的数据重算。全量会重写分区。", "Recompute from published data. A full range rewrites partitions.") },
+    { id: "derive", label: tr("一个派生（起止日期）", "One derived dataset (start and end)"), op: "derive.run", note: tr("从已发布的数据重算。全量会重写分区。15 / 30 / 60 分钟线默认不计算，也在这里入湖。", "Recompute from published data. A full range rewrites partitions. 15/30/60-minute bars are not computed by default; store them here too.") },
     { id: "stale", label: tr("只补仍落后的数据", "Only what is still stale"), op: "daily.stale", note: tr("没有日期。只重抓仍然落后的数据集。快照漏掉的当天只在当天再试。", "No date. Refetch only datasets that are still stale. A missed snapshot day can only be retried that day.") },
   ];
 }
@@ -357,7 +374,7 @@ function manualFields(home, scope, preset) {
 function manualBlock(home, escapeHtml, preset) {
   const scope = scopeById("packs");
   const options = scopes().map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join("");
-  const session = dailySessionText(home.occupancy.schedule || {}, scope.op, {});
+  const session = formNoteText(home.occupancy.schedule || {}, scope.op, {});
   return `<section class="ops-workflow" id="ops-manual" data-workflow="manual">
     <p class="ops-hint">${tr("先选要更新的数据，再选时间。一次只启动一条命令。", "Choose the data, then the time. One command at a time.")}</p>
     <ul class="ops-limits">${manualLimits().map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
@@ -516,7 +533,9 @@ function bindManual(ctx, home, current) {
     if (fields) fields.innerHTML = manualFields(home, scope, hashQuery());
     const session = document.getElementById("ops-manual-session");
     if (!session) return;
-    const text = dailySessionText(home.occupancy.schedule || {}, scope.op, {});
+    const card = home.operations.find((item) => item.id === scope.op);
+    const params = card && typeof form.querySelector === "function" ? readForm(form, card.params) : {};
+    const text = formNoteText(home.occupancy.schedule || {}, scope.op, params);
     session.hidden = !text;
     session.textContent = text;
   };
@@ -529,7 +548,7 @@ function bindManual(ctx, home, current) {
     const params = readForm(form, card.params);
     const session = document.getElementById("ops-manual-session");
     if (session) {
-      const text = dailySessionText(home.occupancy.schedule || {}, card.id, params);
+      const text = formNoteText(home.occupancy.schedule || {}, card.id, params);
       session.hidden = !text;
       session.textContent = text;
     }
@@ -541,7 +560,7 @@ function bindManual(ctx, home, current) {
       const card = home.operations.find((item) => item.id === scope.op);
       const session = document.getElementById("ops-manual-session");
       if (!card || !session || typeof form.querySelector !== "function") return;
-      const text = dailySessionText(home.occupancy.schedule || {}, card.id, readForm(form, card.params));
+      const text = formNoteText(home.occupancy.schedule || {}, card.id, readForm(form, card.params));
       session.hidden = !text;
       session.textContent = text;
     });
@@ -558,7 +577,7 @@ export function mountOpForm(ctx, home, opId, preset, host, current) {
     if (spec.kind === "bool") initial[spec.name] = value;
     else if (value) initial[spec.name] = value;
   }
-  const sessionText = dailySessionText(home.occupancy.schedule || {}, card.id, initial);
+  const sessionText = formNoteText(home.occupancy.schedule || {}, card.id, initial);
   const rangeNote = card.id === "daily.full" || card.id === "daily.group" ? `<p class="panel-note">${dailyRangeNote()}</p>` : "";
   host.innerHTML = `<section class="surface-panel report-panel ops-form">
     <div class="panel-header"><div><h2>${ctx.esc(card.title)}</h2><p class="sub">${ctx.esc(card.summary)}</p></div></div>
@@ -573,7 +592,7 @@ export function mountOpForm(ctx, home, opId, preset, host, current) {
   const form = document.getElementById("ops-fields");
   if (form && typeof form.querySelector === "function") {
     const paintSession = () => {
-      const text = dailySessionText(home.occupancy.schedule || {}, card.id, readForm(form, card.params));
+      const text = formNoteText(home.occupancy.schedule || {}, card.id, readForm(form, card.params));
       const session = document.getElementById("ops-session");
       if (!session) return;
       session.hidden = !text;

@@ -40,6 +40,7 @@
 | daily_bars | `trade_date`（按日） |
 | index_bars | `trade_date`（按年） |
 | minute_bars / minute_bars_5m | `trade_date`（按日） |
+| minute_bars_15m / minute_bars_30m / minute_bars_60m | `trade_date`（按日） |
 | trade_ticks | `trade_date`（按日） |
 | trading_status | `trade_date`（按月） |
 | corporate_actions | `ex_date`（按年） |
@@ -61,6 +62,7 @@
 | daily_bars | `(symbol, trade_date)` |
 | index_bars | `(symbol, trade_date, frequency)` |
 | minute_bars / minute_bars_5m | `(symbol, trade_date, bar_time, frequency)` |
+| minute_bars_15m / minute_bars_30m / minute_bars_60m | `(symbol, trade_date, bar_time, frequency)` |
 | trade_ticks | `(symbol, trade_date, tick_seq)` |
 | corporate_actions | `(symbol, ex_date, action_type)` |
 | adj_factors | `(symbol, trade_date, adjust_type)` |
@@ -262,6 +264,29 @@ scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.tom
 
 **为什么一个数据集只放一个频率。** 1m 视野 95 天、5m 视野 491 天，而一个数据集只有一个水位、一个 `coverage_start`、一个 `history_horizon_days`。混在一起，这三样对两个频率都是错的。`frequency` 仍在 schema 与主键里，所以两者共用同一份列定义、同一套质量检查。
 
+#### minute_bars_15m / minute_bars_30m / minute_bars_60m
+
+由湖里的 1m 和 5m 重采样得到的派生数据集（`derive/minute_resample.py`）。**默认不计算**，日更和 `cne init` 都不会生成；需要入湖时手动运行 `cne derive minute_bars_15m`（30m、60m 同理）。不入湖时也可以在查询时用 `resample_minute_history` 按同一规则现算。
+
+某只股票某天有 1m 就用 1m，否则用 5m；那一天有 1m 但某个区间缺组成 K 线时整天跳过，不改用 5m。停牌股的 1m 常少一根，因此通常会被跳过并计入 `skipped_incomplete_1m`。不给窗口时只重算还没算过、或 1m / 5m 分区比输出更新的交易日，所以后来补回的 1m 会让对应交易日改用 1m 重算；`--start` / `--end` 限定窗口，`--full` 重算全部。
+
+| 列 | 类型 | 说明 |
+|--------|------|-------|
+| symbol | string |  |
+| trade_date | date | 分区列 |
+| bar_time | timestamp（naive） | 区间的收盘分钟；上午从 09:30、下午从 13:00 对齐，不跨午休 |
+| frequency | string | `15m` / `30m` / `60m`，与数据集一致 |
+| open | float64 | **未复权**；OHLC 只计入有成交的输入 K 线，区间内全无成交时沿用末报价 |
+| high | float64 | **未复权** |
+| low | float64 | **未复权** |
+| close | float64 | **未复权** |
+| volume | int64 | 股 |
+| amount | float64 | 人民币元 |
+| resampled_from | string | `1m` 或 `5m`：这根 K 线由哪个输入算出。5m 的开高低价已含未成交分钟沿用的报价，少数区间会与 1m 的结果不同 |
+| source | string | 溯源列，恒为 `derived` |
+| data_version | string | 溯源列 |
+| fetched_at | timestamp | 溯源列；派生时刻 |
+
 #### trade_ticks
 
 分笔成交记录。**可选**，默认关闭（`[trade_ticks].enabled = false`），**独立的**配置节与 step 组（`ticks`），不搭 `[minute_bars]` 的车。
@@ -307,8 +332,6 @@ scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.tom
 这是 `history_floor_date`，与分钟线的 `history_horizon_days` 是两种机制，详见 [catalog.md 历史视野](catalog.md)。
 
 **北交所无数据。** TDX 没有 `.BJ` 的分笔路由，且返回空而不是报错——适配器显式抛异常，否则会和「全天停牌」无法区分。
-
-**15m / 30m / 60m 不入湖**：可用 `resample_trade_bars` 从 5m 聚合（48 根分别被 3/6/12 整除，收盘分钟边界对齐），见 [catalog.md](catalog.md) 的示例代码。
 
 
 **容量。** 行数随标的范围、交易活跃度和频率增长；压缩率及最终磁盘占用还受原始归档、staging 和版本保留影响。默认 `scope = "index:000300.SH"` 只取一个指数的成分股，扩大到全市场前应从小样的实际分区大小估算。

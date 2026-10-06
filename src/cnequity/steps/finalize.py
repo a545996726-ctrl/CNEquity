@@ -10,7 +10,7 @@ from pathlib import Path
 import polars as pl
 
 from cnequity.config import Config
-from cnequity.domain.datasets import PARTITION_COLS, WATERMARK_SKIP
+from cnequity.domain.datasets import PARTITION_COLS, RESAMPLED_MINUTE_DATASETS, WATERMARK_SKIP
 from cnequity.orchestrator.registry import register_step
 from cnequity.progress import sweep_progress
 from cnequity.storage import StagingWriter, compact_dataset
@@ -128,6 +128,7 @@ DERIVE_INPUTS = {
     "industry_index": ("daily_bars", "industry_members", "adj_factors", "trading_calendar"),
     "futures_continuous": ("futures_bars", "futures_contracts"),
     "option_greeks": ("option_bars", "futures_bars", "option_contracts", "macro_indicators"),
+    **{name: ("minute_bars", "minute_bars_5m") for name in RESAMPLED_MINUTE_DATASETS},
 }
 
 

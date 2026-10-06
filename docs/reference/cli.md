@@ -494,6 +494,7 @@ python scripts/delisted_ops.py coverage --start 2016-01-01 --universe all_a_sh_s
 | `sector_code_map` | BK* ↔ BOARD_CODE 身份映射（lake-only；推荐成分 join） |
 | `futures_continuous` | 期货主力/次主力连续合约，按 T-1 持仓换月、只向后换；由 futures_bars 全量重建（需 `[futures] enabled`） |
 | `option_greeks` | 期权隐含波动率与希腊字母（Black-76 / BAW），自动检测行情、合约、利率和模型依赖变化；`--full` 全量重算，`--start`/`--end` 限定窗口 |
+| `minute_bars_15m` / `minute_bars_30m` / `minute_bars_60m` | 默认不计算。手动把 15m / 30m / 60m 算进湖：某只股票某天有 1m 用 1m，否则用 5m；缺组成 K 线的股票当天跳过并计数。不给窗口时只算还没算过或 1m / 5m 已更新的交易日；`--full` 全量重算，`--start`/`--end` 限定窗口。规则见 [15 / 30 / 60 分钟线](../recipes/minute-bars-15-30-60.md) |
 | `adj_factor_source` | 用 Baostock 仲裁复权因子与公司行为的矛盾（新浪漏步、新浪虚步、湖缺事件、事件存疑）；证明新浪有误（除权日前一交易日在 10 天内、不在 2005-04-29 至 2007-12-31 股改期间，两家台阶相差超过 0.45%，且原始股价的跳动更接近 Baostock）且 Baostock 与其余事件一致的沪深股票，`--apply` 后整条因子改用 Baostock，证据写入 `meta/quality/evidence/`。Baostock 结果按批缓存 7 天，仅复用覆盖本次查询起止日期的完整结果；每只证券选取最新完整快照，失败请求的残片不参与仲裁。相同窗口下，中断重跑只取尚未完成的证券，预览后的 `--apply` 可复用预览数据；查询截止日推进或旧缓存缺少覆盖日期时会重新取证 |
 
 ```bash

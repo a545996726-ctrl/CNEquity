@@ -92,6 +92,16 @@ MINUTE_BARS_SCHEMA = {
     "fetched_at": FETCHED_AT_DTYPE,
 }
 
+# Stored 15m/30m/60m resamples (derive/minute_resample.py). `resampled_from`
+# is "1m" or "5m": which input built the bar, because the two disagree on OHLC
+# when a vendor 5m bar folds in an untraded minute's carried quote.
+_PROVENANCE = ("source", "data_version", "fetched_at")
+RESAMPLED_MINUTE_BARS_SCHEMA = {
+    **{k: v for k, v in MINUTE_BARS_SCHEMA.items() if k not in _PROVENANCE},
+    "resampled_from": pl.Utf8,
+    **{k: MINUTE_BARS_SCHEMA[k] for k in _PROVENANCE},
+}
+
 # Transaction records (分笔). Not tick data — A-share Level-1 is a 3-second
 # snapshot, so one row aggregates however many real trades landed in one frame
 # (6–33 on average, measured). See adapters/tdx_protocol/trade_ticks.py.
@@ -893,6 +903,9 @@ DATASET_SCHEMAS = {
     "index_bars": {**DAILY_BARS_SCHEMA, "frequency": pl.Utf8},
     "minute_bars": MINUTE_BARS_SCHEMA,
     "minute_bars_5m": MINUTE_BARS_SCHEMA,
+    "minute_bars_15m": RESAMPLED_MINUTE_BARS_SCHEMA,
+    "minute_bars_30m": RESAMPLED_MINUTE_BARS_SCHEMA,
+    "minute_bars_60m": RESAMPLED_MINUTE_BARS_SCHEMA,
     "trade_ticks": TRADE_TICKS_SCHEMA,
     "commodity_bars": COMMODITY_BARS_SCHEMA,
     "futures_contracts": FUTURES_CONTRACTS_SCHEMA,
@@ -948,6 +961,9 @@ PRIMARY_KEYS = {
     "index_bars": ["symbol", "trade_date", "frequency"],
     "minute_bars": ["symbol", "trade_date", "bar_time", "frequency"],
     "minute_bars_5m": ["symbol", "trade_date", "bar_time", "frequency"],
+    "minute_bars_15m": ["symbol", "trade_date", "bar_time", "frequency"],
+    "minute_bars_30m": ["symbol", "trade_date", "bar_time", "frequency"],
+    "minute_bars_60m": ["symbol", "trade_date", "bar_time", "frequency"],
     # Not trade_time: it has no seconds, so a busy minute holds twenty records
     # sharing one. tick_seq is the only thing that separates them.
     "trade_ticks": ["symbol", "trade_date", "tick_seq"],
@@ -1035,6 +1051,9 @@ _CORE_BAR_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "index_bars": ("open", "high", "low", "close", "volume"),
     "minute_bars": ("open", "high", "low", "close", "volume"),
     "minute_bars_5m": ("open", "high", "low", "close", "volume"),
+    "minute_bars_15m": ("open", "high", "low", "close", "volume"),
+    "minute_bars_30m": ("open", "high", "low", "close", "volume"),
+    "minute_bars_60m": ("open", "high", "low", "close", "volume"),
     "commodity_bars": ("open", "high", "low", "close", "volume"),
     "sector_bars": ("open", "high", "low", "close", "volume"),
     "trade_ticks": ("price", "volume"),
@@ -1103,6 +1122,9 @@ def _validate_bar_semantics(df: pl.DataFrame, dataset: str) -> None:
         "index_bars",
         "minute_bars",
         "minute_bars_5m",
+        "minute_bars_15m",
+        "minute_bars_30m",
+        "minute_bars_60m",
         "commodity_bars",
         "sector_bars",
         "trade_ticks",

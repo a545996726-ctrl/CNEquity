@@ -1,6 +1,6 @@
 # 数据集目录
 
-cnequity 的注册数据集包含 curated 数据和 derived 数据（`adj_factors`、`industry_index`、`futures_continuous`、`option_greeks`、`delisting_events`），按选股用途分为 L0–L9 十类。另有 **on-demand** 数据集不进 curated 主路径。其中日内数据集 `minute_bars` / `minute_bars_5m` 默认关闭，需在 `[minute_bars]` 显式开启；分笔 `trade_ticks` 同样默认关闭，开关在**独立的** `[trade_ticks]`。期货/期权主表（`futures_contracts`、`option_contracts`、`futures_bars`、`option_bars`）默认关闭，开关在 `[futures]`，不进 `cne init`（见 [产品边界](../architecture/overview.md)）。
+cnequity 的注册数据集包含 curated 数据和 derived 数据（`adj_factors`、`industry_index`、`futures_continuous`、`option_greeks`、`delisting_events`，以及默认不计算、按需派生的 `minute_bars_15m` / `minute_bars_30m` / `minute_bars_60m`），按选股用途分为 L0–L9 十类。另有 **on-demand** 数据集不进 curated 主路径。其中日内数据集 `minute_bars` / `minute_bars_5m` 默认关闭，需在 `[minute_bars]` 显式开启；分笔 `trade_ticks` 同样默认关闭，开关在**独立的** `[trade_ticks]`。期货/期权主表（`futures_contracts`、`option_contracts`、`futures_bars`、`option_bars`）默认关闭，开关在 `[futures]`，不进 `cne init`（见 [产品边界](../architecture/overview.md)）。
 
 注册表包含可选、兼容和停用源占位入口：`flash_news_wire` 是新闻兼容读取，`economic_calendar` 为停用源占位。注册数不是物理独立表数，也不是默认采集完成数。
 
@@ -17,7 +17,7 @@ cnequity 的注册数据集包含 curated 数据和 derived 数据（`adj_factor
 | 层次 | 说明 | 代表数据集 |
 |------|------|------------|
 | **L0** 基础参考 | Universe、ETF 目录、日历、交易状态 | instruments, etf_profiles, trading_calendar, trading_status |
-| **L1** 行情 | 未复权价量 + 复权因子 + 可选分钟/分笔 + 退市形态 | daily_bars, index_bars, minute_bars*, minute_bars_5m*, trade_ticks*, adj_factors, delisting_events |
+| **L1** 行情 | 未复权价量 + 复权因子 + 可选分钟/分笔 + 退市形态 | daily_bars, index_bars, minute_bars*, minute_bars_5m*, minute_bars_15m* / 30m* / 60m*, trade_ticks*, adj_factors, delisting_events |
 | **L2** 公司事件 | 除权除息、公告、预约披露 | corporate_actions, announcement_index, earnings_disclosure_schedule |
 | **L3** 基本面 | 财报、估值、一致预期 | financial_statement_items, valuation_metrics, analyst_consensus |
 | **L4** 资金面 | 北向、融资、主力 | fund_flow, fund_flow_ths, northbound_*, margin_trading, dragon_tiger, block_trades, institutional_holdings |
@@ -121,16 +121,26 @@ cnequity 的注册数据集包含 curated 数据和 derived 数据（`adj_factor
 配置里 `[trade_ticks].max_symbols` 默认 200 就是为此：`index:000300.SH` 解析出约 300 只会直接报错，
 要跑得自己把上限调高——这一步摩擦是故意的。`scope = "all"` 不支持，配置校验期就会拒绝。
 
-### 为什么没有 15m / 30m / 60m 数据集
+### 15m / 30m / 60m：默认不计算，可按需入湖
 
-用 `resample_trade_bars` 从 5m 聚合得到 15m / 30m / 60m，上午和下午分别从 09:30、13:00 对齐，缺组成 K 线会报错。聚合结果表示对已存 5m 数据的计算，不承诺与上游独立生成的其他频率逐行一致；与从 1m 重采样的差别见[查询指南](query-guide.md#成交口径的分钟重采样)。
+15m / 30m / 60m 不从源端抓取，而是由湖里的 1m 和 5m 重采样得到。默认不计算，也不进日更；查询时可以直接现算：
 
 ```python
-from cnequity.query import load, resample_trade_bars
+from cnequity.query import load, resample_minute_history
 
-bars = load("minute_bars_5m", start="2026-07-01", symbols=["600519.SH"])
-bars_15m = resample_trade_bars(bars, "15m")
+window = dict(start="2026-07-01", symbols=["600519.SH"])
+bars_15m = resample_minute_history(load("minute_bars", **window),
+                                   load("minute_bars_5m", **window), "15m")
 ```
+
+需要用 SQL、HTTP 接口或 MCP 直接读取时，把它算进湖里：
+
+```bash
+cne derive minute_bars_15m                                    # 只算还没算过或输入已更新的交易日
+cne derive minute_bars_60m --start 2025-01-02 --end 2025-12-31
+```
+
+入湖后与其他数据集一样用 `load("minute_bars_15m", adjust="hfq")` 读取。计算规则、网页面板入口和读取途径见 [15 / 30 / 60 分钟线](../recipes/minute-bars-15-30-60.md)。上午和下午分别从 09:30、13:00 对齐；从 5m 算出的 K 线与从 1m 算出的口径差别见[查询指南](query-guide.md#成交口径的分钟重采样)。
 
 ## 需要 API Key 的覆盖区间
 
@@ -179,6 +189,9 @@ THS 官方估值快照只能从启用后按日积累，不能用旧日期重放�
 | index_bars | trade_date | symbol, trade_date, frequency | by_date | ✓ | tdx_protocol | |
 | minute_bars | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 1m。**可选**，默认关；`[minute_bars]` 配置范围；**源端只有 95 个交易日**（见下「历史视野」）；落盘量随标的数与窗口增长；required=false |
 | minute_bars_5m | trade_date | symbol, trade_date, bar_time, frequency | by_date | ✓ | tdx_protocol | 5m。同上可选；**491 个交易日（约 2 年），是唯一有真历史的日内频率**；落盘量随标的数与窗口增长；required=false |
+| minute_bars_15m | trade_date | symbol, trade_date, bar_time, frequency | derived | ✓ | derived | 15m。**默认不计算**，`cne derive minute_bars_15m` 手动入湖；某只股票某天有 1m 用 1m，否则用 5m，`resampled_from` 标明来源；required=false |
+| minute_bars_30m | trade_date | symbol, trade_date, bar_time, frequency | derived | ✓ | derived | 30m。同上 |
+| minute_bars_60m | trade_date | symbol, trade_date, bar_time, frequency | derived | ✓ | derived | 60m。同上 |
 
 两个日内数据集共用一组质量检查：主键重复（通用 `pk_unique`）、时段外 bar、`trade_date` 与 `bar_time` 不一致、会话缺口，以及**与日频的成交量+成交额双向对账**。
 | trade_ticks | trade_date | symbol, trade_date, tick_seq | by_date | ✓ | tdx_protocol | 分笔。**可选**，默认关；`[trade_ticks]` 独立配置；**不是逐笔成交**（见下）；源端回溯至 **2024-01-02**；落盘量随 watchlist 与窗口增长；required=false |

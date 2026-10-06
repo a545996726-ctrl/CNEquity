@@ -101,6 +101,7 @@ nav:
       - PIT 财报截面: recipes/pit-rebalance.md
       - DuckDB 与 Polars: recipes/duckdb-polars.md
       - 商品期货与期权: recipes/derivatives.md
+      - 15 / 30 / 60 分钟线: recipes/minute-bars-15-30-60.md
       - 数据集目录: datasets/catalog.md
       - 查询指南: datasets/query-guide.md
       - 字段与单位: datasets/schema.md

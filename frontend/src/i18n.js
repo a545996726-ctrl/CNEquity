@@ -61,6 +61,9 @@ const DATASETS = {
   index_bars: ["指数行情", "Index bars"],
   minute_bars: ["1 分钟线", "1-minute bars"],
   minute_bars_5m: ["5 分钟线", "5-minute bars"],
+  minute_bars_15m: ["15 分钟线", "15-minute bars"],
+  minute_bars_30m: ["30 分钟线", "30-minute bars"],
+  minute_bars_60m: ["60 分钟线", "60-minute bars"],
   trade_ticks: ["分笔", "Trade ticks"],
   adj_factors: ["复权因子", "Adjustment factors"],
   delisting_events: ["退市事件", "Delisting events"],
@@ -215,6 +218,8 @@ export function modeLabel(label) {
 }
 
 export function choiceLabel(field, choice) {
-  if (field === "dataset" || field === "datasets") return dsWithCode(choice);
+  // `name` is the derive target, which is a dataset for everything but the
+  // mapping tables; dsWithCode leaves those as their bare code.
+  if (field === "dataset" || field === "datasets" || field === "name") return dsWithCode(choice);
   return String(choice ?? "");
 }

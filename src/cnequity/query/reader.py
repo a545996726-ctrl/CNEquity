@@ -16,6 +16,7 @@ from cnequity.derive.adj_factors import STORED_ADJUST_TYPE
 from cnequity.domain.action_sessions import effective_session
 from cnequity.domain.datasets import (
     DATASETS,
+    RESAMPLED_MINUTE_DATASETS,
     curated_dataset_names,
     derived_dataset_names,
     intraday_dataset_names,
@@ -72,7 +73,10 @@ PRICE_COLS = ("open", "high", "low", "close", "price")
 # intraday_dataset_names(): it deliberately carries no `intraday_frequency`
 # (see its DatasetSpec), but its prices still cross ex-dividend dates and a
 # comparison spanning one would otherwise see a gap that is not a price move.
-ADJUSTABLE_DATASETS = {"daily_bars", "trade_ticks"} | set(intraday_dataset_names())
+# The stored 15m/30m/60m resamples are unadjusted per-share prices too.
+ADJUSTABLE_DATASETS = (
+    {"daily_bars", "trade_ticks"} | set(intraday_dataset_names()) | set(RESAMPLED_MINUTE_DATASETS)
+)
 
 
 class ReaderError(ValueError):
@@ -280,7 +284,7 @@ def _missing_dataset_message(dataset: str, root, data_root) -> str:
 
     remedy = next_command_for_dataset(dataset) or (
         f"cne derive {dataset}"
-        if dataset in {"adj_factors", "industry_index"}
+        if dataset in DATASETS and DATASETS[dataset].layer == "derived"
         else f"cne backfill {dataset}"
     )
     return (

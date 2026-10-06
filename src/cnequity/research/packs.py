@@ -96,7 +96,9 @@ def next_command_for_dataset(dataset: str) -> str | None:
     Derived factors stay with ``cne derive``: init publishes them at the end,
     and a lake that already has bars should not be sent back through init.
     """
-    if dataset in {"adj_factors", "industry_index"}:
+    from cnequity.domain.datasets import DATASETS
+
+    if dataset in DATASETS and DATASETS[dataset].layer == "derived":
         return None
     for pack in PACKS.values():
         if dataset in pack.datasets:

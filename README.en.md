@@ -14,7 +14,7 @@ CNEquity turns market prices, financial statements, corporate events and capital
 
 ## Data coverage
 
-The current development tree registers **52 datasets: 47 curated + 5 derived**, organized into L0–L9. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
+The current development tree registers **55 datasets: 47 curated + 8 derived**, organized into L0–L9. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
 
 | Tier | Research use | Representative datasets |
 |---|---|---|

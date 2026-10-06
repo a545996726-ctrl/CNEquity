@@ -8,6 +8,7 @@
 | 调仓日可见的财报版本 | [PIT 财报截面](pit-rebalance.md) | 正式湖含财报与当时观察证据；新回填可能没有 strict 结果 |
 | SQL 聚合与 Polars 特征处理 | [DuckDB 与 Polars](duckdb-polars.md) | 对应数据已 compact；复权例子另需因子 |
 | 期限结构、期权链与 Greeks | [商品期货与期权](derivatives.md) | 显式启用、按交易所补数并验收 |
+| 15 / 30 / 60 分钟线的现算与入湖 | [15 / 30 / 60 分钟线](minute-bars-15-30-60.md) | 已开启并回填 1m 或 5m |
 
 ## 所有示例共用的约定
 

@@ -79,6 +79,21 @@ _UNIT_CONTRACT_DEFAULTS: dict[str, UnitContract] = {
         "volume": "share",
         "amount": "CNY",
     },
+    "minute_bars_15m": {
+        "price": "CNY/share",
+        "volume": "share",
+        "amount": "CNY",
+    },
+    "minute_bars_30m": {
+        "price": "CNY/share",
+        "volume": "share",
+        "amount": "CNY",
+    },
+    "minute_bars_60m": {
+        "price": "CNY/share",
+        "volume": "share",
+        "amount": "CNY",
+    },
     "trade_ticks": {
         "price": "CNY/share",
         "volume": "share",
@@ -696,6 +711,15 @@ class DatasetSpec:
         return partition_value(d, self.partition_granularity)
 
 
+# Coarser bars a user may store with `cne derive <name>`; see
+# derive/minute_resample.py. Defined here so the registry, reader and derive
+# module share one list.
+RESAMPLED_MINUTE_DATASETS: dict[str, str] = {
+    "minute_bars_15m": "15m",
+    "minute_bars_30m": "30m",
+    "minute_bars_60m": "60m",
+}
+
 _SPECS = [
     # L0 reference
     # Live sources (TDX/EM) only list what trades today; baostock's stock_basic
@@ -851,10 +875,9 @@ _SPECS = [
     # market). For most research it is the more useful of the two, which is why
     # it is registered rather than left as a resampling exercise.
     #
-    # 15m/30m/60m are deliberately absent. TDX serves them over the same 491-day
-    # window, but they aggregate exactly from 5m (48 bars divide by 3, 6 and 12
-    # onto identical closing-minute boundaries), so storing them would be three
-    # more datasets holding a `group_by_dynamic` away from data already here.
+    # 15m/30m/60m are not fetched. TDX serves them over the same 491-day window,
+    # but they resample from 1m/5m already here, so they exist only as the
+    # opt-in derived datasets below (`cne derive minute_bars_15m`).
     DatasetSpec(
         "minute_bars_5m",
         partial_rows=True,
@@ -1492,6 +1515,27 @@ _SPECS = [
         partition_col="trade_date",
         partition_granularity="day",
         required=False,
+    ),
+    # 15m / 30m / 60m bars, stored only when a user runs `cne derive` for
+    # them (derive/minute_resample.py); nothing schedules them. Each
+    # symbol-day comes from 1m where the lake has it and from 5m otherwise.
+    # `row_grain` only: `intraday_frequency` would register a TDX fetch step
+    # and backfill path for a frequency this lake never fetches. No watermark:
+    # nothing advances them, so one would read as stale a session after every
+    # derive.
+    *(
+        DatasetSpec(
+            name,
+            primary_source="derived",
+            tier="L1",
+            layer="derived",
+            partition_col="trade_date",
+            partition_granularity="day",
+            watermark=False,
+            required=False,
+            row_grain=frequency,
+        )
+        for name, frequency in RESAMPLED_MINUTE_DATASETS.items()
     ),
     # How each recovered delisting's price series ends — see
     # DELISTING_EVENTS_SCHEMA. Merge-style: one row per symbol, a few hundred

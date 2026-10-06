@@ -141,9 +141,9 @@
 |---|---|---|
 | `name` | `adj_factors` | 位置参数 |
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
-| `--full` | `False` | 重写 adj_factors / industry_index / option_greeks 的全部分区（默认只补增量）。 |
-| `--start` | `—` | industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之后的。 |
-| `--end` | `—` | industry_index / trading_status / option_greeks：只派生这个日期（YYYY-MM-DD）及之前的。 |
+| `--full` | `False` | 重写 adj_factors / industry_index / option_greeks / minute_bars_15m\|30m\|60m 的全部分区（默认只补增量）。 |
+| `--start` | `—` | industry_index / trading_status / option_greeks / minute_bars_15m\|30m\|60m：只派生这个日期（YYYY-MM-DD）及之后的。 |
+| `--end` | `—` | industry_index / trading_status / option_greeks / minute_bars_15m\|30m\|60m：只派生这个日期（YYYY-MM-DD）及之前的。 |
 | `--apply` | `False` | bse_code_migration：真正重写分区；adj_factor_source：写入逐证券来源覆盖并重算这些证券的因子（默认只报告）。 |
 
 ## `cne doctor`

@@ -30,7 +30,7 @@ from typing import Any
 import polars as pl
 
 from cnequity.config import Config
-from cnequity.domain.datasets import DATASETS, TIER_LABELS
+from cnequity.domain.datasets import DATASETS, RESAMPLED_MINUTE_DATASETS, TIER_LABELS
 from cnequity.mcp_server import live
 from cnequity.query.reader import ReaderError, load
 from cnequity.query.universe import UniverseCoverageError
@@ -46,7 +46,14 @@ MAX_LIMIT = 2000
 # curated dataset shares (docs/datasets/catalog.md), not an accident of one.
 PROVENANCE_COLS = ("source", "data_version", "fetched_at")
 
-BAR_DATASETS = ("daily_bars", "index_bars", "minute_bars", "minute_bars_5m")
+# The 15m/30m/60m datasets exist only after a user runs `cne derive` for them.
+BAR_DATASETS = (
+    "daily_bars",
+    "index_bars",
+    "minute_bars",
+    "minute_bars_5m",
+    *RESAMPLED_MINUTE_DATASETS,
+)
 
 
 class ToolError(ValueError):

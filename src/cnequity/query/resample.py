@@ -24,6 +24,16 @@ _TARGETS = {
     "5m": ("15m", "30m", "60m"),
 }
 
+# Minutes since midnight, and the opening minute of the half-session a bar is in.
+_CLOCK = pl.col("bar_time").dt.hour().cast(pl.Int32) * 60 + pl.col("bar_time").dt.minute()
+_BASE = pl.when(_CLOCK < 720).then(570).otherwise(780)
+
+
+def _interval_end(minutes: int) -> pl.Expr:
+    """Closing timestamp of the *minutes*-wide interval holding each bar."""
+    label = _BASE + ((_CLOCK - _BASE - 1) // minutes + 1) * minutes
+    return pl.col("bar_time").dt.truncate("1d") + pl.duration(minutes=label)
+
 
 def resample_trade_bars(frame: pl.DataFrame, frequency: str = "5m") -> pl.DataFrame:
     """Aggregate complete 1m or 5m intervals without counting no-trade carry prices.
@@ -55,12 +65,10 @@ def resample_trade_bars(frame: pl.DataFrame, frequency: str = "5m") -> pl.DataFr
         raise ValueError("null minute fields")
     if not isinstance(frame.schema["bar_time"], pl.Datetime) or frame.schema["bar_time"].time_zone:
         raise ValueError("bar_time must use exchange-local naive datetimes")
-    clock = pl.col("bar_time").dt.hour().cast(pl.Int32) * 60 + pl.col("bar_time").dt.minute()
-    base = pl.when(clock < 720).then(570).otherwise(780)
-    legal = clock.is_between(570 + step, 690) | clock.is_between(780 + step, 900)
+    legal = _CLOCK.is_between(570 + step, 690) | _CLOCK.is_between(780 + step, 900)
     invalid = (
         ~legal
-        | ((clock - base) % step != 0)
+        | ((_CLOCK - _BASE) % step != 0)
         | (pl.col("bar_time").dt.second() != 0)
         | (pl.col("bar_time").dt.microsecond() != 0)
         | (pl.col("bar_time").dt.date() != pl.col("trade_date"))
@@ -76,12 +84,11 @@ def resample_trade_bars(frame: pl.DataFrame, frequency: str = "5m") -> pl.DataFr
     ).height:
         raise ValueError("invalid minute price or quantity")
     minutes = int(frequency[:-1])
-    label = base + ((clock - base - 1) // minutes + 1) * minutes
     bars = (
         frame.select(_COLUMNS)
         .sort("symbol", "bar_time")
         .with_columns(
-            (pl.col("bar_time").dt.truncate("1d") + pl.duration(minutes=label)).alias("_end"),
+            _interval_end(minutes).alias("_end"),
             ((pl.col("volume") > 0) | (pl.col("amount") > 0)).alias("_traded"),
         )
     )
@@ -105,6 +112,29 @@ def resample_trade_bars(frame: pl.DataFrame, frequency: str = "5m") -> pl.DataFr
         .with_columns(pl.lit(frequency).alias("frequency"))
         .select(_COLUMNS)
         .sort("symbol", "bar_time")
+    )
+
+
+def incomplete_symbol_days(frame: pl.DataFrame, frequency: str) -> pl.DataFrame:
+    """Symbol-days with an interval that holds some, but not all, of its bars.
+
+    These are exactly the symbol-days on which :func:`resample_trade_bars`
+    raises for an incomplete interval, so a caller can set them aside rather
+    than lose a whole batch to one partly fetched name. Input checks are left
+    to the resampler itself.
+    """
+    keys = ["symbol", "trade_date"]
+    if frame.is_empty():
+        return frame.select(keys)
+    step = int(frame["frequency"][0][:-1])
+    minutes = int(frequency[:-1])
+    return (
+        frame.group_by(*keys, _interval_end(minutes).alias("_end"))
+        .len()
+        .filter(pl.col("len") != minutes // step)
+        .select(keys)
+        .unique()
+        .sort(keys)
     )
 
 

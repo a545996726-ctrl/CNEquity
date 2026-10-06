@@ -525,12 +525,18 @@ class LakeView:
 
     def _commands(self, spec, freshness: str, gaps: dict | None = None) -> list[dict]:
         """What to run, and why. ``op`` is set only when the operations page can start it."""
+        from cnequity.domain.datasets import RESAMPLED_MINUTE_DATASETS
         from cnequity.serve.ops.catalog import DERIVE_NAMES, backfill_datasets
 
         name = spec.name
         out: list[dict] = []
         if spec.layer == "derived":
-            command = {"cmd": f"cne derive {name}", "why": "由 curated 重算"}
+            why = (
+                "默认不计算；从 1m / 5m 重采样后入湖"
+                if name in RESAMPLED_MINUTE_DATASETS
+                else "由 curated 重算"
+            )
+            command = {"cmd": f"cne derive {name}", "why": why}
             if name in DERIVE_NAMES:
                 command["op"] = "derive.run"
                 command["params"] = {"name": name}

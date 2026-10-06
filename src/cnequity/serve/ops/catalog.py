@@ -24,6 +24,9 @@ DERIVE_NAMES = (
     "trading_status",
     "futures_continuous",
     "option_greeks",
+    "minute_bars_15m",
+    "minute_bars_30m",
+    "minute_bars_60m",
 )
 
 # Click choices the page deliberately does not offer.
@@ -366,7 +369,10 @@ def _ops() -> tuple[OpSpec, ...]:
         OpSpec(
             id="derive.run",
             title="重算派生数据",
-            summary="从已发布的数据重算。全量会重写分区。",
+            summary=(
+                "从已发布的数据重算。全量会重写分区。15 / 30 / 60 分钟线默认不计算，"
+                "选中后在这里入湖。"
+            ),
             group="定向补数",
             command=("derive",),
             params=(
