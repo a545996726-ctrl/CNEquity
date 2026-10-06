@@ -20,7 +20,7 @@ from cnequity.query.reader import (
     scan,
 )
 from cnequity.query.receipt import ReadReceiptError, ReadResult, load_with_receipt
-from cnequity.query.resample import resample_trade_bars
+from cnequity.query.resample import resample_minute_history, resample_trade_bars
 from cnequity.query.state import DatasetState, dataset_attempt, dataset_state
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "ReadReceiptError",
     "ReadResult",
     "resolve_config",
+    "resample_minute_history",
     "resample_trade_bars",
     "scan",
     "PitMode",

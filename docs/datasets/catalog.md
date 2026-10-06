@@ -123,20 +123,13 @@ cnequity 的注册数据集包含 curated 数据和 derived 数据（`adj_factor
 
 ### 为什么没有 15m / 30m / 60m 数据集
 
-可从 5m 聚合得到 15m / 30m / 60m，收盘分钟边界分别对齐。聚合结果表示对已存 5m 数据的计算，不承诺与上游独立生成的其他频率逐行一致。
+用 `resample_trade_bars` 从 5m 聚合得到 15m / 30m / 60m，上午和下午分别从 09:30、13:00 对齐，缺组成 K 线会报错。聚合结果表示对已存 5m 数据的计算，不承诺与上游独立生成的其他频率逐行一致；与从 1m 重采样的差别见[查询指南](query-guide.md#成交口径的分钟重采样)。
 
 ```python
-from cnequity.query import load
-import polars as pl
+from cnequity.query import load, resample_trade_bars
 
 bars = load("minute_bars_5m", start="2026-07-01", symbols=["600519.SH"])
-bars_15m = (
-    bars.sort("bar_time")
-    .group_by_dynamic("bar_time", every="15m", closed="right", group_by="symbol")
-    .agg(pl.col("open").first(), pl.col("high").max(),
-         pl.col("low").min(), pl.col("close").last(),
-         pl.col("volume").sum(), pl.col("amount").sum())
-)
+bars_15m = resample_trade_bars(bars, "15m")
 ```
 
 ## 需要 API Key 的覆盖区间

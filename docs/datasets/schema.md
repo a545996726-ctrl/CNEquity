@@ -308,7 +308,7 @@ scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.tom
 
 **北交所无数据。** TDX 没有 `.BJ` 的分笔路由，且返回空而不是报错——适配器显式抛异常，否则会和「全天停牌」无法区分。
 
-**15m / 30m / 60m 不入湖**：可从 5m 精确聚合（48 根分别被 3/6/12 整除，收盘分钟边界对齐），见 [catalog.md](catalog.md) 的示例代码。
+**15m / 30m / 60m 不入湖**：可用 `resample_trade_bars` 从 5m 聚合（48 根分别被 3/6/12 整除，收盘分钟边界对齐），见 [catalog.md](catalog.md) 的示例代码。
 
 
 **容量。** 行数随标的范围、交易活跃度和频率增长；压缩率及最终磁盘占用还受原始归档、staging 和版本保留影响。默认 `scope = "index:000300.SH"` 只取一个指数的成分股，扩大到全市场前应从小样的实际分区大小估算。

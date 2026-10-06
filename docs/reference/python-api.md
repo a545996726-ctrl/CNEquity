@@ -179,7 +179,7 @@ assert report["universe_ready"]
 
 `dataset_attempt(dataset, config=..., data_root=...)` 只读最近一次采集运行中该数据集最严重的步骤收据（阶段、状态、时间、错误原因和 run ID）。它与已发布修订是两个维度：采集失败不会删除上一份可读快照，消费端应同时显示快照日期与失败原因。旧湖没有采集收据时返回 `None`。
 
-`resample_trade_bars(frame, "5m")` 从完整 1m 成交数据重采样，支持 5m / 15m / 30m / 60m，按上午和下午分别对齐。它不覆写原始湖，缺组成分钟会报错，详见[查询指南](../datasets/query-guide.md#成交口径的分钟重采样)。
+`resample_trade_bars(frame, "5m")` 从完整 1m 成交数据重采样，支持 5m / 15m / 30m / 60m；也可以从 5m 重采样出 15m / 30m / 60m，用于 1m 覆盖不到的历史。按上午和下午分别对齐。`resample_minute_history(minute_1m, minute_5m, "15m")` 按股票和交易日优先用 1m、否则用 5m，输出 15m / 30m / 60m，并用 `resampled_from` 列标明来源。它不覆写原始湖，缺组成分钟会报错，详见[查询指南](../datasets/query-guide.md#成交口径的分钟重采样)。
 
 ## dataset_schema()
 

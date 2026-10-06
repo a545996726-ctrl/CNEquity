@@ -242,7 +242,7 @@ pl.scan_parquet("data/cnequity/curated/daily_bars/**/*.parquet")
 
 ### 成交口径的分钟重采样
 
-TDX 的零成交分钟可能沿用昨收或最近报价。需要成交口径时，从完整的 1m 数据重采样，避免把未成交报价混入 OHLC：
+TDX 的零成交分钟可能沿用昨收或最近报价。需要成交口径时，从完整的 1m 数据重采样，避免把未成交报价混入 OHLC。1m 覆盖不到的更早历史，可以从 5m 重采样出 15m / 30m / 60m：
 
 ```python
 from cnequity.query import load, resample_trade_bars
@@ -250,9 +250,25 @@ from cnequity.query import load, resample_trade_bars
 minute = load("minute_bars", start="2026-09-15", end="2026-09-15",
               symbols=["603869.SH"])
 five_minute = resample_trade_bars(minute, "5m")
+
+history = load("minute_bars_5m", start="2025-01-02", end="2025-12-31",
+               symbols=["603869.SH"])
+hourly = resample_trade_bars(history, "60m")
 ```
 
-支持 5m、15m、30m、60m；分别按 09:30 和 13:00 对齐，不跨午休。OHLC 只计入 `volume > 0` 或 `amount > 0` 的分钟；后者可保留股数被供应商取整为零的小额成交。区间内无成交时保留末报价且量额为零，该价格仍不是成交价格。重复时间戳、午休记录、日期错配和缺组成分钟都会报错，完全没有记录的区间不会凭空补齐。结果不覆写原始湖，也不继承输入行的来源标签；研究应同时记录输入 revision，重采样无法恢复供应商丢失的成交细节。
+1m 输入支持 5m、15m、30m、60m，5m 输入支持 15m、30m、60m；输入必须只有一种频率。都分别按 09:30 和 13:00 对齐，不跨午休。OHLC 只计入 `volume > 0` 或 `amount > 0` 的输入 K 线；后者可保留股数被供应商取整为零的小额成交。区间内无成交时保留末报价且量额为零，该价格仍不是成交价格。重复时间戳、午休记录、不在 5 分钟网格上的 5m 时间、日期错配和缺组成 K 线都会报错，完全没有记录的区间不会凭空补齐。结果不覆写原始湖，也不继承输入行的来源标签；研究应同时记录输入 revision，重采样无法恢复供应商丢失的成交细节。
+
+5m 输入只能做到 5 分钟粒度的成交口径。供应商的 5m K 线由全部 1m 直接聚合，未成交分钟沿用的报价也算进开高低价。只要这根 5m 有成交，它的 OHLC 就原样参与计算，所以少数区间的开盘价、最高价、最低价会与从 1m 重采样的结果不同；收盘价和量额基本一致。1m 覆盖到的日期优先用 1m。
+
+`resample_minute_history` 把两者拼成一条序列：某只股票某天有 1m 就用 1m，没有就用 5m，结果多一列 `resampled_from` 标明每根 K 线来自 `1m` 还是 `5m`。1m 的起点按股票各不相同，所以不按统一日期切换。只要有 1m，那一天就只用 1m；1m 不完整时照常报错，不会悄悄改用 5m。
+
+```python
+from cnequity.query import load, resample_minute_history
+
+window = dict(start="2025-01-02", end="2026-09-30", symbols=["603869.SH"])
+bars_30m = resample_minute_history(load("minute_bars", **window),
+                                   load("minute_bars_5m", **window), "30m")
+```
 
 ## 错误处理
 

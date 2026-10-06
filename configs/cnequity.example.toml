@@ -321,8 +321,8 @@ symbols = []
 #   "5m" -> minute_bars_5m   (source keeps ~491, about 2 years)
 # Separate datasets because a dataset carries one watermark and one
 # coverage_start, and those two horizons differ by 5x. 5m is the only intraday
-# frequency with real history, and 15m/30m/60m aggregate from it exactly, so
-# they are not stored.
+# frequency with real history; resample_trade_bars builds 15m/30m/60m from it,
+# so they are not stored.
 frequencies = ["1m"]
 # Concurrent TDX connections for the intraday fetch. This does NOT raise the
 # request rate — the limiter is cross-process and paces every request either
