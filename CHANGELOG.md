@@ -2,8 +2,9 @@
 
 这里记录面向用户的主要功能、修复与兼容性变化。历史版本中的命令名反映当时的接口；当前用法以 [CLI 参考](docs/reference/cli.md)为准。升级前阅读[升级与兼容性](docs/getting-started/installation.md#升级与兼容性)。
 
-## [Unreleased]
+## [0.15.0] — 2026-10-07
 
+- **升级步骤：** `pip install -U cnequity` 后重启 `cne serve`。数据集契约只新增三个可选的派生数据集 `minute_bars_15m` / `minute_bars_30m` / `minute_bars_60m`，默认不计算，不需要迁移已有数据，也不需要改配置；需要时运行 `cne derive minute_bars_15m` 等入湖。
 - 新增派生数据集 `minute_bars_15m`、`minute_bars_30m`、`minute_bars_60m`。默认不计算，日更和 `cne init` 都不生成；运行 `cne derive minute_bars_15m`（30m、60m 同理）后入湖，之后可用 `load`、`cne query` 的 SQL、HTTP 接口和 MCP 的 `query_bars` 读取，`load(..., adjust="hfq")` 照常复权。某只股票某天有 1m 用 1m，否则用 5m，`resampled_from` 列标明来源；缺组成 K 线的股票当天跳过并在结果里计数。不给窗口时只算还没算过、或 1m / 5m 内容与计算规则有变化的交易日；停牌（整天无成交）和盘中停复牌（只交易部分时段）单独计数，有成交而 K 线中间断档或输入无效时只跳过对应的股票当天并把运行记为降级，重算后已无数据的交易日会清空。`cne status --datasets` 和面板数据集页会提示「输入有 N 个交易日尚未重算」。面板操作页的「重算派生」可以选这三个数据集，选中后表单说明计算规则；数据集页顶部的「重算派生」直接打开预选好的表单。完整规则见文档「15 / 30 / 60 分钟线」。
 - `resample_trade_bars` 可以从 5m 重采样出 15m / 30m / 60m，历史深度和 `minute_bars_5m` 相同（约 2 年），不再受 1m 只保留约 95 个交易日的限制。5m 里未成交分钟沿用的报价已经混入开高低价，少数区间的 OHLC 会与从 1m 重采样不同；1m 覆盖到的日期仍优先用 1m。新增 `resample_minute_history`：按股票和交易日有 1m 用 1m、否则用 5m，拼出一条 15m / 30m / 60m 序列，`resampled_from` 列标明每根的来源。文档中按自然时间分组的 15m 示例改用这个函数，原示例的 60m 不按 09:30 对齐。
 - Windows 上 `cne serve` 在端口已被占用时拒绝启动。此前该平台的地址复用会让第二个监听看起来成功。
