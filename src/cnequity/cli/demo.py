@@ -25,7 +25,7 @@ from cnequity.config import Config, WaveConfig
 from cnequity.domain.market_time import shanghai_today
 from cnequity.domain.schemas import validate_dataframe, with_provenance
 from cnequity.orchestrator.engine import JobEngine
-from cnequity.storage.atomic import write_parquet_atomic
+from cnequity.storage.atomic import replace_with_retry, write_parquet_atomic
 from cnequity.storage.layout import init_data_layout
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ def _write_demo_config(path: Path, text: str, *, force: bool) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     except OSError as exc:
         raise click.ClickException(f"无法写入配置 {path}：{exc}") from exc
     finally:

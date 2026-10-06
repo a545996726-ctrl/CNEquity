@@ -203,18 +203,18 @@ def test_new_hold_blocks_retry_after_partial_failure(lake, monkeypatch):
 
 
 def test_crash_after_rename_is_resumable(lake, monkeypatch):
-    from pathlib import Path
+    import cnequity.storage.lifecycle.purge as purge
 
     _, store, _ = lake
     plan = matured(store, monkeypatch)
-    real = Path.rename
+    real = purge.replace_with_retry
 
     def crash_after_rename(source, target):
         real(source, target)
         raise KeyboardInterrupt("simulated process interruption")
 
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "rename", crash_after_rename)
+        patch.setattr(purge, "replace_with_retry", crash_after_rename)
         with pytest.raises(KeyboardInterrupt):
             store.purge(plan["plan_id"], maintenance=True)
     result = store.purge(plan["plan_id"], maintenance=True)

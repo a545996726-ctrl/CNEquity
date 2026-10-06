@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import date
 from pathlib import Path
 
@@ -13,7 +12,7 @@ import polars as pl
 from cnequity.domain.canonical import dedupe_by_primary_key
 from cnequity.domain.schemas import INSTRUMENTS_SCHEMA, validate_dataframe
 from cnequity.domain.symbols import is_subscription_placeholder
-from cnequity.storage.atomic import write_parquet_atomic
+from cnequity.storage.atomic import replace_with_retry, write_parquet_atomic
 from cnequity.storage.parquet import StagingWriter
 
 # Refuse delist inference when too many symbols vanish from a snapshot — usually
@@ -74,7 +73,7 @@ def _save_absence_state(path: Path, state: dict[str, dict[str, object]]) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(state, sort_keys=True, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    replace_with_retry(tmp, path)
 
 
 def _strip_subscription_placeholders(df: pl.DataFrame) -> pl.DataFrame:

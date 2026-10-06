@@ -603,3 +603,51 @@ def test_delta_cli_create_verify_apply(tmp_path):
         ["snapshot", "delta", "apply", "cli-update", str(baseline), *common],
     )
     assert applied.exit_code == 0, applied.output
+
+
+def test_delta_rollback_keeps_backups_when_a_restore_is_denied(tmp_path, monkeypatch):
+    """A rollback that cannot put a file back must not delete the only copy."""
+    import cnequity.storage.snapshots as snapshot_module
+    from cnequity.storage.atomic import RollbackIncompleteError
+
+    day = date(2026, 8, 28)
+    source = tmp_path / "source"
+    _write_bar(source, day, 10.0)
+    _state(source, day)
+    store = SnapshotStore(Config(data_root=source), tmp_path / "packages")
+    store.create("baseline", ["daily_bars"])
+    restored = store.restore("baseline", tmp_path / "restored")
+    next_lake = tmp_path / "next"
+    shutil.copytree(restored, next_lake)
+    _write_bar(next_lake, day, 11.0)
+    store.create_delta("rewrite", restored, next_lake, ["daily_bars"])
+    original = _file_hashes(restored)
+
+    original_digest = snapshot_module._index_digest
+    real_replace = snapshot_module.replace_with_retry
+    published = False
+
+    def fail_post_fingerprint(index):
+        return "injected-mismatch" if published else original_digest(index)
+
+    def deny_rollback(src, dst):
+        nonlocal published
+        if "-rollback-" in Path(src).name:
+            raise PermissionError(13, "Access is denied")
+        real_replace(src, dst)
+        published = True
+
+    monkeypatch.setattr(snapshot_module, "_index_digest", fail_post_fingerprint)
+    monkeypatch.setattr(snapshot_module, "replace_with_retry", deny_rollback)
+    with pytest.raises(RollbackIncompleteError, match="原文件备份保留在") as caught:
+        store.apply_delta("rewrite", restored)
+
+    assert isinstance(caught.value.__cause__, ValueError)
+    backup_roots = list(restored.parent.glob(".delta-*"))
+    assert len(backup_roots) == 1
+    kept = {
+        path.relative_to(backup_roots[0]).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in backup_roots[0].rglob("*")
+        if path.is_file()
+    }
+    assert kept and all(original[relative] == digest for relative, digest in kept.items())

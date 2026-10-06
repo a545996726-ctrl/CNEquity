@@ -809,3 +809,30 @@ def test_a_taken_loopback_port_is_released_with_the_error():
 def test_derive_names_are_the_ones_without_apply():
     assert "adj_factor_source" not in DERIVE_NAMES
     assert "bse_code_migration" not in DERIVE_NAMES
+
+
+def test_job_record_write_retries_transient_windows_replace_denial(tmp_path, monkeypatch):
+    """The panel polls a record while the job process rewrites it."""
+    import cnequity.storage.atomic as atomic
+    from cnequity.serve.ops.records import atomic_write, read_record, update_record
+
+    real_replace = atomic.os.replace
+    denials = {"left": 0}
+
+    def _flaky_replace(src, dst):
+        if denials["left"]:
+            denials["left"] -= 1
+            raise PermissionError(5, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic, "_REPLACE_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(atomic.os, "replace", _flaky_replace)
+    path = tmp_path / "jobs" / f"{'a' * 32}.json"
+    atomic_write(path, {"job_id": "a" * 32, "state": "starting", "label": "日线"})
+    denials["left"] = 2
+    update_record(path, state="running")
+
+    assert denials["left"] == 0
+    assert read_record(path)["state"] == "running"
+    assert "日线" in path.read_text(encoding="utf-8")
+    assert not list(path.parent.glob("*.tmp"))

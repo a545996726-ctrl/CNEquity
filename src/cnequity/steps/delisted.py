@@ -94,6 +94,7 @@ from cnequity.steps.common import (
     load_curated_instruments,
     load_symbols,
 )
+from cnequity.storage.atomic import replace_with_retry
 from cnequity.storage.read_context import ReadContext
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ def _write_catalog(config: Config, payload: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except Exception:
         with suppress(OSError):
             os.unlink(tmp)
@@ -143,7 +144,7 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except Exception:
         with suppress(OSError):
             os.unlink(tmp)
@@ -354,7 +355,7 @@ def _mark_ingested(config: Config, symbols: list[str]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump({"completed": completed}, handle, indent=2)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except Exception:
         with suppress(OSError):
             os.unlink(tmp)

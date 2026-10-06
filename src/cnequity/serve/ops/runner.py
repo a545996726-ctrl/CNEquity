@@ -315,6 +315,11 @@ def _escalate(job_id: str, record_file: Path) -> None:
     while time.monotonic() < deadline:
         try:
             current = read_record(record_file)
+        except PermissionError:
+            # Still locked after read_record's retries: keep trying until the
+            # deadline rather than silently dropping the user's cancel.
+            time.sleep(0.1)
+            continue
         except (OSError, ValueError):
             return
         if current.get("state") not in {"starting", "running"}:

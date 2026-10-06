@@ -20,7 +20,6 @@ import base64
 import gzip
 import json
 import logging
-import os
 import threading
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -29,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 from cnequity.domain.http_policy import record_cache_reuse
 from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import replace_with_retry
 
 if TYPE_CHECKING:
     from cnequity.storage.raw_archive import RawPayloadArchive
@@ -95,7 +95,7 @@ def _save(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     with gzip.open(tmp, "wt", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False)
-    os.replace(tmp, path)
+    replace_with_retry(tmp, path)
 
 
 class _ReplayedResponse:

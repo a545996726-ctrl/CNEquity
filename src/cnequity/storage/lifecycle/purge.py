@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cnequity.file_lock import lake_mutation_lock
-from cnequity.storage.atomic import write_json_atomic
+from cnequity.storage.atomic import replace_with_retry, write_json_atomic
 from cnequity.storage.lifecycle import GRACE_DAYS, LifecycleError, _read, _tree_signature, digest
 from cnequity.storage.revisions import _reject_symlink_path, sha256_file
 
@@ -283,7 +283,7 @@ def execute(store, plan_id: str, *, maintenance: bool, manifest: Path | None = N
                 if source.exists():
                     journal["items"][oid] = "moving"
                     save()
-                    source.rename(target)
+                    replace_with_retry(source, target)
                 journal["items"][oid] = "deleting"
                 save()
                 if target.exists():

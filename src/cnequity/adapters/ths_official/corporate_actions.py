@@ -44,6 +44,7 @@ import polars as pl
 
 from cnequity.domain.http_policy import record_http_response
 from cnequity.domain.rate_limit import source_request
+from cnequity.storage.atomic import replace_with_retry
 
 if TYPE_CHECKING:
     from cnequity.adapters.ths_official.client import ThsOfficialClient
@@ -100,7 +101,7 @@ def download_adjustment_factor_dump(
                         handle.write(chunk)
                     handle.flush()
                     os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        replace_with_retry(temporary, destination)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

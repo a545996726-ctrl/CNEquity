@@ -21,6 +21,7 @@ from cnequity.domain.http_policy import SourceCoolingDown, record_http_response
 from cnequity.domain.market_time import SHANGHAI_TZ
 from cnequity.domain.rate_limit import source_request
 from cnequity.domain.symbols import format_symbol, infer_exchange_from_code, is_all_a_symbol
+from cnequity.storage.atomic import replace_with_retry
 from cnequity.storage.raw_archive import (
     RawArchiveError,
     RawPayloadArchive,
@@ -712,7 +713,7 @@ def _write_checkpoint(path: Path | None, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
+        replace_with_retry(tmp_name, path)
     finally:
         try:
             os.unlink(tmp_name)

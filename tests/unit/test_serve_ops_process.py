@@ -94,3 +94,51 @@ def test_windows_same_job_needs_a_matching_creation_time(monkeypatch):
     assert job.same_job(123, "job", "current")
     assert not job.same_job(123, "job", "old")
     assert not job.same_job(123, "job")
+
+
+def test_record_read_retries_transient_windows_denial(tmp_path, monkeypatch):
+    """The start poll must not 500 when a read lands on the job's replace."""
+    from pathlib import Path
+
+    from cnequity.serve.ops import records
+
+    record = tmp_path / "job.json"
+    atomic_write(record, {"state": "running"})
+    real_read = Path.read_text
+    denials = {"left": 2}
+
+    def flaky_read(self, *args, **kwargs):
+        if self == record and denials["left"]:
+            denials["left"] -= 1
+            raise PermissionError(5, "Access is denied")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(records, "_READ_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(Path, "read_text", flaky_read)
+    assert records.read_record(record) == {"state": "running"}
+    assert denials["left"] == 0
+
+
+def test_escalate_keeps_cancel_alive_through_a_locked_record(tmp_path, monkeypatch):
+    """A record that stays locked past one read's retries must not drop the cancel."""
+    record = tmp_path / "job.json"
+    atomic_write(record, {"state": "running", "pid": 123})
+    real_read = runner.read_record
+    denials = {"left": 2}
+
+    def locked_then_readable(path):
+        if denials["left"]:
+            denials["left"] -= 1
+            raise PermissionError(5, "Access is denied")
+        return real_read(path)
+
+    monkeypatch.setattr(runner, "read_record", locked_then_readable)
+    monkeypatch.setattr(runner, "IS_WINDOWS", False)
+    monkeypatch.setattr(runner, "same_job", lambda pid, job_id: True)
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "_wait_dead", lambda pid, job_id, seconds: True)
+    signals = []
+    monkeypatch.setattr(runner, "_signal", lambda pid, sig: signals.append(pid))
+    runner._escalate("job", record)
+    assert denials["left"] == 0
+    assert signals == [123]

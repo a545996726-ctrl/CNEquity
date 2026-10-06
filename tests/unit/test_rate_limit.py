@@ -330,6 +330,61 @@ def test_source_concurrency_releases_slot_when_request_raises(tmp_path):
         pass
 
 
+def test_source_concurrency_retries_transient_windows_replace_denial(tmp_path, monkeypatch):
+    """A destination briefly held open elsewhere must not fail the ledger write."""
+    import cnequity.domain.rate_limit as rate_limit
+
+    real_replace = rate_limit.os.replace
+    denials = {"left": 2}
+
+    def _flaky_replace(src, dst):
+        if denials["left"]:
+            denials["left"] -= 1
+            raise PermissionError(5, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(rate_limit, "_REPLACE_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(rate_limit.os, "replace", _flaky_replace)
+    limiter = SourceConcurrencyLimiter("sina", 1, tmp_path / "rate_limits")
+
+    with limiter.slot(timeout=0.5):
+        pass
+
+    assert denials["left"] == 0
+    state_dir = tmp_path / "rate_limits"
+    assert json.loads((state_dir / "concurrency-sina.json").read_text("utf-8"))["leases"] == []
+    assert not list(state_dir.glob("*.tmp"))
+
+
+def test_source_concurrency_release_denial_does_not_abort_or_leak_slot(tmp_path, monkeypatch):
+    """A ledger stuck past the retries logs, and the stale lease is pruned next acquire."""
+    import cnequity.domain.rate_limit as rate_limit
+
+    real_replace = rate_limit.os.replace
+    deny = {"on": False}
+
+    def _replace(src, dst):
+        if deny["on"]:
+            raise PermissionError(5, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(rate_limit, "_REPLACE_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(rate_limit.os, "replace", _replace)
+    limiter = SourceConcurrencyLimiter("sina", 1, tmp_path / "rate_limits")
+
+    with limiter.slot(timeout=0.5):
+        deny["on"] = True
+    deny["on"] = False
+
+    # Same live thread: without pruning, the leftover lease fills the cap of one.
+    with limiter.slot(timeout=0.5):
+        pass
+    state = json.loads(
+        (tmp_path / "rate_limits" / "concurrency-sina.json").read_text(encoding="utf-8")
+    )
+    assert state["leases"] == []
+
+
 def test_config_source_request_caps_concurrent_calls_across_call_sites(tmp_path):
     cfg = Config(
         data_root=tmp_path / "data",
@@ -614,3 +669,25 @@ def test_live_process_lease_is_not_reclaimed_or_terminated(tmp_path):
         if proc.poll() is None:
             proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_ledger_write_sweeps_temp_files_abandoned_by_killed_writers(tmp_path, monkeypatch):
+    import os
+
+    import cnequity.domain.rate_limit as rate_limit
+
+    monkeypatch.setattr(rate_limit, "_SWEPT_TMP_DIRS", set())
+    state_dir = tmp_path / "rate_limits"
+    state_dir.mkdir()
+    abandoned = state_dir / ".concurrency-sina-dead.tmp"
+    in_flight = state_dir / ".concurrency-sina-live.tmp"
+    abandoned.write_text("{}", encoding="utf-8")
+    in_flight.write_text("{}", encoding="utf-8")
+    hour_ago = time.time() - rate_limit._STALE_TMP_SECONDS - 60
+    os.utime(abandoned, (hour_ago, hour_ago))
+
+    with SourceConcurrencyLimiter("sina", 1, state_dir).slot(timeout=0.5):
+        pass
+
+    assert not abandoned.exists()
+    assert in_flight.exists()

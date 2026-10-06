@@ -30,7 +30,7 @@ from cnequity.domain.partitions import partition_value
 from cnequity.domain.schemas import PRIMARY_KEYS, sanitize_dataset_rows, validate_dataframe
 from cnequity.file_lock import lake_mutation_lock
 from cnequity.query.parquet_scan import list_partitions, partition_dir
-from cnequity.storage.atomic import write_parquet_atomic
+from cnequity.storage.atomic import swap_with_backup, write_parquet_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -221,12 +221,7 @@ def _repartition_dataset_locked(
     old_root = root.parent / f"{dataset}{_TMP_SUFFIX}.old"
     if old_root.exists():
         shutil.rmtree(old_root)
-    root.rename(old_root)
-    try:
-        tmp_root.rename(root)
-    except Exception:
-        old_root.rename(root)  # put it back before re-raising
-        raise
+    swap_with_backup(tmp_root, root, old_root)
     shutil.rmtree(old_root, ignore_errors=True)
 
     result.changed = True

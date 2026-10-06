@@ -98,3 +98,88 @@ def test_write_json_atomic_retries_permission_error(tmp_path, monkeypatch):
 
     assert calls["n"] == 3
     assert out.exists()
+
+
+def _always_denied(*_a, **_k):
+    raise PermissionError(13, "Access is denied")
+
+
+def test_replace_with_retry_explains_a_persistent_windows_lock(tmp_path, monkeypatch):
+    out = tmp_path / "part.parquet"
+    out.write_text("old", encoding="utf-8")
+    tmp = tmp_path / ".part.parquet.tmp"
+    tmp.write_text("new", encoding="utf-8")
+    monkeypatch.setattr(atomic_mod, "IS_WINDOWS", True)
+    monkeypatch.setattr(atomic_mod.os, "replace", _always_denied)
+    monkeypatch.setattr(atomic_mod.time, "sleep", lambda _: None)
+
+    with pytest.raises(atomic_mod.FileInUseError, match="正被其他程序占用") as caught:
+        atomic_mod.replace_with_retry(tmp, out)
+    # Existing ``except PermissionError`` handlers keep working.
+    assert isinstance(caught.value, PermissionError)
+    assert str(out) in str(caught.value)
+
+
+def test_replace_with_retry_keeps_the_raw_error_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(atomic_mod, "IS_WINDOWS", False)
+    monkeypatch.setattr(atomic_mod.os, "replace", _always_denied)
+    monkeypatch.setattr(atomic_mod.time, "sleep", lambda _: None)
+
+    with pytest.raises(PermissionError) as caught:
+        atomic_mod.replace_with_retry(tmp_path / "a", tmp_path / "b")
+    assert not isinstance(caught.value, atomic_mod.FileInUseError)
+
+
+def _tree(root, text):
+    root.mkdir()
+    (root / "part.parquet").write_text(text, encoding="utf-8")
+
+
+def test_swap_with_backup_promotes_staged_and_keeps_old_at_backup(tmp_path):
+    target, staged, backup = tmp_path / "data", tmp_path / "staged", tmp_path / ".data-old"
+    _tree(target, "old")
+    _tree(staged, "new")
+
+    atomic_mod.swap_with_backup(staged, target, backup)
+
+    assert (target / "part.parquet").read_text(encoding="utf-8") == "new"
+    assert (backup / "part.parquet").read_text(encoding="utf-8") == "old"
+
+
+def test_swap_with_backup_puts_the_original_back_when_promotion_fails(tmp_path, monkeypatch):
+    target, staged, backup = tmp_path / "data", tmp_path / "staged", tmp_path / ".data-old"
+    _tree(target, "old")
+    _tree(staged, "new")
+    real_replace = atomic_mod.os.replace
+
+    def deny_promotion(src, dst):
+        if src == staged:
+            raise PermissionError(13, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic_mod.os, "replace", deny_promotion)
+    monkeypatch.setattr(atomic_mod.time, "sleep", lambda _: None)
+
+    with pytest.raises(PermissionError):
+        atomic_mod.swap_with_backup(staged, target, backup)
+    assert (target / "part.parquet").read_text(encoding="utf-8") == "old"
+    assert not backup.exists()
+
+
+def test_swap_with_backup_names_the_backup_when_restore_also_fails(tmp_path, monkeypatch):
+    target, staged, backup = tmp_path / "data", tmp_path / "staged", tmp_path / ".data-old"
+    _tree(target, "old")
+    _tree(staged, "new")
+    real_replace = atomic_mod.os.replace
+
+    def deny_after_move_aside(src, dst):
+        if src == target:
+            return real_replace(src, dst)
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(atomic_mod.os, "replace", deny_after_move_aside)
+    monkeypatch.setattr(atomic_mod.time, "sleep", lambda _: None)
+
+    with pytest.raises(atomic_mod.RollbackIncompleteError, match=str(backup)):
+        atomic_mod.swap_with_backup(staged, target, backup)
+    assert (backup / "part.parquet").read_text(encoding="utf-8") == "old"

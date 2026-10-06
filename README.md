@@ -139,7 +139,6 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 
 *控制台示意截图（标有 ILLUSTRATIVE DEMO）；图中的 42/42、行数和容量均为虚构展示值，不是当前注册数量或实际覆盖。*
 
-如果这正是你一直在重复搭建的数据底座，欢迎给 [CNEquity 一个 ⭐ Star](https://github.com/rootSunc/CNEquity)，方便找回，也帮助更多研究者发现它。
 
 ## 能用它研究什么
 

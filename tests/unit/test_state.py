@@ -53,3 +53,26 @@ def test_state_store_string_set_roundtrip(tmp_path):
     }
     store.set_string_set("adj_factors", "retry_symbols", [])
     assert store.get_string_set("adj_factors", "retry_symbols") == set()
+
+
+def test_state_store_retries_transient_windows_replace_denial(tmp_path, monkeypatch):
+    """A reader holding the watermark open briefly must not fail the commit."""
+    import cnequity.storage.atomic as atomic
+
+    real_replace = atomic.os.replace
+    denials = {"left": 2}
+
+    def _flaky_replace(src, dst):
+        if denials["left"]:
+            denials["left"] -= 1
+            raise PermissionError(5, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic, "_REPLACE_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(atomic.os, "replace", _flaky_replace)
+    store = StateStore(tmp_path / "meta")
+    store.set_date("daily_bars", date(2024, 6, 28))
+
+    assert denials["left"] == 0
+    assert store.get_date("daily_bars") == date(2024, 6, 28)
+    assert not list((tmp_path / "meta" / "state").glob("*.tmp"))

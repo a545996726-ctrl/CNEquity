@@ -18,6 +18,7 @@ from cnequity.orchestrator.scheduler_lock import lock_directory
 from cnequity.serve.ops.catalog import OpsError, config_file
 from cnequity.serve.ops.records import atomic_write, read_record
 from cnequity.serve.ops.scheduler_backend import SchedulerBackend
+from cnequity.storage.atomic import replace_with_retry
 
 
 def state_dir(config) -> Path:
@@ -114,7 +115,7 @@ def replace_config(path: Path, text: str) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         tmp.chmod(path.stat().st_mode)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 

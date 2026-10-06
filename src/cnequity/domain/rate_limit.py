@@ -221,6 +221,19 @@ class RateLimiter:
 _CONCURRENCY_SCHEMA_VERSION = 1
 _CONCURRENCY_POLL_SECONDS = 0.02
 _CONCURRENCY_STALE_SECONDS = 3600.0
+# Windows refuses ``os.replace`` while any other handle (an unlocked reader,
+# AV, the search indexer, a sync client) has the destination open. These
+# ledgers are rewritten on every request, so a short backoff covers the
+# transient case; mirrors ``storage.atomic`` without importing polars here.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_BACKOFF_SEC = 0.05
+# Leases whose release could not be persisted. The owning thread stays alive,
+# so the owner check alone would count them toward the cap until exit.
+_ORPHANED_LEASE_TOKENS: set[str] = set()
+# A writer killed between mkstemp and replace leaves ``.<stem>-*.tmp`` behind.
+# A live writer replaces within milliseconds, so an hour-old one is garbage.
+_STALE_TMP_SECONDS = 3600.0
+_SWEPT_TMP_DIRS: set[Path] = set()
 
 
 def _safe_source_name(source: str) -> str:
@@ -237,9 +250,24 @@ def _read_json(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _sweep_stale_tmp(directory: Path) -> None:
+    """Drop temp files abandoned by killed writers, once per directory per process."""
+    if directory in _SWEPT_TMP_DIRS:
+        return
+    _SWEPT_TMP_DIRS.add(directory)
+    cutoff = time.time() - _STALE_TMP_SECONDS
+    for leftover in directory.glob(".*.tmp"):
+        try:
+            if leftover.stat().st_mtime < cutoff:
+                leftover.unlink()
+        except OSError:
+            continue
+
+
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     """Atomically write a small concurrency ledger while holding its lock."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_tmp(path.parent)
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent,
         prefix=f".{path.stem}-",
@@ -250,13 +278,24 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
             json.dump(payload, handle, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
+        _replace_with_retry(tmp_name, path)
     except Exception:
         try:
             os.unlink(tmp_name)
         except OSError:
             pass
         raise
+
+
+def _replace_with_retry(tmp_name: str, path: Path) -> None:
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp_name, path)
+            return
+        except PermissionError:
+            if attempt + 1 >= _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SEC * (2**attempt))
 
 
 def _windows_pid_alive(pid: int) -> bool:
@@ -377,7 +416,7 @@ class SourceConcurrencyLimiter:
             if not _owner_is_alive(normalized):
                 continue
             token = str(raw.get("token", "")).strip()
-            if token:
+            if token and token not in _ORPHANED_LEASE_TOKENS:
                 clean.append(
                     {
                         "token": token,
@@ -476,6 +515,12 @@ class SourceConcurrencyLimiter:
                     )
         except FileNotFoundError:
             return
+        except PermissionError as exc:
+            # The request itself already finished; a ledger that stays locked
+            # past the retries must not abort the caller. The next write from
+            # this process prunes the orphaned lease.
+            _ORPHANED_LEASE_TOKENS.add(token)
+            logger.warning("%s concurrency release not persisted: %s", self.name, exc)
 
     @contextmanager
     def slot(self, *, timeout: float | None = None, metrics: dict | None = None) -> Iterator[None]:

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO
 
 from cnequity.file_lock import exclusive_lock
+from cnequity.storage.atomic import replace_with_retry
 
 
 class StateStore:
@@ -81,7 +82,7 @@ class StateStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2)
-            os.replace(tmp_path, path)
+            replace_with_retry(tmp_path, path)
         except Exception:
             try:
                 os.unlink(tmp_path)

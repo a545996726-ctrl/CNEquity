@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cnequity.file_lock import MUTATION_LOCK_RELATIVE, lake_mutation_lock
-from cnequity.storage.atomic import write_json_atomic
+from cnequity.storage.atomic import replace_with_retry, write_json_atomic
 from cnequity.storage.file_copy import copy2_isolated
 from cnequity.storage.lifecycle import (
     LifecycleError,
@@ -180,7 +180,7 @@ class ArtifactStore:
                 if _tree_signature(source) != signature:
                     raise LifecycleError("Experiment changed while archiving; copy is incomplete")
                 write_json_atomic(partial / "manifest.json", manifest, indent=2)
-                partial.rename(target)
+                replace_with_retry(partial, target)
             if _tree_signature(source) != signature:
                 raise LifecycleError("Experiment changed before archive registration")
         record = {

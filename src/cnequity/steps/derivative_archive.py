@@ -19,7 +19,7 @@ import polars as pl
 from cnequity.adapters.futures_exchange.shfe_archive import iter_archive
 from cnequity.query.parquet_scan import scan_parquet_files
 from cnequity.steps.common import write_simple
-from cnequity.storage.atomic import write_json_atomic
+from cnequity.storage.atomic import replace_with_retry, write_json_atomic
 from cnequity.storage.read_context import read_root
 
 _MAX_ARCHIVE_BYTES = 1_000_000_000
@@ -56,7 +56,7 @@ def _retain_archive(config, path: Path, digest: str) -> Path:
             os.fsync(sink.fileno())
         if _sha256(temporary) != digest:
             raise OSError("annual archive changed while it was being copied")
-        os.replace(temporary, target)
+        replace_with_retry(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
     return target

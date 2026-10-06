@@ -22,6 +22,7 @@ from cnequity.steps.http_common import (
     verify_raw_archive,
     write_fetched,
 )
+from cnequity.storage.atomic import replace_with_retry
 
 # Board kline history depth for `cne backfill sector_bars` (~1y+ slack).
 _SECTOR_BARS_BACKFILL_DAYS = 400
@@ -238,7 +239,7 @@ def _mark_sector_bars_completed(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except Exception:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

@@ -12,12 +12,19 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from cnequity.file_lock import is_locked
 from cnequity.orchestrator.scheduler_lock import pid_alive
+from cnequity.storage.atomic import write_json_atomic
+
+# Windows can deny an open that lands on the instant the job process replaces
+# the record. Retry briefly instead of failing a poll or a cancel.
+_READ_ATTEMPTS = 5
+_READ_BACKOFF_SEC = 0.05
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}")
 ACTIVE = frozenset({"starting", "running"})
@@ -102,13 +109,17 @@ def cancel_path(config, job_id: str) -> Path:
 
 
 def atomic_write(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    # The panel polls records while the job process rewrites them; Windows
+    # denies a replace over a file another handle has open, so retry.
+    write_json_atomic(path, payload, ensure_ascii=False, indent=2)
 
 
 def read_record(path: Path) -> dict:
+    for attempt in range(_READ_ATTEMPTS - 1):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            time.sleep(_READ_BACKOFF_SEC * (2**attempt))
     return json.loads(path.read_text(encoding="utf-8"))
 
 

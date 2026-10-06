@@ -22,7 +22,7 @@ from typing import Any
 
 from cnequity.domain.datasets import DATASETS
 from cnequity.file_lock import lake_mutation_lock
-from cnequity.storage.atomic import write_json_atomic
+from cnequity.storage.atomic import replace_with_retry, swap_with_backup, write_json_atomic
 from cnequity.storage.file_copy import copy2_isolated
 from cnequity.storage.state import StateStore
 
@@ -530,7 +530,7 @@ class RevisionStore:
                     )
             # Rename only after every file has been copied.  Readers never see
             # ``temporary`` because the pointer is published later.
-            os.replace(temporary, destination)
+            replace_with_retry(temporary, destination)
             return destination, tuple(files)
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -595,15 +595,10 @@ class RevisionStore:
                         f"mutable dataset path is not a directory: {target}"
                     )
                 backup = target_parent / f".{dataset}-stale-{uuid.uuid4().hex}"
-                os.replace(target, backup)
-                try:
-                    os.replace(staged, target)
-                except BaseException:
-                    os.replace(backup, target)
-                    raise
+                swap_with_backup(staged, target, backup)
                 shutil.rmtree(backup, ignore_errors=True)
             else:
-                os.replace(staged, target)
+                replace_with_retry(staged, target)
             return current
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -640,7 +635,7 @@ class RevisionStore:
                 char if char.isalnum() or char in "._-" else "_" for char in str(run_id)
             )[:80]
             quarantine = quarantine_root / f"{dataset}-{safe_run}-{safe_reason}-{uuid.uuid4().hex}"
-            os.replace(target, quarantine)
+            replace_with_retry(target, quarantine)
 
         current = self.current_root(dataset)
         if current is not None:
@@ -649,7 +644,7 @@ class RevisionStore:
             staged = temporary / dataset
             try:
                 shutil.copytree(current, staged, copy_function=copy2_isolated)
-                os.replace(staged, target)
+                replace_with_retry(staged, target)
             finally:
                 shutil.rmtree(temporary, ignore_errors=True)
         return quarantine

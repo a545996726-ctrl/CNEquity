@@ -25,7 +25,13 @@ from cnequity.config import Config
 from cnequity.domain.contracts import contract_fingerprint, dataset_contract
 from cnequity.domain.datasets import DATASETS
 from cnequity.file_lock import lake_mutation_lock
-from cnequity.storage.atomic import write_json_atomic, write_parquet_atomic
+from cnequity.storage.atomic import (
+    RollbackIncompleteError,
+    replace_with_retry,
+    swap_with_backup,
+    write_json_atomic,
+    write_parquet_atomic,
+)
 from cnequity.storage.provenance import runtime_lineage
 from cnequity.storage.revisions import resolve_committed_root
 from cnequity.storage.state import StateStore
@@ -1388,7 +1394,7 @@ class SnapshotStore:
                     f"snapshot consistency check failed: missing={verification.missing}, "
                     f"mismatched={verification.mismatched}"
                 )
-            os.replace(temp, destination)
+            replace_with_retry(temp, destination)
         except Exception:
             shutil.rmtree(temp, ignore_errors=True)
             raise
@@ -1703,7 +1709,7 @@ class SnapshotStore:
                     f"snapshot export file set mismatch: expected={sorted(expected_files)}, "
                     f"exported={sorted(exported)}"
                 )
-            os.replace(temporary, archive)
+            replace_with_retry(temporary, archive)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
@@ -1867,15 +1873,10 @@ class SnapshotStore:
                 if not overwrite:
                     raise FileExistsError(f"snapshot already exists: {destination}")
                 backup = self.root / f".{snapshot_name}.replaced-{uuid.uuid4().hex}"
-                os.replace(destination, backup)
-            try:
-                os.replace(temporary, destination)
-            except BaseException:
-                if backup is not None and not destination.exists():
-                    os.replace(backup, destination)
-                raise
-            if backup is not None:
+                swap_with_backup(temporary, destination, backup)
                 shutil.rmtree(backup, ignore_errors=True)
+            else:
+                replace_with_retry(temporary, destination)
             return destination
         except BaseException:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -1951,7 +1952,7 @@ class SnapshotStore:
             _reject_symlink_path(target, label="restore target")
             if target.exists():
                 target.rmdir()
-            os.replace(temp, target)
+            replace_with_retry(temp, target)
         except Exception:
             shutil.rmtree(temp, ignore_errors=True)
             raise
@@ -2589,7 +2590,7 @@ class SnapshotStore:
                 "deletes": [item for item in changes if item["operation"] == "delete"],
             }
             write_json_atomic(temporary / "manifest.json", manifest, indent=2, ensure_ascii=False)
-            os.replace(temporary, destination)
+            replace_with_retry(temporary, destination)
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
@@ -3319,6 +3320,7 @@ class SnapshotStore:
                 "changes": len(operations),
             }
             receipt_written = False
+            unrestored: list[Path] = []
 
             def restore_atomically(destination: Path, backup: Path) -> None:
                 """Restore one file without exposing a truncated JSON/data file."""
@@ -3334,7 +3336,7 @@ class SnapshotStore:
                 temporary = Path(temporary_name)
                 try:
                     shutil.copy2(backup, temporary)
-                    os.replace(temporary, destination)
+                    replace_with_retry(temporary, destination)
                 finally:
                     temporary.unlink(missing_ok=True)
 
@@ -3385,7 +3387,7 @@ class SnapshotStore:
                     temporary = Path(tmp_name)
                     try:
                         shutil.copy2(source, temporary)
-                        os.replace(temporary, destination)
+                        replace_with_retry(temporary, destination)
                     finally:
                         temporary.unlink(missing_ok=True)
                     if destination in pointer_payloads:
@@ -3410,7 +3412,7 @@ class SnapshotStore:
                         "delta post-apply fingerprint mismatch: "
                         f"expected {expected_target}, got {_index_digest(after)}"
                     )
-            except Exception:
+            except Exception as exc:
                 # A pointer replacement is the publication boundary.  During
                 # rollback, keep every generation/receipt selected by a newly
                 # published pointer until that pointer has been switched back
@@ -3452,7 +3454,7 @@ class SnapshotStore:
                     try:
                         restore_atomically(destination, backup)
                     except OSError:
-                        pass
+                        unrestored.append(destination)
                 for path in reversed(created):
                     relative = path.relative_to(target)
                     if path in pointer_payloads or is_protected(relative):
@@ -3469,7 +3471,7 @@ class SnapshotStore:
                     try:
                         restore_atomically(destination, backup)
                     except OSError:
-                        pass
+                        unrestored.append(destination)
                 for destination in published_pointers:
                     if old_pointer_payloads.get(destination) is None:
                         try:
@@ -3487,7 +3489,7 @@ class SnapshotStore:
                     try:
                         restore_atomically(destination, backup)
                     except OSError:
-                        pass
+                        unrestored.append(destination)
                 for path in reversed(created):
                     relative = path.relative_to(target)
                     if path not in pointer_payloads and is_protected(relative):
@@ -3500,9 +3502,17 @@ class SnapshotStore:
                         application_receipt.unlink(missing_ok=True)
                     except OSError:
                         pass
+                if unrestored:
+                    # The backups are the only copy of these files now.
+                    raise RollbackIncompleteError(
+                        f"增量包回滚未完成：{len(unrestored)} 个文件没能还原"
+                        f"（例如 {unrestored[0]}）。原文件备份保留在 {backup_root}，"
+                        f"关闭占用的程序后按相对路径复制回 {target} 即可恢复"
+                    ) from exc
                 raise
             finally:
-                shutil.rmtree(backup_root, ignore_errors=True)
+                if not unrestored:
+                    shutil.rmtree(backup_root, ignore_errors=True)
         return target
 
     delta_apply = apply_delta

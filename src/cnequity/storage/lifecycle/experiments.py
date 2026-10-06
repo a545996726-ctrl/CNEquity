@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cnequity.file_lock import lake_mutation_lock
-from cnequity.storage.atomic import write_json_atomic
+from cnequity.storage.atomic import replace_with_retry, write_json_atomic
 from cnequity.storage.lifecycle import (
     GRACE_DAYS,
     LifecycleError,
@@ -265,7 +265,7 @@ class ExperimentRetirement:
                     if source.exists():
                         journal["items"][oid] = "moving"
                         write_json_atomic(event, journal, indent=2)
-                        source.rename(target)
+                        replace_with_retry(source, target)
                     if target.exists():
                         journal["items"][oid] = "deleting"
                         write_json_atomic(event, journal, indent=2)

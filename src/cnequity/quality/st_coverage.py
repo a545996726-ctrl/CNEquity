@@ -31,6 +31,7 @@ from cnequity.query.parquet_scan import (
     scan_parquet_files,
     scan_parquet_root,
 )
+from cnequity.storage.atomic import replace_with_retry
 from cnequity.storage.read_context import ReadContext, read_root
 
 ST_EVIDENCE_VERSION = 2
@@ -57,7 +58,7 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except Exception:
         try:
             os.unlink(tmp)
