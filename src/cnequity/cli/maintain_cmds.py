@@ -425,6 +425,13 @@ def derive(
             _require_minute_input(cfg, name)
             summary = derive_minute_resample(cfg, name, start=start, end=end, full=full)
             outcome["rows_written"] = summary.get("rows", 0)
+            # Halts are expected gaps; a gap in a traded day, or input the
+            # resampler rejects, is a data problem.
+            if any(
+                summary.get(key)
+                for key in ("skipped_incomplete_1m", "skipped_incomplete_5m", "skipped_invalid")
+            ):
+                outcome["status"] = "degraded"
         click.echo(json.dumps(summary, indent=2, default=str, ensure_ascii=False))
     elif name == "trading_status":
         summary = _derive_trading_status(cfg, start=start, end=end)

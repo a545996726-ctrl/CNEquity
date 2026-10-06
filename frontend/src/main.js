@@ -462,6 +462,22 @@ function gapsNote(d) {
     <p class="muted">${g.missing.slice(0, 12).map(esc).join("、")}${g.total > 12 ? " …" : ""}</p>`;
 }
 
+// Stored 15m/30m/60m resamples carry no watermark, so this is the only place
+// the page can say they trail the 1m/5m they were built from.
+function resampleNote(d) {
+  const r = d.resample;
+  if (!r) return "";
+  const run = `<a href="${opsHref("derive.run", { name: d.dataset })}">${tr("重算派生", "Recompute")}</a>`;
+  if (!r.derived) {
+    return panelNote(r.input_sessions
+      ? tr(`尚未派生。湖里的 1m / 5m 共有 ${fmt(r.input_sessions)} 个交易日可以计算，${run}后入湖。`, `Not derived yet. The lake's 1m / 5m cover ${fmt(r.input_sessions)} sessions; ${run} to store them.`)
+      : tr("尚未派生。湖里还没有 1m 或 5m 分钟线。", "Not derived yet. The lake has no 1m or 5m bars."));
+  }
+  return panelNote(r.pending
+    ? tr(`输入有 ${fmt(r.pending)} 个交易日尚未重算。1m / 5m 更新后不会自动重算，${run}后才会更新。`, `${fmt(r.pending)} input sessions have not been recomputed. Nothing reruns this when 1m / 5m change; ${run} to update.`)
+    : tr("已与 1m / 5m 一致，没有待重算的交易日。", "In step with 1m / 5m; no session waits to be recomputed."));
+}
+
 function stateTab(d, prov) {
   const provTable = dataTable(
     ["source", "data_version", { h: tr("行", "Rows"), n: true }, tr("fetched_at 跨度", "fetched_at span")],
@@ -495,7 +511,7 @@ function stateTab(d, prov) {
   );
 
   return `
-    <h3>${tr("覆盖", "Coverage")}</h3>${coverageBar(d)}${gapsNote(d)}
+    <h3>${tr("覆盖", "Coverage")}</h3>${coverageBar(d)}${resampleNote(d)}${gapsNote(d)}
     <h3>${tr("溯源分布（按时间）", "Provenance over time")}</h3><div id="prov"></div><p class="muted" id="provnote"></p>
     <h3>${tr("溯源合计", "Provenance totals")}</h3>${provTable}
     <h3>${tr("审计 findings", "Audit findings")}</h3>${findings}
@@ -509,7 +525,8 @@ const fact = (k, v) => `<div class="fact"><span class="k">${esc(k)}</span><span 
  * Was keyed on `intraday`, the bar-frequency field, which `trade_ticks`
  * deliberately leaves unset so it cannot inherit bar-shaped checks. That
  * printed a dash, making intraday transaction records look like a daily
- * dataset. `row_grain` is set for all three intraday datasets.
+ * dataset. `row_grain` is set on every intraday dataset, including the stored
+ * 15m/30m/60m resamples.
  */
 function rowGrainText(d) {
   if (d.row_grain === "tick") return tr("分笔（3 秒快照聚合，非 bar）", "Ticks (3-second snapshots, not bars)");

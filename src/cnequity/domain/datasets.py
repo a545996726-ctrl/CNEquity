@@ -720,6 +720,14 @@ RESAMPLED_MINUTE_DATASETS: dict[str, str] = {
     "minute_bars_60m": "60m",
 }
 
+# Derived datasets that `cne derive <name>` rebuilds. Not every derived
+# dataset: a repository script builds `delisting_events`, so a remedy that
+# named `cne derive` for it would send the user to an unknown target.
+DERIVE_COMMAND_DATASETS = frozenset(
+    {"adj_factors", "industry_index", "futures_continuous", "option_greeks"}
+    | set(RESAMPLED_MINUTE_DATASETS)
+)
+
 _SPECS = [
     # L0 reference
     # Live sources (TDX/EM) only list what trades today; baostock's stock_basic

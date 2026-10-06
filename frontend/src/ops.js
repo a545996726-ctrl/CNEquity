@@ -93,8 +93,8 @@ function deriveTargetText(opId, params) {
   if (opId !== "derive.run" || !RESAMPLED_MINUTE.has(params.name)) return "";
   const name = ds(params.name);
   return tr(
-    `${name}默认不计算，在这里运行后才写进数据湖，之后可用 SQL、HTTP 接口和 MCP 读取。某只股票某天有 1m 就用 1m，否则用 5m，resampled_from 列标明来源；上午从 09:30、下午从 13:00 对齐，开高低收只计入有成交的 K 线。缺组成 K 线的股票当天跳过并在结果里计数，停牌股常见。起点终点都不填：只算还没算过、或分钟线已更新的交易日；勾选全量重写：重算全部。分钟线更新后不会自动重算，需要再运行一次。完整规则见文档「15 / 30 / 60 分钟线」。`,
-    `${name} are not computed by default; running this writes them into the lake, where SQL, the HTTP API and MCP can read them. Each stock-day is built from 1m when the lake has it and from 5m otherwise, and the resampled_from column records which. Bars align to 09:30 and 13:00 and OHLC counts only traded bars. A stock-day missing constituent bars is skipped and counted in the result, which is common for halted stocks. With no start or end, only sessions not yet computed or whose minute bars changed are rebuilt; Full rewrite rebuilds all. Nothing reruns this when minute bars update, so run it again. See the "15 / 30 / 60-minute bars" docs page for the full rules.`,
+    `${name}默认不计算，在这里运行后才写进数据湖，之后可用 SQL、HTTP 接口和 MCP 读取。某只股票某天有 1m 就用 1m，否则用 5m，resampled_from 列标明来源；上午从 09:30、下午从 13:00 对齐，开高低收只计入有成交的 K 线。停牌（整天无成交）和盘中停复牌的股票当天跳过并单独计数；有成交而 K 线中间断档的也跳过，但这次运行会记为降级。起点终点都不填：只算还没算过、或分钟线已更新的交易日；勾选全量重写：重算全部。分钟线更新后不会自动重算，需要再运行一次。完整规则见文档「15 / 30 / 60 分钟线」。`,
+    `${name} are not computed by default; running this writes them into the lake, where SQL, the HTTP API and MCP can read them. Each stock-day is built from 1m when the lake has it and from 5m otherwise, and the resampled_from column records which. Bars align to 09:30 and 13:00 and OHLC counts only traded bars. Halted stock-days and intraday suspensions are skipped and counted on their own; a traded day with a hole between bars is skipped too and marks the run degraded. With no start or end, only sessions not yet computed or whose minute bars changed are rebuilt; Full rewrite rebuilds all. Nothing reruns this when minute bars update, so run it again. See the "15 / 30 / 60-minute bars" docs page for the full rules.`,
   );
 }
 

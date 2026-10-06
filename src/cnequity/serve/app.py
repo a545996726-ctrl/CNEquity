@@ -190,6 +190,12 @@ class Batch(BaseModel):
     error_message: str | None
 
 
+class ResampleBacklog(BaseModel):
+    pending: int = Field(description="Sessions a default `cne derive` would rebuild.")
+    input_sessions: int = Field(description="Sessions the lake's 1m and 5m cover.")
+    derived: bool = Field(description="Whether this resample has been stored at all.")
+
+
 class DatasetDetail(Dataset):
     partition_col: str | None
     max_staleness_days: int
@@ -212,6 +218,10 @@ class DatasetDetail(Dataset):
     gaps: Gaps
     findings: list[dict]
     commands: list[Command]
+    resample: ResampleBacklog | None = Field(
+        default=None,
+        description="Only for minute_bars_15m/30m/60m: how far the stored bars trail 1m/5m.",
+    )
     batches: list[Batch]
 
 

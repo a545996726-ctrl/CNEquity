@@ -206,7 +206,7 @@ sources:
     rate_limit: not_applicable
     retained_payloads: unknown
     legal_status: inherits_upstream_unknown
-    notes: market_breadth、sentiment_scores、industry_index、delisting_events 等由湖内或上游数据计算；使用权取决于所有输入来源，不能视为 CNEquity 授权。
+    notes: market_breadth、sentiment_scores、industry_index、delisting_events、minute_bars_15m / 30m / 60m 等由湖内或上游数据计算；使用权取决于所有输入来源，不能视为 CNEquity 授权。
     derived: true
 
   ths:

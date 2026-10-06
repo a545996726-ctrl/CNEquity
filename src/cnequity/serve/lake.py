@@ -523,7 +523,19 @@ class LakeView:
             "unit": spec.partition_granularity,
         }
 
-    def _commands(self, spec, freshness: str, gaps: dict | None = None) -> list[dict]:
+    def _resample_backlog(self, dataset: str) -> dict | None:
+        """Sessions a stored 15m/30m/60m resample has not caught up with."""
+        from cnequity.domain.datasets import RESAMPLED_MINUTE_DATASETS
+
+        if dataset not in RESAMPLED_MINUTE_DATASETS:
+            return None
+        from cnequity.derive.minute_resample import resample_backlog
+
+        return resample_backlog(self.config, dataset)
+
+    def _commands(
+        self, spec, freshness: str, gaps: dict | None = None, resample: dict | None = None
+    ) -> list[dict]:
         """What to run, and why. ``op`` is set only when the operations page can start it."""
         from cnequity.domain.datasets import RESAMPLED_MINUTE_DATASETS
         from cnequity.serve.ops.catalog import DERIVE_NAMES, backfill_datasets
@@ -531,11 +543,15 @@ class LakeView:
         name = spec.name
         out: list[dict] = []
         if spec.layer == "derived":
-            why = (
-                "默认不计算；从 1m / 5m 重采样后入湖"
-                if name in RESAMPLED_MINUTE_DATASETS
-                else "由 curated 重算"
-            )
+            why = "由 curated 重算"
+            if name in RESAMPLED_MINUTE_DATASETS:
+                why = "默认不计算；从 1m / 5m 重采样后入湖"
+                if resample and resample["derived"]:
+                    why = (
+                        f"输入有 {resample['pending']} 个交易日尚未重算"
+                        if resample["pending"]
+                        else "已与 1m / 5m 一致"
+                    )
             command = {"cmd": f"cne derive {name}", "why": why}
             if name in DERIVE_NAMES:
                 command["op"] = "derive.run"
@@ -1082,7 +1098,10 @@ class LakeView:
             # the series is only needed for one chart. `/partitions` serves it.
             "gaps": (gaps := self._gaps(spec, parts)),
             "findings": mine,
-            "commands": self._commands(spec, row["freshness"], gaps),
+            "commands": self._commands(
+                spec, row["freshness"], gaps, (resample := self._resample_backlog(dataset))
+            ),
+            "resample": resample,
             "batches": self.recent_batches(dataset),
         }
 

@@ -268,7 +268,7 @@ scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.tom
 
 由湖里的 1m 和 5m 重采样得到的派生数据集（`derive/minute_resample.py`）。**默认不计算**，日更和 `cne init` 都不会生成；需要入湖时手动运行 `cne derive minute_bars_15m`（30m、60m 同理）。不入湖时也可以在查询时用 `resample_minute_history` 按同一规则现算。
 
-某只股票某天有 1m 就用 1m，否则用 5m；那一天有 1m 但某个区间缺组成 K 线时整天跳过，不改用 5m。停牌股的 1m 常少一根，因此通常会被跳过并计入 `skipped_incomplete_1m`。不给窗口时只重算还没算过、或 1m / 5m 分区比输出更新的交易日，所以后来补回的 1m 会让对应交易日改用 1m 重算；`--start` / `--end` 限定窗口，`--full` 重算全部。
+某只股票某天有 1m 就用 1m，否则用 5m；那一天有 1m 但某个区间缺组成 K 线时整天跳过，不改用 5m。停牌股的 1m 常少一根，整天无成交的跳过计入 `skipped_halted_1m`，盘中停复牌（K 线不间断、只缺开头或结尾）计入 `skipped_partial_session_1m`；有成交而 K 线中间断档的计入 `skipped_incomplete_1m`，运行记为降级。不给窗口时只重算还没算过、或 1m / 5m 内容与计算规则有变化的交易日（按内容判断，回滚和恢复也会触发），所以后来补回的 1m 会让对应交易日改用 1m 重算；`--start` / `--end` 限定窗口，`--full` 重算全部。
 
 | 列 | 类型 | 说明 |
 |--------|------|-------|

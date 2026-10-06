@@ -38,6 +38,7 @@ import pyarrow.parquet as pq
 from cnequity.config import Config
 from cnequity.domain.datasets import (
     DATASETS,
+    DERIVE_COMMAND_DATASETS,
     DatasetSpec,
     history_mode_for,
     is_dataset_enabled,
@@ -78,7 +79,7 @@ class Gap:
         # Derived datasets are rebuilt from curated inputs; there is no
         # registered ingestion step named ``adj_factors`` or
         # ``industry_index`` for ``cne backfill`` to invoke.
-        if DATASETS[self.dataset].layer == "derived":
+        if self.dataset in DERIVE_COMMAND_DATASETS:
             cmd = f"cne derive {self.dataset} --config {config_path}"
             if self.dataset == "industry_index":
                 if self.start is not None:

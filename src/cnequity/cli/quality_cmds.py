@@ -846,6 +846,28 @@ def verify(
         raise SystemExit(1)
 
 
+def _echo_resample_backlog(cfg, df) -> None:
+    """Name stored 15m/30m/60m resamples that trail their minute inputs.
+
+    They have no watermark, so the table can only say n/a; this line is the
+    one place a reader learns that a backfill has overtaken them.
+    """
+    from cnequity.derive.minute_resample import resample_backlog
+    from cnequity.domain.datasets import RESAMPLED_MINUTE_DATASETS
+
+    stored = {
+        row["dataset"]
+        for row in df.select("dataset", "has_data").iter_rows(named=True)
+        if row["has_data"] and row["dataset"] in RESAMPLED_MINUTE_DATASETS
+    }
+    for dataset in sorted(stored):
+        pending = resample_backlog(cfg, dataset)["pending"]
+        if pending:
+            click.echo(
+                f"\n{dataset}：输入有 {pending} 个交易日尚未重算；运行 cne derive {dataset} 更新。"
+            )
+
+
 @cli.command()
 @config_option
 @click.option(
@@ -975,6 +997,7 @@ def status(
         view = df if all_columns else df.select([c for c in freshness_columns if c in df.columns])
         with pl_mod.Config(tbl_rows=-1, tbl_cols=-1, fmt_str_lengths=32):
             click.echo(view)
+        _echo_resample_backlog(cfg, df)
         if lake_profile == "sample":
             click.echo(
                 "\nsample 湖：这些是 source=mock 的合成数据，日期不参与新鲜度门禁；"

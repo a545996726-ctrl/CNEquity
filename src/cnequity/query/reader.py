@@ -16,6 +16,7 @@ from cnequity.derive.adj_factors import STORED_ADJUST_TYPE
 from cnequity.domain.action_sessions import effective_session
 from cnequity.domain.datasets import (
     DATASETS,
+    DERIVE_COMMAND_DATASETS,
     RESAMPLED_MINUTE_DATASETS,
     curated_dataset_names,
     derived_dataset_names,
@@ -283,9 +284,7 @@ def _missing_dataset_message(dataset: str, root, data_root) -> str:
     from cnequity.research.packs import next_command_for_dataset
 
     remedy = next_command_for_dataset(dataset) or (
-        f"cne derive {dataset}"
-        if dataset in DATASETS and DATASETS[dataset].layer == "derived"
-        else f"cne backfill {dataset}"
+        f"cne derive {dataset}" if dataset in DERIVE_COMMAND_DATASETS else f"cne backfill {dataset}"
     )
     return (
         f"no parquet data for dataset {dataset!r} under {root} (data_root={data_root}); "
