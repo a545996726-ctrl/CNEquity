@@ -1,10 +1,13 @@
 """Frame helpers for the one polars behaviour this codebase keeps tripping on.
 
 ``pl.DataFrame()`` — no columns, no rows — is the ordinary "nothing to report"
-value across the adapters and steps. Polars broadcasts a literal expression
+value across the adapters and steps. Polars 1.x broadcasts a literal expression
 against a **zero-column** frame to length one, so::
 
-    pl.DataFrame().with_columns(pl.lit(None).alias("source"))   # -> 1 row!
+    pl.DataFrame().with_columns(pl.lit(None).alias("source"))   # -> 1 row on 1.x!
+
+Polars 2 keeps zero rows here, but the declared ``polars>=1.0`` still admits
+1.x, so the guard stays.
 
 That is not the same as a zero-*row* frame that has a schema, which behaves as
 expected and keeps zero rows. The difference is invisible at the call site and

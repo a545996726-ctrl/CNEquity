@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -180,6 +181,6 @@ def test_swap_with_backup_names_the_backup_when_restore_also_fails(tmp_path, mon
     monkeypatch.setattr(atomic_mod.os, "replace", deny_after_move_aside)
     monkeypatch.setattr(atomic_mod.time, "sleep", lambda _: None)
 
-    with pytest.raises(atomic_mod.RollbackIncompleteError, match=str(backup)):
+    with pytest.raises(atomic_mod.RollbackIncompleteError, match=re.escape(str(backup))):
         atomic_mod.swap_with_backup(staged, target, backup)
     assert (backup / "part.parquet").read_text(encoding="utf-8") == "old"

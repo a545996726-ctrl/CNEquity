@@ -1,7 +1,8 @@
 """A column-less frame must never gain a row from being stamped.
 
 `pl.DataFrame()` is the codebase's ordinary "nothing to report" value, and
-polars broadcasts a literal against a zero-**column** frame to length one. The
+polars 1.x broadcasts a literal against a zero-**column** frame to length one
+(polars 2 keeps zero rows; `polars>=1.0` still admits both). The
 resulting row carries only the literals, so it has no primary key; a strict
 validate rejects it, but a diagonal concat with a real day's rows fills its
 keys with nulls first and launders it into the lake.
@@ -102,13 +103,15 @@ def test_a_laundered_phantom_row_is_what_the_guard_prevents():
     The phantom row has no primary key, so `validate_dataframe` would reject it
     alone. A diagonal concat runs first in several paths and fills the missing
     keys with nulls — after which the row looks merely incomplete rather than
-    fabricated.
+    fabricated. Polars 2 no longer broadcasts onto a column-less frame, but the
+    declared `polars>=1.0` still admits 1.x, so the guard must hold on both.
     """
-    phantom = pl.DataFrame().with_columns(pl.lit("eastmoney").alias("source"))
     real = pl.DataFrame({"symbol": ["600519.SH"], "trade_date": [date(2024, 6, 28)]})
-    laundered = pl.concat([phantom, real], how="diagonal_relaxed")
-    assert laundered.height == 2
-    assert laundered["symbol"].to_list() == [None, "600519.SH"]
-
     guarded = with_columns_unless_blank(pl.DataFrame(), pl.lit("eastmoney").alias("source"))
     assert pl.concat([guarded, real], how="diagonal_relaxed").height == 1
+
+    phantom = pl.DataFrame().with_columns(pl.lit("eastmoney").alias("source"))
+    if phantom.height:
+        laundered = pl.concat([phantom, real], how="diagonal_relaxed")
+        assert laundered.height == 2
+        assert laundered["symbol"].to_list() == [None, "600519.SH"]
