@@ -24,6 +24,7 @@ from cnequity.cli._shared import (
     ingest_scope_label,
     parse_date_option,
     resolve_config_path,
+    star_hint_once,
 )
 from cnequity.config import validate_config, write_user_config
 from cnequity.domain.market_time import shanghai_today
@@ -418,6 +419,8 @@ def init(
         click.echo("初始化未成功结束，未安装定时任务。", err=True)
     if exit_code:
         raise SystemExit(exit_code)
+    if not quiet:
+        star_hint_once(cfg)
 
 
 def _install_pack_schedule(cfg, packs: tuple[str, ...]) -> str:

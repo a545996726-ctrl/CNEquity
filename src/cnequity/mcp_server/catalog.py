@@ -221,5 +221,10 @@ TOOLS: list[dict] = [
 
 HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 
-# What goes on the wire: the same list without the Python callable.
-DESCRIPTORS = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
+# What goes on the wire: the same list without the Python callable. Every tool
+# is read-only, and saying so is what lets a client such as ChatGPT run a call
+# without asking the user to confirm each one.
+DESCRIPTORS = [
+    {**{k: v for k, v in tool.items() if k != "handler"}, "annotations": {"readOnlyHint": True}}
+    for tool in TOOLS
+]

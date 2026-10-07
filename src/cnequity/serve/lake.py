@@ -324,6 +324,11 @@ class LakeView:
     def _freshness_of(self, row: dict, anchor: date) -> str:
         """fresh / STALE / empty / n/a, on the same rules as ``cne status``."""
         if not row["has_data"]:
+            # A demo or sample lake leaves most of the registry empty on
+            # purpose. `cne status` calls those n/a; reporting them here as
+            # empty-and-required painted a first-run lake red.
+            if getattr(self.config, "lake_profile", None) in {"demo", "sample"}:
+                return "n/a"
             return empty_freshness_label(row["dataset"])
         if not is_dataset_enabled(row["dataset"], self.config):
             return "n/a"

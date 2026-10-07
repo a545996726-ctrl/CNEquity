@@ -15,6 +15,46 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 [English](https://github.com/rootSunc/CNEquity/blob/main/README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/) · [更新日志](https://github.com/rootSunc/CNEquity/blob/main/CHANGELOG.md)
 </div>
 
+![cne serve 控制台录屏：湖状态、覆盖热力、日线详情与质量审计](https://raw.githubusercontent.com/rootSunc/CNEquity/main/docs/assets/cne-serve-tour.zh.gif)
+
+*`cne serve` 控制台真实录屏。*
+
+## 快速开始
+
+需要 Python 3.10+（macOS / Linux / Windows），不需要账号或 token。
+
+**① 一分钟试用。** 用真实数据源抓 5 只股票最近 30 个交易日，建在独立目录里，不影响以后的正式湖：
+
+```bash
+pip install cnequity
+cne init --profile demo   # 约 1 分钟；结束时打印行情表、查询示例和接给 AI 的命令
+cne serve --config configs/cnequity.demo.toml   # 在浏览器里打开上面的控制台
+```
+
+**② 让 AI 直接查 A 股。** 把湖以只读方式接给 Claude、ChatGPT、Codex、Gemini CLI、Cursor、VS Code 等支持 MCP 的客户端（`--config` 用绝对路径）。以 Claude Code 为例：
+
+```bash
+claude mcp add cnequity -- cne mcp --config /abs/path/to/configs/cnequity.demo.toml
+```
+
+各家客户端的写法见 [MCP 接入指南](https://rootsunc.github.io/CNEquity/reference/mcp/#接入各家客户端)；ChatGPT 只接公网网址，用 `cne mcp --http --token` 加隧道接入。然后直接问：「宁德时代最近 30 个交易日的最高收盘价是哪天？」
+
+**③ 建正式湖。** 沪深京全市场、最近 3 年：
+
+```bash
+cne init     # 第一次可能需要几个小时；中途断了再运行一次即可续跑，已下载的部分不会重来
+cne check    # 检查数据是否完整、可用
+```
+
+```python
+from cnequity.query import load
+
+bars = load("daily_bars", symbols=["600519.SH"])
+print(bars.tail())
+```
+
+之后每天运行一次 `cne run daily` 保持更新。想要更长的历史，或了解 `init` 具体做了什么，见[初始化指南](https://rootsunc.github.io/CNEquity/getting-started/initialization/)。
+
 ## 数据范围
 
 当前开发树注册 **55 个数据集：47 个 curated + 8 个 derived**，按用途分为 L0–L9。完整字段、主键、历史起点和来源集中在[数据集目录](https://rootsunc.github.io/CNEquity/datasets/catalog/)与[数据源说明](https://rootsunc.github.io/CNEquity/datasets/sources/)。
@@ -100,29 +140,6 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 </details>
 
 
-## 快速开始
-
-需要 Python 3.10+（macOS / Linux / Windows），不需要账号或 token。
-
-```bash
-pip install cnequity
-cne init     # 下载沪深京全市场最近 3 年的数据，第一次可能需要几个小时
-cne check    # 检查数据是否完整、可用
-```
-
-中途断了，再运行一次 `cne init`，已经下载的部分不会重来。
-
-读取数据：
-
-```python
-from cnequity.query import load
-
-bars = load("daily_bars", symbols=["600519.SH"])
-print(bars.tail())
-```
-
-之后每天运行一次 `cne run daily` 保持更新。想要更长的历史，或了解 `init` 具体做了什么，见[初始化指南](https://rootsunc.github.io/CNEquity/getting-started/initialization/)。
-
 ## 为什么值得把数据管起来
 
 - **少写重复的数据工程。** 代码、字段、分区和增量窗口由数据层管理；中断后保留成功批次，按失败范围续跑。22 条源探针路由帮助诊断可达性（高成本端点需显式选择）。
@@ -139,10 +156,6 @@ print(bars.tail())
 *历史样本仅用于说明股票池口径；图中收益和标的数量不代表当前湖覆盖或未来投资表现。退市股按最后一根可用行情计价，因子及退市覆盖限制见[股票池画像](https://rootsunc.github.io/CNEquity/reference/universe-profiles/)。*
 
 CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口径进入查询契约，避免下游研究在无意中丢掉这些标的。
-
-![CNEquity 控制台：健康状态、数据覆盖与待处理问题](https://raw.githubusercontent.com/rootSunc/CNEquity/main/docs/assets/cne-serve-hero-demo.png)
-
-*控制台示意截图（标有 ILLUSTRATIVE DEMO）；图中的 42/42、行数和容量均为虚构展示值，不是当前注册数量或实际覆盖。*
 
 
 ## 能用它研究什么
@@ -208,7 +221,7 @@ cne mcp --config /abs/path/to/cnequity.toml
 
 ## 适合与边界
 
-**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](https://rootsunc.github.io/CNEquity/architecture/overview/)。
+**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](https://rootsunc.github.io/CNEquity/architecture/overview/)；和 AKShare、Tushare 的区别与配合见[对比说明](https://rootsunc.github.io/CNEquity/architecture/comparison/)。
 
 - 当前处于 **0.x 迭代阶段**。本仓库文档对应当前实现，PyPI 稳定版可能落后；升级前核对 `cne --version` 和[更新日志](https://github.com/rootSunc/CNEquity/blob/main/CHANGELOG.md)。
 - 公共来源的网络可达性、历史深度和发布节奏会变化。基础采集无需 token，部分补充来源需要自备凭证；安装不代表获得所有上游权限。
@@ -228,3 +241,5 @@ cne mcp --config /abs/path/to/cnequity.toml
 欢迎提交带最小复现的 [Issue](https://github.com/rootSunc/CNEquity/issues)、文档修正或数据适配 PR。研究引用见 [CITATION.cff](https://github.com/rootSunc/CNEquity/blob/main/CITATION.cff)；安全问题请按[安全策略](https://github.com/rootSunc/CNEquity/blob/main/SECURITY.md)私下报告。
 
 **觉得有用？[点一个 Star](https://github.com/rootSunc/CNEquity)，或把项目分享给同样在维护 A 股数据的人。**
+
+<!-- mcp-name: io.github.rootSunc/cnequity -->

@@ -67,7 +67,7 @@
 |------|------|
 | [`cne query`](#cne-query) | 跑 DuckDB SQL，或按需拉取数据集 |
 | [`cne serve`](#cne-serve) | 湖面板：浏览、操作页取数、网页确认清理（默认 `127.0.0.1:8787`） |
-| [`cne mcp`](#cne-mcp) | 以 MCP stdio 把湖提供给 AI agent |
+| [`cne mcp`](#cne-mcp) | 以 MCP（stdio 或 HTTP）把湖提供给 AI agent |
 
 ### 治理与检视
 
@@ -863,12 +863,15 @@ SQL 查询本地湖；`--dataset` 与 `--symbol` 成对使用，缓存缺失或 
 
 ## cne mcp
 
-把这个湖接给 AI agent（MCP over stdio）。只读，不提供 serve 的存储删除入口。
+把这个湖接给 AI agent（MCP，默认 stdio，`--http` 改用 Streamable HTTP）。只读，不提供 serve 的存储删除入口。
 
 | 选项 | 说明 |
 |------|------|
 | `--config` | 配置文件路径，**建议绝对路径**（客户端从哪个目录拉起进程不确定） |
 | `--live` | 湖里没有的，现拉现给、不落盘。只支持 `resolve_symbol` 与未复权日线，其余工具明确拒绝 |
+| `--http` | 改用 Streamable HTTP，在 `/mcp` 上监听。给只接远程网址的客户端（ChatGPT）配合隧道使用 |
+| `--host` / `--port` | `--http` 的监听地址与端口，默认 `127.0.0.1:8788`。非回环地址必须配 `--token` |
+| `--token` | `--http` 下每个请求都要带的令牌：`Authorization: Bearer`、`/mcp/<令牌>` 路径或 `?token=`。经隧道公开时必须设置 |
 
 不用手敲：由 MCP 客户端拉起并在管道上讲 JSON-RPC。三条路按手上有什么选：
 
@@ -879,8 +882,10 @@ cne mcp --config /abs/path/cnequity.toml --live
 ```
 
 上面的 `cne mcp ...` 是标准 MCP stdio server 命令，Claude 只是其中一种
-客户端。Codex、Cline、Cursor、Windsurf、Gemini CLI 或其它兼容客户端，均
+客户端。Codex、Cline、Cursor、Windsurf、Gemini CLI、VS Code 或其它兼容客户端，均
 使用相同的 `command` / `args`；客户端的注册入口不同，但不需要改 server。
+ChatGPT 只接公网 HTTPS 网址，用 `--http --token` 加隧道接入。各家的具体写法见
+[MCP 参考](mcp.md#接入各家客户端)。
 
 `--live` **默认关，永不自动推断**：湖坏了的用户必须拿到 `no parquet data` 去修，而不是悄悄拿到一份来自别处、看起来差不多的答案。每次调用最多 50 个标的 / 800 天，且必须显式给 `symbols`。每条响应带 `origin: "lake" | "live"`。
 

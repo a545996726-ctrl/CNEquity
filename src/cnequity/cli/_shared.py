@@ -217,3 +217,29 @@ def _run_status_exit_code(status: str) -> int:
     from cnequity.orchestrator.outcomes import execution_exit_code
 
     return execution_exit_code(status)
+
+
+STAR_URL = "https://github.com/rootSunc/CNEquity"
+
+
+def star_hint_once(cfg) -> None:
+    """After a lake's first successful build, ask for a star — once, on a terminal.
+
+    A marker under ``meta/state`` keeps it to one line per lake; logs, pipes
+    and scheduled runs never see it.
+    """
+    import sys
+
+    if not sys.stderr.isatty():
+        return
+    marker = Path(cfg.meta_root) / "state" / "star-hint-shown"
+    if marker.exists():
+        return
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        return
+    click.echo(
+        f"\n觉得有用？欢迎到 {STAR_URL} 点一个 Star，或分享给同样在维护 A 股数据的人。", err=True
+    )

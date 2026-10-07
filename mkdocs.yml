@@ -123,6 +123,7 @@ nav:
       - 维护者发布清单: operations/releasing.md
   - 产品设计:
       - 方向与边界: architecture/overview.md
+      - 与 AKShare / Tushare 对比: architecture/comparison.md
       - 设计原则: architecture/design-principles.md
       - 采集到查询: architecture/data-flow.md
       - 数据湖目录: architecture/lake-layout.md

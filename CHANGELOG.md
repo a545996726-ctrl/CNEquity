@@ -2,6 +2,16 @@
 
 这里记录面向用户的主要功能、修复与兼容性变化。历史版本中的命令名反映当时的接口；当前用法以 [CLI 参考](docs/reference/cli.md)为准。升级前阅读[升级与兼容性](docs/getting-started/installation.md#升级与兼容性)。
 
+## [Unreleased]
+
+- `cne mcp --http` 用 Streamable HTTP 在 `127.0.0.1:8788/mcp` 上提供同样的六个只读工具，供只接远程网址的客户端（如 ChatGPT）配合 cloudflared、ngrok 等隧道使用。`--token` 设置后每个请求都必须带令牌（`Authorization: Bearer`、`/mcp/<令牌>` 路径或 `?token=`）；不设令牌时只接受本机直连，经隧道或代理的请求和其他站点的网页请求都返回 403。非回环地址必须配 `--token`。stdio 用法不变。
+- MCP 工具声明 `readOnlyHint`，ChatGPT 等客户端据此把它们当作只读操作。
+- 新增与 `cne` 等价的 `cnequity` 命令，`uvx cnequity mcp --config <配置>` 无需先安装即可启动 MCP 服务。仓库根目录新增 `server.json`，用于登记到官方 MCP Registry。
+- 修复 MCP 的 `run_sql` 在已发布不可变版本的数据集上一律报 `Permission Error`。查询沙箱此前只放行 `curated/` 和 `derived/`，而这类数据集的视图读的是 `meta/revisions/data/`；现在放行该目录，`meta/` 下的其他文件仍不可读。
+- `cne init --profile demo` / `sample` 结束时打印可直接复制的 MCP 接入命令（带配置的绝对路径），并当场生成度量表。此前用 `cne serve` 打开 demo 湖，概览显示 0 行，并把 demo 本来就不采的数据集标成「必需数据集为空」；现在面板与 `cne status` 一致，只评估 demo 湖实际持有的数据集。
+- 湖第一次成功建好时，在终端提示一次欢迎 Star；日志、管道和定时任务不会显示。
+- MCP 指南新增 Claude Code、Claude Desktop、ChatGPT、Codex、Gemini CLI、Cursor、VS Code、Windsurf 等客户端的接入写法。
+
 ## [0.15.0] — 2026-10-07
 
 - **升级步骤：** `pip install -U cnequity` 后重启 `cne serve`。数据集契约只新增三个可选的派生数据集 `minute_bars_15m` / `minute_bars_30m` / `minute_bars_60m`，默认不计算，不需要迁移已有数据，也不需要改配置；需要时运行 `cne derive minute_bars_15m` 等入湖。

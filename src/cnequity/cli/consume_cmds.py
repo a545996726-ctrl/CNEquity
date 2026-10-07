@@ -283,8 +283,26 @@ def query(
         "和 PIT 的情况下作答。"
     ),
 )
-def mcp_cmd(config_path: str, live: bool):
-    """通过 MCP（stdio）把这个湖开放给 AI agent。
+@click.option(
+    "--http",
+    "use_http",
+    is_flag=True,
+    help="改用 Streamable HTTP，在 /mcp 上监听。给只接远程 URL 的客户端（如 ChatGPT）配合隧道使用。",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="--http 的监听地址。非回环地址必须配 --token。",
+)
+@click.option("--port", default=8788, show_default=True, help="--http 的端口。")
+@click.option(
+    "--token",
+    default=None,
+    help="--http：每个请求都要带这个令牌（Bearer 头、/mcp/<令牌> 路径或 ?token=）。经隧道公开时必须设置。",
+)
+def mcp_cmd(config_path: str, live: bool, use_http: bool, host: str, port: int, token: str | None):
+    """通过 MCP（stdio 或 HTTP）把这个湖开放给 AI agent。
 
     \b
     它不是拿来手敲的：任何兼容 MCP 的客户端会拉起这个进程，并在管道上讲 JSON-RPC。
@@ -298,10 +316,30 @@ def mcp_cmd(config_path: str, live: bool):
     不是某一家厂商专有的 Claude 集成。
 
     \b
+    \b
+    只接远程 URL 的客户端（如 ChatGPT）用 `--http`，再用隧道把 /mcp 公开成 HTTPS，并且一定要配 `--token`：
+
+    \b
+      cne mcp --config /path/to/cnequity.toml --http --token <随机串>
+
     MCP 工具只读，不提供 serve 的操作页和网页确认清理。这些工具只查询湖；采集从 CLI 或 serve 的操作页发起。
     """
 
     from cnequity.mcp_server import serve_stdio
+
+    ctx = click.get_current_context()
+    if not use_http:
+        given = [
+            f"--{name}"
+            for name in ("host", "port", "token")
+            if ctx.get_parameter_source(name) is not click.core.ParameterSource.DEFAULT
+        ]
+        if given:
+            raise click.UsageError(f"{', '.join(given)} 只用于 --http")
+    elif host not in _LOOPBACK and not token:
+        raise click.ClickException(
+            f"--host {host} 会把 MCP 暴露到本机之外；请用 --token 要求令牌，或者把 --host 留在 127.0.0.1。"
+        )
 
     cfg = _cfg(config_path)
     # Opt-in, never inferred. A lake user whose lake is broken must get "no
@@ -318,7 +356,35 @@ def mcp_cmd(config_path: str, live: bool):
     # command; without it this call would be a no-op and the wire's log
     # would carry every INFO record the pipeline emits.
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
+    if use_http:
+        _serve_mcp_http(cfg, host, port, token)
+        return
     serve_stdio(cfg)
+
+
+def _serve_mcp_http(cfg, host: str, port: int, token: str | None) -> None:
+    from cnequity.mcp_server.http import create_app
+
+    sockets: list[socket.socket] | None = None
+    try:
+        if host in _LOOPBACK:
+            sockets = bind_loopback(port)
+            port = sockets[0].getsockname()[1]
+            host = "127.0.0.1"
+        base = f"http://{host}:{port}/mcp"
+        click.echo(f"数据湖：  {cfg.data_root}")
+        click.echo(f"MCP 端点：{base}")
+        if token:
+            click.echo(f"带令牌：  {base}/{token}（隧道公开后把主机换成隧道的 HTTPS 域名）")
+        else:
+            click.echo("未设令牌：只接受本机直连；经隧道或代理的请求一律拒绝。")
+        _run_server(create_app(cfg, token=token), host, port, sockets)
+    finally:
+        for sock in sockets or []:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def _guard_mcp_data_root(cfg, config_path: str) -> None:

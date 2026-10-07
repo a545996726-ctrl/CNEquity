@@ -20,7 +20,7 @@ from pathlib import Path
 import click
 import polars as pl
 
-from cnequity.cli._shared import _run_status_exit_code
+from cnequity.cli._shared import _run_status_exit_code, star_hint_once
 from cnequity.config import Config, WaveConfig
 from cnequity.domain.market_time import shanghai_today
 from cnequity.domain.schemas import validate_dataframe, with_provenance
@@ -40,6 +40,8 @@ DEFAULT_SYMBOLS = (
 DEFAULT_DAYS = 30
 DEFAULT_DATA_ROOT = Path("data/cnequity-demo")
 RESEARCH_MIN_DAYS = 756  # roughly three trading years; enough to cross corporate actions
+
+MCP_GUIDE_URL = "https://rootsunc.github.io/CNEquity/reference/mcp/"
 
 
 def _banner(step: str, title: str) -> None:
@@ -472,6 +474,33 @@ def _run_intraday_demo(cfg: Config, engine, symbols: list[str], end: date, days:
     }
 
 
+def _ai_hint(config_out: Path) -> str:
+    """The one command that hands this lake to an agent, with the real path.
+
+    MCP clients spawn the server from a directory of their own, so the config
+    must be absolute; printing it here saves the user from building that path.
+    """
+    return f"""
+接给 AI（只读 MCP，以 Claude Code 为例）：
+  claude mcp add cnequity -- cne mcp --config {config_out.resolve()}
+ChatGPT、Codex、Cursor、VS Code 等的写法：{MCP_GUIDE_URL}
+"""
+
+
+def _rebuild_demo_stats(cfg: Config) -> None:
+    """Build the stats tables now, so `cne serve` opens on real row counts.
+
+    Without them the panel's first view showed 0 rows and a pending rebuild.
+    A failure here costs the demo nothing it promised, so it only warns.
+    """
+    from cnequity.storage.stats import rebuild_stats
+
+    try:
+        rebuild_stats(cfg)
+    except Exception as exc:  # noqa: BLE001 — never fail a finished demo on stats
+        click.echo(f"度量表没能生成（{exc}）；`cne serve` 会在打开时后台重建。", err=True)
+
+
 def _sample_sessions(end: date, days: int) -> list[date]:
     sessions: list[date] = []
     cursor = end
@@ -597,6 +626,7 @@ def run_sample_demo(
         out = cfg.curated_root / "daily_bars" / f"trade_date={session.isoformat()}"
         write_parquet_atomic(out / "part-sample.parquet", frame, compression="zstd")
     ensure_duckdb_views(cfg)
+    _rebuild_demo_stats(cfg)
 
     _banner("3/3", "通过公开 API 查询样例")
     sample_symbol = symbols[0]
@@ -618,8 +648,9 @@ def run_sample_demo(
   "
 
 网络可用时，跑 `cne init --profile demo` 取真实的 TDX 数据。
-"""
+{_ai_hint(config_out)}"""
     )
+    star_hint_once(cfg)
     return {
         "data_root": str(cfg.data_root),
         "config": str(config_out),
@@ -790,6 +821,7 @@ def run_demo(
         _banner(f"{step}/{steps}", f"minute_bars 1 分钟线（{len(kept)} 只标的）")
         intraday_summary = _run_intraday_demo(cfg, engine, kept, end, days)
 
+    _rebuild_demo_stats(cfg)
     click.echo(
         f"""
 demo 湖已就绪：{cfg.data_root}
@@ -807,11 +839,12 @@ demo 湖已就绪：{cfg.data_root}
 Python：
   from cnequity.query import load
   bars = load("daily_bars", symbols=["{sample_symbol}"], data_root="{cfg.data_root}")
-{_intraday_hint(intraday_summary, cfg, sample_symbol)}
+{_intraday_hint(intraday_summary, cfg, sample_symbol)}{_ai_hint(config_out)}
 全市场初始化（数小时到数天）是另一回事：直接运行 `cne init`。
 不要把这个 demo 的 data_root 拿去跑生产。
 """
     )
+    star_hint_once(cfg)
     return {
         "data_root": str(cfg.data_root),
         "config": str(config_out),

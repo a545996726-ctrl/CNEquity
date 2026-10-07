@@ -18,7 +18,7 @@
 | `cne derive` | 条件 | 写派生数据；adj_factors 等模式可访问源 |
 | `cne doctor` | 无 | 离线检查配置与环境 |
 | `cne init` | 条件 | sample 离线；demo/quick/full 取数；layout-only 创建目录 |
-| `cne mcp` | 条件 | 默认读湖；--live 可取源数据 |
+| `cne mcp` | 条件 | 默认读湖；--live 可取源数据；--http 监听本地端口 |
 | `cne profile list` | 无 | 列出内置范围 |
 | `cne profile show` | 无 | 显示内置范围 |
 | `cne query` | 条件 | SQL 读湖；按需数据缓存未命中或刷新时取数 |

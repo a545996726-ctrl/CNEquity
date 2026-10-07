@@ -349,6 +349,28 @@ def test_run_sql_cannot_access_external_files_or_urls(lake, sql):
         tools.run_sql(lake, sql=sql)
 
 
+def test_run_sql_reads_a_published_generation(lake):
+    """Views over a committed dataset point into meta/revisions/data; the
+    sandbox has to allow that directory or every such query is refused."""
+    from cnequity.storage.revisions import RevisionStore
+
+    store = RevisionStore(lake.meta_root, lake.curated_root)
+    files = sorted((lake.curated_root / "daily_bars").rglob("*.parquet"))
+    assert store.commit(
+        "daily_bars",
+        run_id="r1",
+        changed_files=files,
+        schema_version=1,
+        contract_fingerprint="test",
+    )
+    payload = tools.run_sql(lake, sql="SELECT count(*) AS n FROM daily_bars")
+    assert payload["rows"][0][0] > 0
+    with pytest.raises(tools.ToolError):
+        tools.run_sql(
+            lake, sql=f"SELECT * FROM read_text('{(lake.meta_root / 'manifest.db').as_posix()}')"
+        )
+
+
 def test_run_sql_cannot_access_a_file_outside_the_lake(lake, tmp_path):
     secret = tmp_path / "outside-lake-secret.txt"
     secret.write_text("must not be exposed", encoding="utf-8")
@@ -648,3 +670,113 @@ def test_describe_lake_announces_live_mode(empty, monkeypatch):
         tools.describe_lake(lake_config := Config(data_root=empty.data_root))["live_mode"] is False
     )
     assert lake_config is not None
+
+
+# --- Streamable HTTP ---------------------------------------------------------
+
+
+def _http_client(lake, token=None):
+    from starlette.testclient import TestClient
+
+    from cnequity.mcp_server.http import create_app
+
+    return TestClient(create_app(lake, token=token), base_url="http://127.0.0.1:8788")
+
+
+def _rpc(method, params=None, id_=1):
+    return {"jsonrpc": "2.0", "id": id_, "method": method, "params": params or {}}
+
+
+def test_http_round_trip_matches_stdio(lake):
+    client = _http_client(lake)
+    assert client.post("/mcp", json=_rpc("initialize")).json()["result"]["serverInfo"]
+    reply = client.post(
+        "/mcp",
+        json=_rpc("tools/call", {"name": "resolve_symbol", "arguments": {"query": "茅台"}}, 2),
+    ).json()
+    body = json.loads(reply["result"]["content"][0]["text"])
+    assert body["rows"][0][0] == "600519.SH"
+
+
+def test_http_notification_is_accepted_without_a_body(lake):
+    resp = _http_client(lake).post(
+        "/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+    )
+    assert resp.status_code == 202
+    assert resp.content == b""
+
+
+def test_http_batch_and_parse_error(lake):
+    client = _http_client(lake)
+    replies = client.post("/mcp", json=[_rpc("ping", id_=1), _rpc("ping", id_=2)]).json()
+    assert [r["id"] for r in replies] == [1, 2]
+    bad = client.post("/mcp", content=b"{broken", headers={"content-type": "application/json"})
+    assert bad.status_code == 400
+    assert bad.json()["error"]["code"] == protocol.PARSE_ERROR
+
+
+def test_http_offers_no_stream(lake):
+    resp = _http_client(lake).get("/mcp")
+    assert resp.status_code == 405
+    assert resp.headers["allow"] == "POST"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"host": "lake.example.com"},
+        {"x-forwarded-for": "203.0.113.9"},
+        {"cf-connecting-ip": "203.0.113.9"},
+        {"origin": "https://evil.example"},
+    ],
+)
+def test_http_without_token_accepts_only_plain_local_requests(lake, headers):
+    """A tunnel may rewrite Host to localhost, and a browser page may POST
+    text/plain without a preflight — neither may reach the tools tokenless."""
+    resp = _http_client(lake).post("/mcp", json=_rpc("ping"), headers=headers)
+    assert resp.status_code == 403
+
+
+def test_http_local_origin_is_fine_without_token(lake):
+    resp = _http_client(lake).post(
+        "/mcp", json=_rpc("ping"), headers={"origin": "http://localhost:6274"}
+    )
+    assert resp.status_code == 200
+
+
+def test_http_token_is_required_even_on_a_loopback_host(lake):
+    client = _http_client(lake, token="s3cret")
+    assert client.post("/mcp", json=_rpc("ping")).status_code == 403
+    assert client.post("/mcp/wrong", json=_rpc("ping")).status_code == 403
+    assert client.post("/mcp/s3cret", json=_rpc("ping")).status_code == 200
+    assert client.post("/mcp?token=s3cret", json=_rpc("ping")).status_code == 200
+    ok = client.post(
+        "/mcp",
+        json=_rpc("ping"),
+        headers={"authorization": "Bearer s3cret", "host": "abc.trycloudflare.com"},
+    )
+    assert ok.status_code == 200
+
+
+def test_every_tool_is_marked_read_only():
+    assert all(d["annotations"] == {"readOnlyHint": True} for d in DESCRIPTORS)
+
+
+def test_mcp_http_options_need_http():
+    from click.testing import CliRunner
+
+    from cnequity.cli.main import cli
+
+    result = CliRunner().invoke(cli, ["mcp", "--token", "x"])
+    assert result.exit_code != 0
+    assert "--token 只用于 --http" in result.output
+
+
+def test_mcp_http_refuses_a_public_bind_without_token():
+    from click.testing import CliRunner
+
+    from cnequity.cli.main import cli
+
+    result = CliRunner().invoke(cli, ["mcp", "--http", "--host", "0.0.0.0"])
+    assert result.exit_code != 0
+    assert "--token" in result.output

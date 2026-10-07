@@ -12,6 +12,46 @@ CNEquity turns market prices, financial statements, corporate events and capital
 [中文](README.md) · [Documentation](https://rootsunc.github.io/CNEquity/) · [Dataset catalog](docs/datasets/catalog.md) · [Changelog](CHANGELOG.md)
 </div>
 
+![cne serve dashboard tour: lake status, coverage heatmap, daily-bar detail and quality audits](docs/assets/cne-serve-tour.gif)
+
+*A real recording of the `cne serve` dashboard.*
+
+## Quick start
+
+Requires Python 3.10+ on macOS, Linux or Windows. No account or token needed.
+
+**① Try it in a minute.** Fetch the last 30 trading days for 5 stocks from live sources into a separate directory that never touches your real lake:
+
+```bash
+pip install cnequity
+cne init --profile demo   # about a minute; prints the bars, a sample query and the command to hand it to an AI agent
+cne serve --config configs/cnequity.demo.toml   # open the dashboard shown above
+```
+
+**② Let an AI agent query A-shares.** Connect the lake read-only to Claude, ChatGPT, Codex, Gemini CLI, Cursor, VS Code or any other MCP client (give `--config` as an absolute path). With Claude Code:
+
+```bash
+claude mcp add cnequity -- cne mcp --config /abs/path/to/configs/cnequity.demo.toml
+```
+
+See the [MCP guide](docs/reference/mcp.md#接入各家客户端) for every client; ChatGPT only reaches public URLs, so it connects through `cne mcp --http --token` and a tunnel. Then ask: "Which day had CATL's highest close in the last 30 trading days?"
+
+**③ Build the full lake.** Every Shanghai, Shenzhen and Beijing A-share, last 3 years:
+
+```bash
+cne init     # the first run can take hours; if it stops, run it again and nothing already downloaded is fetched twice
+cne check    # confirm the data is complete and usable
+```
+
+```python
+from cnequity.query import load
+
+bars = load("daily_bars", symbols=["600519.SH"])
+print(bars.tail())
+```
+
+Then run `cne run daily` once a day to stay current. For longer history, or what `init` does step by step, see the [initialization guide](docs/getting-started/initialization.md).
+
 ## Data coverage
 
 The current development tree registers **55 datasets: 47 curated + 8 derived**, organized into L0–L9. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
@@ -31,29 +71,6 @@ The current development tree registers **55 datasets: 47 curated + 8 derived**, 
 
 Minutes, trade snapshots and futures/options are disabled by default. Check each source's historical horizon and actual coverage after opting in.
 
-## Quick start
-
-Requires Python 3.10+ on macOS, Linux or Windows. No account or token needed.
-
-```bash
-pip install cnequity
-cne init     # download the last 3 years for every Shanghai, Shenzhen and Beijing A-share; the first run can take hours
-cne check    # confirm the data is complete and usable
-```
-
-If it stops halfway, run `cne init` again; nothing already downloaded is fetched twice.
-
-Read the data:
-
-```python
-from cnequity.query import load
-
-bars = load("daily_bars", symbols=["600519.SH"])
-print(bars.tail())
-```
-
-Then run `cne run daily` once a day to stay current. For longer history, or what `init` does step by step, see the [initialization guide](docs/getting-started/initialization.md).
-
 ## Why keep a lake?
 
 - **Spend less time rebuilding ingestion.** Normalize symbols and columns once, track incremental windows, and resume failed work without discarding successful batches. There are 22 source-probe routes; costly endpoints require explicit selection.
@@ -70,10 +87,6 @@ The same equal-weight buy-and-hold strategy over the same dates produces a diffe
 *This historical sample illustrates universe selection. Its returns and stock counts do not describe current lake coverage or future investment performance. Delisted names are valued at their last available bar; see the [universe profiles](docs/reference/universe-profiles.md) for evidence limits.*
 
 CNEquity retains delisted identities and makes adjustment, historical membership and PIT semantics part of the query contract.
-
-![CNEquity dashboard showing health, coverage and action items](docs/assets/cne-serve-hero-demo.png)
-
-*Illustrative dashboard screenshot, labelled ILLUSTRATIVE DEMO. Its 42/42 count, row total and size are fictional display values, not the current registry or your lake's coverage.*
 
 If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https://github.com/rootSunc/CNEquity) to find it again and help other researchers discover it.
 
@@ -139,7 +152,7 @@ cne mcp --config /abs/path/to/cnequity.toml
 
 ## Fit and limits
 
-CNEquity fits repeated historical research, ongoing collection and self-hosted data operations. A direct source call is lighter for an occasional quote. Existing research and trading platforms can consume the lake; see [choosing a data workflow](docs/architecture/overview.md).
+CNEquity fits repeated historical research, ongoing collection and self-hosted data operations. A direct source call is lighter for an occasional quote. Existing research and trading platforms can consume the lake; see [choosing a data workflow](docs/architecture/overview.md). How it differs from and works alongside AKShare and Tushare: [comparison](docs/architecture/comparison.md) (Chinese).
 
 - The project is in **0.x development**. Repository documentation describes the current tree; the stable PyPI release may lag. Check `cne --version` and the [changelog](CHANGELOG.md).
 - Public-source connectivity, retention and publication schedules vary. Basic collection needs no token; some supplemental sources require your own credentials and permissions.

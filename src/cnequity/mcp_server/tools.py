@@ -578,11 +578,14 @@ def _configure_sql_connection(con: Any, config: Config) -> None:
     DuckDB SELECT table functions can still read local files or fetch remote
     resources.  The views created by :func:`ensure_duckdb_views` only need the
     curated and derived roots, so make those the sole allowed directories and
-    disable all other external access before locking the settings.
+    disable all other external access before locking the settings. A dataset
+    with a published generation reads from ``meta/revisions/data`` instead, so
+    that directory is allowed too — and nothing else under ``meta``.
     """
     allowed = [
         str(config.curated_root.resolve()),
         str(config.derived_root.resolve()),
+        str((config.meta_root / "revisions" / "data").resolve()),
     ]
     # This must be configured before enable_external_access is disabled.  Use
     # a bound list parameter so paths containing quotes cannot alter SQL.

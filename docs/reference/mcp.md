@@ -20,15 +20,40 @@ cne mcp --config /abs/path/to/configs/cnequity.demo.toml
 cne mcp --config /abs/path/to/cnequity.toml --live
 ```
 
-传输是 stdio：客户端拉起进程，在管道上讲 JSON-RPC，不需要手动执行。
+默认传输是 stdio：客户端拉起进程，在管道上讲 JSON-RPC，不需要手动执行。只接远程 URL 的客户端（ChatGPT）用 `--http`，见下文[ChatGPT](#chatgpt)。
 
 **`--config` 和配置里的 `[data].root` 都要用绝对路径。** MCP 客户端从哪个目录启动进程是不确定的，而相对的 `data.root` 是相对**工作目录**解析的——于是湖解析到一个不存在的路径，每个工具都回「no parquet data」，agent 如实报告「没有数据」。这句话对那个路径是真的，对你的湖是假的。
 
 `cne config create` 写出的配置本来就是绝对路径。启动时会检查 curated 下是否有 parquet，没有就直接退出并打印解析后的路径，而不是伺服一个空湖。
 
-在客户端的 MCP 配置中，把上面的命令填成 `command` / `args`。下面是常见
-的通用 JSON 形状；不同 agent 的文件位置和 UI 名称可能不同，但 server
-参数不变：
+## 接入各家客户端
+
+下面的 `/abs/path/to/cnequity.toml` 换成你的配置绝对路径；只想先试试就用 `cne init --profile demo` 打印出的 demo 配置路径。
+
+| 客户端 | 传输 | 接入方式 |
+|---|---|---|
+| Claude Code | stdio | 命令行一条 |
+| Claude Desktop | stdio | `claude_desktop_config.json` |
+| ChatGPT | HTTP | `cne mcp --http` + HTTPS 隧道 + 开发者模式连接器 |
+| Codex（CLI / IDE 插件） | stdio | 命令行一条，或 `~/.codex/config.toml` |
+| Gemini CLI | stdio | `~/.gemini/settings.json` |
+| Cursor | stdio | `~/.cursor/mcp.json` |
+| VS Code（Copilot agent 模式） | stdio | `.vscode/mcp.json` |
+| Windsurf、Cline、Cherry Studio、Trae、LM Studio 等 | stdio | 在 MCP 设置里填同一条命令和参数 |
+
+是否支持某个客户端，取决于它支持 stdio 还是只接远程 URL，与背后用哪家模型无关。
+
+### Claude Code
+
+```bash
+claude mcp add cnequity -- cne mcp --config /abs/path/to/cnequity.toml
+```
+
+加 `-s user` 让所有项目都能用。
+
+### Claude Desktop、Cursor、Gemini CLI、Windsurf
+
+这几家用同一种 JSON，只是文件位置不同：Claude Desktop 在「设置 → 开发者 → 编辑配置」打开的 `claude_desktop_config.json`；Cursor 是 `~/.cursor/mcp.json`；Gemini CLI 是 `~/.gemini/settings.json`；Windsurf 是 `~/.codeium/windsurf/mcp_config.json`。
 
 ```json
 {
@@ -41,16 +66,58 @@ cne mcp --config /abs/path/to/cnequity.toml --live
 }
 ```
 
-兼容性边界：
+**桌面应用找不到 `cne` 时**，把 `command` 换成绝对路径（终端里 `which cne`，Windows 用 `where cne`）。从 Dock 或开始菜单启动的应用不继承 shell 的 `PATH`，装在虚拟环境里的 `cne` 尤其如此。
 
-| 客户端连接方式 | 当前支持 | 说明 |
-|---|---|---|
-| 本地 stdio 子进程 | ✅ | 任意支持 MCP stdio 的 agent，包括 Codex、Claude、Cline、Cursor、Windsurf、Gemini CLI 等 |
-| MCP Streamable HTTP / URL | 尚未提供 | 当前 `cne mcp` 没有 HTTP listener；需要 URL 型远程部署时应使用反向代理/本地 stdio bridge，或后续启用 HTTP transport |
+### Codex
 
-所以“是否支持某个 agent”取决于它是否支持 MCP stdio，而不是模型名称。若
-目标 agent 只能接收 URL，需单独增加 Streamable HTTP 传输，不能把 stdio
-命令伪装成 HTTP 服务。
+```bash
+codex mcp add cnequity -- cne mcp --config /abs/path/to/cnequity.toml
+```
+
+或者写进 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.cnequity]
+command = "cne"
+args = ["mcp", "--config", "/abs/path/to/cnequity.toml"]
+```
+
+### VS Code
+
+VS Code 的键名是 `servers`，不是 `mcpServers`：
+
+```json
+{
+  "servers": {
+    "cnequity": {
+      "type": "stdio",
+      "command": "cne",
+      "args": ["mcp", "--config", "/abs/path/to/cnequity.toml"]
+    }
+  }
+}
+```
+
+### ChatGPT
+
+ChatGPT 只连接公网 HTTPS 地址，不能拉起本地进程，认证也只有 OAuth 和「无认证」两种。所以要三步：用 HTTP 模式起服务，用隧道把它公开成 HTTPS，再把带令牌的网址交给 ChatGPT。需要付费套餐里的开发者模式。
+
+```bash
+# 1. 生成一个随机令牌，用 HTTP 模式起服务（默认只监听 127.0.0.1:8788）
+TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(24))")
+cne mcp --config /abs/path/to/cnequity.toml --http --token "$TOKEN"
+
+# 2. 另开一个终端，用隧道公开成 HTTPS（cloudflared 或 ngrok 均可）
+cloudflared tunnel --url http://localhost:8788
+```
+
+3. 在 ChatGPT 设置里打开开发者模式，新建连接器：网址填 `https://<隧道域名>/mcp/<令牌>`，认证选「无认证」。
+
+令牌放在路径里，是因为 ChatGPT 不能为连接器加自定义请求头；服务端也接受 `Authorization: Bearer <令牌>` 和 `?token=<令牌>`。设了 `--token` 后，每个请求都必须带令牌，与 Host 头无关。不设令牌时，只接受本机直连：Host 不是回环地址、带转发头（隧道和反向代理都会加）或 Origin 来自其他站点的请求一律返回 403。
+
+**这个网址就是钥匙。** 拿到它的人能对你的湖执行任意只读 SQL。别贴到公开的地方；不用时停掉隧道。cloudflared 的临时隧道每次启动域名都会变，换了之后要回 ChatGPT 改连接器网址。
+
+六个工具都标了 `readOnlyHint`，ChatGPT 据此把它们当作只读操作。Claude 网页版的自定义连接器同样只接远程网址，也可以用这一套。
 
 ## 六个工具分别做什么
 
@@ -133,7 +200,7 @@ SQL 连接还会被限制为只允许访问 `curated/` 和 `derived/` 两个 lak
 
 ## 传输与实现
 
-服务端使用 `mcp_server/protocol.py` 的 stdio JSON-RPC 循环，没有额外的 MCP SDK 依赖。支持的传输是本地标准输入/输出，不提供 HTTP listener。默认模式读取本地数据；`--live` 是显式联网模式，仍不写研究数据，限流账本可能更新。
+服务端使用 `mcp_server/protocol.py` 的 JSON-RPC 处理，没有额外的 MCP SDK 依赖。默认传输是 stdio；`--http` 用 `mcp_server/http.py` 提供 Streamable HTTP：每个 `POST /mcp` 直接返回 JSON，不开 SSE 流，也不建会话，`GET` 返回 405。默认模式读取本地数据；`--live` 是显式联网模式，仍不写研究数据，限流账本可能更新。
 
 ## 排障
 

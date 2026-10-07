@@ -255,7 +255,7 @@ EFFECTS: dict[str, tuple[str, str]] = {
     "derive": ("条件", "写派生数据；adj_factors 等模式可访问源"),
     "doctor": ("无", "离线检查配置与环境"),
     "init": ("条件", "sample 离线；demo/quick/full 取数；layout-only 创建目录"),
-    "mcp": ("条件", "默认读湖；--live 可取源数据"),
+    "mcp": ("条件", "默认读湖；--live 可取源数据；--http 监听本地端口"),
     "profile list": ("无", "列出内置范围"),
     "profile show": ("无", "显示内置范围"),
     "query": ("条件", "SQL 读湖；按需数据缓存未命中或刷新时取数"),

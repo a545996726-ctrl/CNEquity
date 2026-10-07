@@ -182,6 +182,10 @@
 |---|---|---|
 | `--config` | `configs/cnequity.toml` | 配置文件路径。 |
 | `--live` | `False` | 湖里没有的数据就按需向源头取，并且不落盘。只支持标的查找和未复权日线；其它工具宁可拒绝，也不会在没有复权、universe 和 PIT 的情况下作答。 |
+| `--http` | `False` | 改用 Streamable HTTP，在 /mcp 上监听。给只接远程 URL 的客户端（如 ChatGPT）配合隧道使用。 |
+| `--host` | `127.0.0.1` | --http 的监听地址。非回环地址必须配 --token。 |
+| `--port` | `8788` | --http 的端口。 |
+| `--token` | `—` | --http：每个请求都要带这个令牌（Bearer 头、/mcp/<令牌> 路径或 ?token=）。经隧道公开时必须设置。 |
 
 ## `cne profile list`
 

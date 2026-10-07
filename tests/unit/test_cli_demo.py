@@ -230,6 +230,58 @@ def test_cne_demo_sample_needs_no_network(tmp_path, monkeypatch):
     assert "预期 info" in audit.output
 
 
+def test_sample_ends_ready_for_the_panel_and_an_agent(tmp_path):
+    """The README sends a first-time user from the demo straight to an agent and
+    the dashboard: the printed MCP command must carry the absolute config path,
+    and the panel must open on real counts rather than an all-red registry."""
+    from fastapi.testclient import TestClient
+
+    from cnequity.config import load_config
+    from cnequity.serve.app import create_app
+    from cnequity.storage.stats import stats_freshness
+
+    data_root = tmp_path / "sample-lake"
+    config_out = tmp_path / "sample.toml"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--profile",
+            "sample",
+            "--days",
+            "5",
+            "--data-root",
+            str(data_root),
+            "--config-out",
+            str(config_out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"claude mcp add cnequity -- cne mcp --config {config_out.resolve()}" in result.output
+
+    cfg = load_config(config_out)
+    assert not stats_freshness(cfg).stale
+    health = TestClient(create_app(cfg, read_only=True)).get("/api/health").json()
+    assert health["empty_required"] == []
+    assert health["rows"] > 0
+
+
+def test_star_hint_shows_once_per_lake_and_only_on_a_terminal(tmp_path, monkeypatch, capsys):
+    from cnequity.cli._shared import star_hint_once
+    from cnequity.config import Config
+
+    cfg = Config(data_root=tmp_path)
+    monkeypatch.setattr("sys.stderr.isatty", lambda: False, raising=False)
+    star_hint_once(cfg)
+    assert "Star" not in capsys.readouterr().err
+
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True, raising=False)
+    star_hint_once(cfg)
+    assert "Star" in capsys.readouterr().err
+    star_hint_once(cfg)
+    assert "Star" not in capsys.readouterr().err
+
+
 def test_sample_preserves_a_different_existing_config_without_force(tmp_path):
     data_root = tmp_path / "sample-lake"
     config_out = tmp_path / "existing.toml"

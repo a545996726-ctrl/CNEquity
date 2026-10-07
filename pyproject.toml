@@ -120,6 +120,9 @@ Issues = "https://github.com/rootSunc/CNEquity/issues"
 
 [project.scripts]
 cne = "cnequity.cli.main:cli"
+# Same CLI under the package name, so `uvx cnequity mcp ...` works — the
+# command the MCP Registry builds from server.json.
+cnequity = "cnequity.cli.main:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]

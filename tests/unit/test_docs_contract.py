@@ -35,6 +35,27 @@ def test_citation_metadata_tracks_the_current_package_version():
     assert 'repository-code: "https://github.com/rootSunc/CNEquity"' in citation
 
 
+def test_mcp_registry_metadata_tracks_the_package():
+    """server.json is what the MCP Registry lists; it names a PyPI release, and
+    the registry only accepts it when that release's README carries the
+    mcp-name marker."""
+    import json
+
+    from cnequity import __version__
+
+    server = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+    package = server["packages"][0]
+    assert server["version"] == package["version"] == __version__
+    assert package["identifier"] == "cnequity"
+    assert len(server["description"]) <= 100
+    marker = f"mcp-name: {server['name']}"
+    assert marker in (ROOT / "README.pypi.md").read_text(encoding="utf-8")
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        scripts = tomllib.load(fh)["project"]["scripts"]
+    # runtimeHint uvx runs the script named after the package.
+    assert scripts["cnequity"] == scripts["cne"]
+
+
 def test_documented_counts_match_the_registries():
     """Counts in prose rot silently; nothing else reads them.
 
