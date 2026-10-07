@@ -2,8 +2,9 @@
 
 这里记录面向用户的主要功能、修复与兼容性变化。历史版本中的命令名反映当时的接口；当前用法以 [CLI 参考](docs/zh/reference/cli.md)为准。升级前阅读[升级与兼容性](docs/zh/getting-started/installation.md#升级与兼容性)。
 
-## [Unreleased]
+## [0.16.0] — 2026-10-08
 
+- **升级步骤：** `pip install -U cnequity` 后重启 `cne serve` 和已在运行的 `cne mcp`。数据集契约没有变化，不需要迁移已有数据，也不需要改配置。
 - `cne mcp --http` 用 Streamable HTTP 在 `127.0.0.1:8788/mcp` 上提供同样的六个只读工具，供只接远程网址的客户端（如 ChatGPT）配合 cloudflared、ngrok 等隧道使用。`--token` 设置后每个请求都必须带令牌（`Authorization: Bearer`、`/mcp/<令牌>` 路径或 `?token=`）；不设令牌时只接受本机直连，经隧道或代理的请求和其他站点的网页请求都返回 403。非回环地址必须配 `--token`。stdio 用法不变。
 - MCP 工具声明 `readOnlyHint`，ChatGPT 等客户端据此把它们当作只读操作。
 - 新增与 `cne` 等价的 `cnequity` 命令，`uvx cnequity mcp --config <配置>` 无需先安装即可启动 MCP 服务。仓库根目录新增 `server.json`，用于登记到官方 MCP Registry。
