@@ -192,11 +192,11 @@ THS 官方估值快照只能从启用后按日积累，不能用旧日期重放�
 | minute_bars_15m | trade_date | symbol, trade_date, bar_time, frequency | derived | ✓ | derived | 15m。**默认不计算**，`cne derive minute_bars_15m` 手动入湖；某只股票某天有 1m 用 1m，否则用 5m，`resampled_from` 标明来源；required=false |
 | minute_bars_30m | trade_date | symbol, trade_date, bar_time, frequency | derived | ✓ | derived | 30m。同上 |
 | minute_bars_60m | trade_date | symbol, trade_date, bar_time, frequency | derived | ✓ | derived | 60m。同上 |
-
-两个日内数据集共用一组质量检查：主键重复（通用 `pk_unique`）、时段外 bar、`trade_date` 与 `bar_time` 不一致、会话缺口，以及**与日频的成交量+成交额双向对账**。
 | trade_ticks | trade_date | symbol, trade_date, tick_seq | by_date | ✓ | tdx_protocol | 分笔。**可选**，默认关；`[trade_ticks]` 独立配置；**不是逐笔成交**（见下）；源端回溯至 **2024-01-02**；落盘量随 watchlist 与窗口增长；required=false |
 | adj_factors | trade_date | symbol, trade_date, adjust_type | derived | ✓ | sina | 仅 hfq；股票读 `f`、ETF/LOF 读 `s`；`cne derive adj_factors` |
 | delisting_events | —（单文件 merge） | symbol | derived | — | derived | 每只退市股的结尾形态；补到的 bars 来自 sina；`cne backfill daily_bars --profile delisted` 产出 |
+
+两个日内数据集共用一组质量检查：主键重复（通用 `pk_unique`）、时段外 bar、`trade_date` 与 `bar_time` 不一致、会话缺口，以及**与日频的成交量+成交额双向对账**。
 
 ## L2 公司事件
 

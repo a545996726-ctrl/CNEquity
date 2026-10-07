@@ -10,15 +10,21 @@ writing, which is what CI runs.
 
 Targets:
 
-* ``schema`` — the column tables in ``docs/datasets/schema.md`` (synced, not
+* ``schema`` — the column tables in ``docs/zh/datasets/schema.md`` (synced, not
   generated: the hand-written 说明 cells survive, see below);
 * ``config`` — ``configs/cnequity.example.toml`` mirrors the packaged template;
-* ``derivatives`` — the capability table in ``docs/datasets/sources.md``;
-* ``cli-options`` — ``docs/reference/cli-options.md`` from Click's registry;
-* ``cli-surface`` — ``docs/reference/cli-surface.md``, the reviewed side-effect
+* ``derivatives`` — the capability table in ``docs/zh/datasets/sources.md``;
+* ``cli-options`` — ``docs/zh/reference/cli-options.md`` from Click's registry;
+* ``cli-surface`` — ``docs/zh/reference/cli-surface.md``, the reviewed side-effect
   inventory; a new command fails until its row is written below;
 * ``pypi-readme`` — ``README.pypi.md`` is ``README.md`` with every relative link
   made absolute, since PyPI resolves none of them.
+
+The English site (``docs/en``) has its own copy of each generated page:
+``schema-en``, ``derivatives-en``, ``cli-options-en`` and ``cli-surface-en``. Text
+that comes from code in Chinese — Click help, the side-effect inventory — is
+translated through ``scripts/dev/i18n/*.en.yml``; a help text without an entry
+there fails the check instead of reaching the English page in Chinese.
 
 Schema page notes:
 
@@ -43,6 +49,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import click
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -50,7 +57,9 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from cnequity.adapters.futures_exchange.registry import capabilities  # noqa: E402
 from cnequity.cli.main import cli  # noqa: E402
 
-DOC_PATH = REPO_ROOT / "docs" / "datasets" / "schema.md"
+DOC_PATH = REPO_ROOT / "docs" / "zh" / "datasets" / "schema.md"
+DOC_PATH_EN = REPO_ROOT / "docs" / "en" / "datasets" / "schema.md"
+I18N = Path(__file__).resolve().parent / "i18n"
 
 # --- schema ------------------------------------------------------------------
 
@@ -68,15 +77,18 @@ _TYPE_NAMES = {
     "Datetime(time_unit='us', time_zone=None)": "timestamp（naive）",
 }
 
-_TABLE_HEADER = "| 列 | 类型 | 说明 |"
 _TABLE_DIVIDER = "|--------|------|-------|"
-# Datasets that are deliberately documented somewhere else.
-_SECTION_ANCHOR = "### Compact 去重"
+# Per language: the column-table header, and the heading new sections go before.
+_SCHEMA_LABELS = {
+    "zh": {"header": "| 列 | 类型 | 说明 |", "anchor": "### Compact 去重"},
+    "en": {"header": "| Column | Type | Description |", "anchor": "### Compact deduplication"},
+}
 
 
-def _type_name(dtype: object) -> str:
+def _type_name(dtype: object, lang: str = "zh") -> str:
     text = str(dtype)
-    return _TYPE_NAMES.get(text, text.lower())
+    name = _TYPE_NAMES.get(text, text.lower())
+    return name.replace("（naive）", " (naive)") if lang == "en" else name
 
 
 def _schemas() -> dict[str, dict[str, object]]:
@@ -96,10 +108,13 @@ def _heading_datasets(heading: str, datasets: list[str]) -> list[str]:
     ]
 
 
-def _split_table(lines: list[str], start: int) -> tuple[int, int, dict[str, str]]:
+def _split_table(
+    lines: list[str], start: int, header: str = _SCHEMA_LABELS["zh"]["header"]
+) -> tuple[int, int, dict[str, str]]:
     """Locate the first table after *start*; return its bounds and descriptions."""
+    first_cell = header.split("|")[1].strip()
     index = start
-    while index < len(lines) and not lines[index].startswith("| 列 "):
+    while index < len(lines) and not lines[index].startswith(f"| {first_cell} "):
         if lines[index].startswith("#### "):
             return -1, -1, {}
         index += 1
@@ -124,14 +139,17 @@ def _split_table(lines: list[str], start: int) -> tuple[int, int, dict[str, str]
     return table_start, index, descriptions
 
 
-def _render_table(schema: dict[str, object], descriptions: dict[str, str]) -> list[str]:
-    rows = [_TABLE_HEADER, _TABLE_DIVIDER]
+def _render_table(
+    schema: dict[str, object], descriptions: dict[str, str], lang: str = "zh"
+) -> list[str]:
+    rows = [_SCHEMA_LABELS[lang]["header"], _TABLE_DIVIDER]
     for column, dtype in schema.items():
-        rows.append(f"| {column} | {_type_name(dtype)} | {descriptions.get(column, '')} |")
+        rows.append(f"| {column} | {_type_name(dtype, lang)} | {descriptions.get(column, '')} |")
     return rows
 
 
-def sync(text: str) -> tuple[str, list[str]]:
+def sync(text: str, lang: str = "zh") -> tuple[str, list[str]]:
+    labels = _SCHEMA_LABELS[lang]
     schemas = _schemas()
     datasets = list(schemas)
     lines = text.split("\n")
@@ -149,12 +167,12 @@ def sync(text: str) -> tuple[str, list[str]]:
             index += 1
             continue
         documented.update(names)
-        table_start, table_end, descriptions = _split_table(lines, index + 1)
+        table_start, table_end, descriptions = _split_table(lines, index + 1, labels["header"])
         if table_start < 0:
             notes.append(f"{heading}: no column table found, left alone")
             index += 1
             continue
-        rendered = _render_table(schemas[names[0]], descriptions)
+        rendered = _render_table(schemas[names[0]], descriptions, lang)
         if lines[table_start:table_end] != rendered:
             notes.append(f"{heading}: column table synced")
         lines[table_start:table_end] = rendered
@@ -163,14 +181,14 @@ def sync(text: str) -> tuple[str, list[str]]:
     missing = [name for name in datasets if name not in documented]
     if missing:
         anchor = next(
-            (i for i, line in enumerate(lines) if line.startswith(_SECTION_ANCHOR)),
+            (i for i, line in enumerate(lines) if line.startswith(labels["anchor"])),
             len(lines),
         )
         block: list[str] = []
         for name in missing:
             block.append(f"#### {name}")
             block.append("")
-            block.extend(_render_table(schemas[name], {}))
+            block.extend(_render_table(schemas[name], {}, lang))
             block.append("")
             notes.append(f"{name}: section added")
         lines[anchor:anchor] = block
@@ -194,44 +212,98 @@ def _cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _default(param: click.Parameter, ctx: click.Context) -> str:
+_OPTION_WORDS = {
+    "zh": {
+        "title": "# CLI 参数与默认值",
+        "intro": "由 `scripts/dev/sync_docs.py` 从 Click 注册表生成。命令用途、副作用与操作场景分别见 [CLI 参考](cli.md) 和 [副作用清单](cli-surface.md)。",
+        "header": "| 参数 | 默认值 | 说明 |",
+        "runtime": "运行时计算",
+        "empty_list": "空列表",
+        "positional": "位置参数",
+        "required": "必填",
+        "required_prefix": "必填；",
+        "no_params": "无参数",
+    },
+    "en": {
+        "title": "# CLI options and defaults",
+        "intro": "Generated by `scripts/dev/sync_docs.py` from the Click registry. For what each command is for, its side effects and when to use it, see the [CLI reference](cli.md) and the [side-effect inventory](cli-surface.md). `cne <command> --help` prints the same options in Chinese.",
+        "header": "| Option | Default | Description |",
+        "runtime": "computed at runtime",
+        "empty_list": "empty list",
+        "positional": "positional argument",
+        "required": "Required",
+        "required_prefix": "Required; ",
+        "no_params": "No options",
+    },
+}
+
+
+def _default(param: click.Parameter, ctx: click.Context, lang: str = "zh") -> str:
+    words = _OPTION_WORDS[lang]
     value = param.get_default(ctx, call=False)
     if value.__class__.__name__ == "Sentinel":
         return "—"
     if callable(value):
-        return "运行时计算"
+        return words["runtime"]
     if value is None:
         return "—"
     if isinstance(value, (tuple, list)):
-        return ", ".join(map(str, value)) or "空列表"
+        return ", ".join(map(str, value)) or words["empty_list"]
     return str(value)
 
 
-def render_cli_options() -> str:
-    lines = [
-        "# CLI 参数与默认值",
-        "",
-        "由 `scripts/dev/sync_docs.py` 从 Click 注册表生成。命令用途、副作用与操作场景分别见 [CLI 参考](cli.md) 和 [副作用清单](cli-surface.md)。",
-        "",
-    ]
+def _load_catalog(name: str) -> dict:
+    return yaml.safe_load((I18N / name).read_text(encoding="utf-8")) or {}
+
+
+def _help_texts() -> list[str]:
+    seen: list[str] = []
+    for _, command in _option_leaves(cli):
+        for param in command.params:
+            if isinstance(param, click.Option) and param.help and param.help not in seen:
+                seen.append(param.help)
+    return seen
+
+
+def _help_translations() -> dict[str, str]:
+    """English for every option help text; refuses gaps and leftovers."""
+    catalog = _load_catalog("cli_help.en.yml")
+    texts = _help_texts()
+    missing = [text for text in texts if not catalog.get(text)]
+    unused = sorted(set(catalog) - set(texts))
+    if missing or unused:
+        raise SystemExit(
+            "scripts/dev/i18n/cli_help.en.yml is out of date:\n"
+            + "".join(f"  missing: {text}\n" for text in missing)
+            + "".join(f"  unused:  {text}\n" for text in unused)
+        )
+    return catalog
+
+
+def render_cli_options(lang: str = "zh") -> str:
+    words = _OPTION_WORDS[lang]
+    translate = _help_translations() if lang == "en" else {}
+    lines = [words["title"], "", words["intro"], ""]
     for path, command in _option_leaves(cli):
         ctx = click.Context(command)
-        lines.extend([f"## `cne {path}`", "", "| 参数 | 默认值 | 说明 |", "|---|---|---|"])
+        lines.extend([f"## `cne {path}`", "", words["header"], "|---|---|---|"])
         for param in command.params:
             if isinstance(param, click.Option):
                 label = ", ".join([*param.opts, *param.secondary_opts])
-                description = param.help or ""
+                description = translate.get(param.help, param.help) if param.help else ""
             else:
                 label = param.name or ""
-                description = "位置参数"
+                description = words["positional"]
             if param.required:
-                description = f"必填；{description}" if description else "必填"
+                description = (
+                    f"{words['required_prefix']}{description}" if description else words["required"]
+                )
             description = description or "—"
             lines.append(
-                f"| `{_cell(label)}` | `{_cell(_default(param, ctx))}` | {_cell(description)} |"
+                f"| `{_cell(label)}` | `{_cell(_default(param, ctx, lang))}` | {_cell(description)} |"
             )
         if not command.params:
-            lines.append("| — | — | 无参数 |")
+            lines.append(f"| — | — | {words['no_params']} |")
         lines.append("")
     return "\n".join(lines)
 
@@ -330,7 +402,27 @@ def _surface_leaves(group: click.Group, prefix: str = "") -> list[str]:
     return result
 
 
-def render_cli_surface() -> str:
+_SURFACE_HEAD = {
+    "zh": [
+        "# CLI 命令副作用清单",
+        "",
+        "由 `scripts/dev/sync_docs.py` 从 Click 命令注册表核对。‘执行时’指运行命令主体；`--help` 不执行。详细源选择与限制见[取数策略](../operations/fetch-policy.md)。",
+        "",
+        "| 命令 | 第三方取数 | 本地效果 |",
+        "|---|---|---|",
+    ],
+    "en": [
+        "# CLI side-effect inventory",
+        "",
+        "Checked against the Click command registry by `scripts/dev/sync_docs.py`. \u201cWhen run\u201d means when the command body executes; `--help` executes nothing. For source selection and limits, see [Fetching and source protection](../operations/fetch-policy.md).",
+        "",
+        "| Command | Third-party fetching | Local effects |",
+        "|---|---|---|",
+    ],
+}
+
+
+def render_cli_surface(lang: str = "zh") -> str:
     actual = set(_surface_leaves(cli))
     declared = set(EFFECTS)
     if actual != declared:
@@ -338,17 +430,18 @@ def render_cli_surface() -> str:
             f"CLI side-effect inventory drift: missing={sorted(actual - declared)}, "
             f"removed={sorted(declared - actual)}"
         )
-    rows = [
-        "# CLI 命令副作用清单",
-        "",
-        "由 `scripts/dev/sync_docs.py` 从 Click 命令注册表核对。‘执行时’指运行命令主体；`--help` 不执行。详细源选择与限制见[取数策略](../operations/fetch-policy.md)。",
-        "",
-        "| 命令 | 第三方取数 | 本地效果 |",
-        "|---|---|---|",
-    ]
+    effects = EFFECTS
+    if lang == "en":
+        effects = {key: tuple(value) for key, value in _load_catalog("cli_surface.en.yml").items()}
+        if set(effects) != declared:
+            raise SystemExit(
+                "scripts/dev/i18n/cli_surface.en.yml does not cover the same commands as EFFECTS: "
+                f"missing={sorted(declared - set(effects))}, extra={sorted(set(effects) - declared)}"
+            )
+    rows = list(_SURFACE_HEAD[lang])
     for path in sorted(actual):
-        network, effects = EFFECTS[path]
-        rows.append(f"| `cne {path}` | {network} | {effects} |")
+        network, local = effects[path]
+        rows.append(f"| `cne {path}` | {network} | {local} |")
     return "\n".join([*rows, ""])
 
 
@@ -358,27 +451,35 @@ DERIVATIVE_START = "<!-- derivative-capabilities:start -->"
 DERIVATIVE_END = "<!-- derivative-capabilities:end -->"
 
 
-def render_derivative_table() -> str:
-    lines = [
-        DERIVATIVE_START,
-        "",
-        "| 发布者 | 路由 | 期货起点 | 期权起点 | 生命周期参考 | 历史参考 | 状态 |",
-        "|---|---|---|---|---|---|---|",
-    ]
+_DERIVATIVE_WORDS = {
+    "zh": {
+        "header": "| 发布者 | 路由 | 期货起点 | 期权起点 | 生命周期参考 | 历史参考 | 状态 |",
+        "unsupported": "不支持",
+        "yes": "有",
+        "no": "无",
+        "note": "此表由 `scripts/dev/sync_docs.py` 从读取器注册表生成。起点是适配器路由边界，不证明源端或本湖连续完整；`experimental` 尚未通过真实载荷验收。INE 2018 年期货使用能源中心独立日文件，2019 年起随 SHF 路由合并发布；其独立起点不能套用 SHF 日期。",
+    },
+    "en": {
+        "header": "| Publisher | Route | Futures since | Options since | Lifecycle reference | Historical reference | Status |",
+        "unsupported": "not supported",
+        "yes": "yes",
+        "no": "no",
+        "note": "Generated by `scripts/dev/sync_docs.py` from the reader registry. Start dates are adapter route boundaries; they do not prove that the source or this lake is continuous and complete. `experimental` routes have not yet passed acceptance on real payloads. INE futures for 2018 come from the energy center's own daily files; from 2019 they are published together with the SHF route, so the SHF dates do not apply to INE's separate start.",
+    },
+}
+
+
+def render_derivative_table(lang: str = "zh") -> str:
+    words = _DERIVATIVE_WORDS[lang]
+    lines = [DERIVATIVE_START, "", words["header"], "|---|---|---|---|---|---|---|"]
     for row in capabilities():
         lines.append(
             f"| {row['exchange']} | {row['route']} | {row['futures_since']} | "
-            f"{row['options_since'] or '不支持'} | {'有' if row['reference'] else '无'} | "
-            f"{'有' if row['reference_history'] else '无'} | {row['status']} |"
+            f"{row['options_since'] or words['unsupported']} | "
+            f"{words['yes'] if row['reference'] else words['no']} | "
+            f"{words['yes'] if row['reference_history'] else words['no']} | {row['status']} |"
         )
-    lines.extend(
-        [
-            "",
-            "此表由 `scripts/dev/sync_docs.py` 从读取器注册表生成。起点是适配器路由边界，不证明源端或本湖连续完整；`experimental` 尚未通过真实载荷验收。INE 2018 年期货使用能源中心独立日文件，2019 年起随 SHF 路由合并发布；其独立起点不能套用 SHF 日期。",
-            "",
-            DERIVATIVE_END,
-        ]
-    )
+    lines.extend(["", words["note"], "", DERIVATIVE_END])
     return "\n".join(lines)
 
 
@@ -394,11 +495,12 @@ def _absolute(target: str) -> str:
     """Where a README-relative link points once the page is rendered on PyPI."""
     path, _, anchor = target.partition("#")
     suffix = f"#{anchor}" if anchor else ""
-    if path.startswith("docs/") and path.endswith(".md"):
-        # mkdocs directory URLs: docs/a/b.md -> a/b/, docs/a/README.md -> a/
-        page = path.removeprefix("docs/").removesuffix(".md")
-        page = page.removesuffix("README").removesuffix("index")
-        return SITE_URL + (page.rstrip("/") + "/" if page else "") + suffix
+    for tree, site in (("docs/zh/", SITE_URL), ("docs/en/", SITE_URL + "en/")):
+        if path.startswith(tree) and path.endswith(".md"):
+            # mkdocs directory URLs: docs/zh/a/b.md -> a/b/, docs/zh/a/README.md -> a/
+            page = path.removeprefix(tree).removesuffix(".md")
+            page = page.removesuffix("README").removesuffix("index")
+            return site + (page.rstrip("/") + "/" if page else "") + suffix
     if path.startswith("docs/assets/"):
         return RAW_URL + path
     return f"{REPO_URL}/blob/main/{path}{suffix}"
@@ -420,27 +522,32 @@ def _schema() -> tuple[Path, str, list[str]]:
     return DOC_PATH, updated, notes
 
 
+def _schema_en() -> tuple[Path, str, list[str]]:
+    updated, notes = sync(DOC_PATH_EN.read_text(encoding="utf-8"), lang="en")
+    return DOC_PATH_EN, updated, notes
+
+
 def _config() -> tuple[Path, str, list[str]]:
     source = REPO_ROOT / "src/cnequity/config/templates/cnequity.example.toml"
     return REPO_ROOT / "configs/cnequity.example.toml", source.read_text(encoding="utf-8"), []
 
 
-def _derivatives() -> tuple[Path, str, list[str]]:
-    page = REPO_ROOT / "docs/datasets/sources.md"
+def _derivatives(lang: str = "zh") -> tuple[Path, str, list[str]]:
+    page = REPO_ROOT / f"docs/{lang}/datasets/sources.md"
     text = page.read_text(encoding="utf-8")
     if DERIVATIVE_START not in text or DERIVATIVE_END not in text:
-        raise SystemExit("source documentation is missing capability markers")
+        raise SystemExit(f"{page.relative_to(REPO_ROOT)} is missing capability markers")
     before, rest = text.split(DERIVATIVE_START, 1)
     _, after = rest.split(DERIVATIVE_END, 1)
-    return page, before + render_derivative_table() + after, []
+    return page, before + render_derivative_table(lang) + after, []
 
 
-def _cli_options() -> tuple[Path, str, list[str]]:
-    return REPO_ROOT / "docs/reference/cli-options.md", render_cli_options(), []
+def _cli_options(lang: str = "zh") -> tuple[Path, str, list[str]]:
+    return REPO_ROOT / f"docs/{lang}/reference/cli-options.md", render_cli_options(lang), []
 
 
-def _cli_surface() -> tuple[Path, str, list[str]]:
-    return REPO_ROOT / "docs/reference/cli-surface.md", render_cli_surface(), []
+def _cli_surface(lang: str = "zh") -> tuple[Path, str, list[str]]:
+    return REPO_ROOT / f"docs/{lang}/reference/cli-surface.md", render_cli_surface(lang), []
 
 
 def _pypi_readme() -> tuple[Path, str, list[str]]:
@@ -449,10 +556,14 @@ def _pypi_readme() -> tuple[Path, str, list[str]]:
 
 TARGETS: dict[str, Callable[[], tuple[Path, str, list[str]]]] = {
     "schema": _schema,
+    "schema-en": _schema_en,
     "config": _config,
     "derivatives": _derivatives,
+    "derivatives-en": lambda: _derivatives("en"),
     "cli-options": _cli_options,
+    "cli-options-en": lambda: _cli_options("en"),
     "cli-surface": _cli_surface,
+    "cli-surface-en": lambda: _cli_surface("en"),
     "pypi-readme": _pypi_readme,
 }
 

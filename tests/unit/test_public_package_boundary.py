@@ -26,7 +26,7 @@ def test_release_members_allow_public_contracts_and_tests():
         *checker.REQUIRED_FILES,
         "contracts/v0.12.0.json",
         "tests/fixtures/example.json",
-        "docs/getting-started/quickstart.md",
+        "docs/zh/getting-started/quickstart.md",
     ]
     assert checker.check_members(members) == []
 

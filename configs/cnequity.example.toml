@@ -108,7 +108,7 @@ timeout_sec = 30
 # so a banned IP can rest. The affected datasets fail fast as under the ban;
 # datacenter and the other EastMoney hosts are untouched.
 push2_paused = false
-# push2 IP protection (see docs/operations/troubleshooting.md). After the first
+# push2 IP protection (see docs/zh/operations/troubleshooting.md). After the first
 # refusal (403/429/5xx, a dropped connection, a timeout) refuse every push2
 # host until local midnight — no backup-host failover.
 push2_breaker = true
@@ -479,7 +479,7 @@ ingest = "all_a"
 # change all_a stock queries or admit other ETF/LOF/fund codes.
 ingest_eligible_etfs = false
 
-# Wave DAG for daily job (see docs/datasets/catalog.md)
+# Wave DAG for daily job (see docs/zh/datasets/catalog.md)
 [[job.daily.waves]]
 name = "reference"
 parallel = true
@@ -526,7 +526,7 @@ run_at = "17:30"
 # Only retries the snapshot datasets the day's run missed.
 run_at = "21:00"
 
-# Per-group fetch frequency (docs/getting-started/configuration.md, 取数频率):
+# Per-group fetch frequency (docs/zh/getting-started/configuration.md, 取数频率):
 #   cadence = "daily"   (default) or "weekly"
 #   weekday = 5         weekly: run on the last session of the week up to this ISO weekday
 # A weekly group rests only its history datasets (they catch up by date on the

@@ -3,12 +3,15 @@ site_description: 可日更、可溯源的 A 股研究数据湖
 site_url: https://rootsunc.github.io/CNEquity/
 repo_name: rootSunc/CNEquity
 repo_url: https://github.com/rootSunc/CNEquity
-edit_uri: edit/main/docs/
-# Keep the remaining dataset redirect and asset inventory out of site search.
-# docs/index.md is the single documentation entry point.
+edit_uri: edit/main/docs/zh/
+# Chinese and English are two independent sites. This one is the Chinese site
+# at the root; mkdocs.en.yml builds the English site into site/en/.
+docs_dir: docs/zh
+site_dir: site
+# Keep the remaining dataset redirect out of site search.
+# index.md is the single documentation entry point.
 exclude_docs: |
   /datasets/README.md
-  /assets/README.md
 
 theme:
   name: material
@@ -43,6 +46,8 @@ theme:
 plugins:
   - search
 
+# Shared by both language sites: files under the theme custom_dir
+# (docs/overrides) are copied into each site as static files.
 extra_css:
   - stylesheets/extra.css
 
@@ -137,5 +142,13 @@ extra:
       link: https://github.com/rootSunc/CNEquity
       name: GitHub
   generator: false
+  # Language switcher in the header; each entry is the other site's root.
+  alternate:
+    - name: 中文
+      link: /CNEquity/
+      lang: zh
+    - name: English
+      link: /CNEquity/en/
+      lang: en
 
 copyright: Copyright © CNEquity Contributors

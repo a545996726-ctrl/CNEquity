@@ -1,5 +1,5 @@
 // Current-user OS schedules, with a separate preview before registration.
-import { dsWithCode, tr } from "./i18n.js";
+import { dsWithCode, pick, tr } from "./i18n.js";
 export async function renderSchedule(ctx, home, alive) {
   const { api, esc } = ctx;
   const host = document.getElementById("ops-schedule");
@@ -24,34 +24,40 @@ export async function renderSchedule(ctx, home, alive) {
   const last = value.last_tick;
   const links = (last?.jobs || []).map((job) => `<a href="#/ops/jobs/${encodeURIComponent(job.job_id)}">${esc(job.job)} · ${esc(job.session)}</a>`).join(" · ");
   const status = native.error ? tr("系统状态未知", "System status unknown") : value.enabled ? tr("已启用", "Enabled") : tr("已暂停 / 未启用", "Paused / not enabled");
-  const tickLabels = { idle: "已检查，当前无到期任务", started: "已启动任务", waiting: "等待占用结束", error: "调度出错", busy: "另一检查正在运行" };
+  const tickLabels = {
+    idle: tr("已检查，当前无到期任务", "Checked; nothing due"),
+    started: tr("已启动任务", "Started jobs"),
+    waiting: tr("等待占用结束", "Waiting for the lake to free up"),
+    error: tr("调度出错", "Scheduler error"),
+    busy: tr("另一检查正在运行", "Another check is running"),
+  };
   host.innerHTML = `<div class="panel-header"><h2>${tr("定时任务", "Schedule")}</h2><span class="status-pill">${esc(status)}</span></div>
-    <p class="panel-note">${esc(value.backend)} · ${esc(value.note)}</p>
+    <p class="panel-note">${esc(value.backend)} · ${esc(pick(value, "note"))}</p>
     ${native.error ? `<p class="panel-note err">${esc(native.error)}</p>` : ""}
     ${value.warning ? `<p class="panel-note err">${esc(value.warning)}</p>` : ""}
-    ${value.timer_health === "stale" ? `<p class="panel-note err">超过 20 分钟未收到系统触发，请检查登录状态、休眠或 cron 服务，再刷新状态。</p>` : ""}
-    ${value.timer_health === "not_seen" ? `<p class="panel-note">已注册，等待首次系统检查（最多约 1 分钟）。</p>` : ""}
-    ${native.installed && (!native.active || !native.matches) ? `<p class="panel-note err">系统任务未加载或定义与当前安装不符，请核对后重新设置。</p>` : ""}
-    ${last ? `<p class="panel-note">最近检查：${esc(last.at)} · ${esc(tickLabels[last.status] || last.status)} ${esc(last.message || "")} ${links}</p>` : `<p class="panel-note">尚无调度检查记录。</p>`}
+    ${value.timer_health === "stale" ? `<p class="panel-note err">${tr("超过 20 分钟未收到系统触发，请检查登录状态、休眠或 cron 服务，再刷新状态。", "No system trigger for over 20 minutes. Check the login session, sleep settings, or the cron service, then refresh the status.")}</p>` : ""}
+    ${value.timer_health === "not_seen" ? `<p class="panel-note">${tr("已注册，等待首次系统检查（最多约 1 分钟）。", "Registered; waiting for the first system check (up to about 1 minute).")}</p>` : ""}
+    ${native.installed && (!native.active || !native.matches) ? `<p class="panel-note err">${tr("系统任务未加载或定义与当前安装不符，请核对后重新设置。", "The system job is not loaded or does not match this installation. Check it and set the schedule again.")}</p>` : ""}
+    ${last ? `<p class="panel-note">${tr(`最近检查：${esc(last.at)}`, `Last check: ${esc(last.at)}`)} · ${esc(tickLabels[last.status] || last.status)} ${esc(last.message || "")} ${links}</p>` : `<p class="panel-note">${tr("尚无调度检查记录。", "No scheduler checks recorded yet.")}</p>`}
     <form id="schedule-fields" class="ops-fields">
-      <label class="ops-check"><input id="schedule-daily" type="checkbox" ${value.daily ? "checked" : ""} ${writable ? "" : "disabled"}> 自动日更（未选研究包时跑全部日更组与事件流）</label>
+      <label class="ops-check"><input id="schedule-daily" type="checkbox" ${value.daily ? "checked" : ""} ${writable ? "" : "disabled"}> ${tr("自动日更（未选研究包时跑全部日更组与事件流）", "Automatic daily update (runs every daily update group and event stream when no research pack is selected)")}</label>
       <fieldset class="ops-fields">
-        <legend>研究包（都不选则保持全部日更）</legend>
-        <label class="ops-check"><input id="schedule-pack-market" type="checkbox" ${(value.daily_packs || []).includes("market") ? "checked" : ""} ${writable ? "" : "disabled"}> 行情</label>
-        <label class="ops-check"><input id="schedule-pack-fundamentals" type="checkbox" ${(value.daily_packs || []).includes("fundamentals") ? "checked" : ""} ${writable ? "" : "disabled"}> 基本面</label>
-        <label class="ops-check"><input id="schedule-pack-universe" type="checkbox" ${(value.daily_packs || []).includes("universe") ? "checked" : ""} ${writable ? "" : "disabled"}> 股票池（无额外日更组）</label>
+        <legend>${tr("研究包（都不选则保持全部日更）", "Research packs (select none to keep the full daily update)")}</legend>
+        <label class="ops-check"><input id="schedule-pack-market" type="checkbox" ${(value.daily_packs || []).includes("market") ? "checked" : ""} ${writable ? "" : "disabled"}> ${tr("行情", "Market data")}</label>
+        <label class="ops-check"><input id="schedule-pack-fundamentals" type="checkbox" ${(value.daily_packs || []).includes("fundamentals") ? "checked" : ""} ${writable ? "" : "disabled"}> ${tr("基本面", "Fundamentals")}</label>
+        <label class="ops-check"><input id="schedule-pack-universe" type="checkbox" ${(value.daily_packs || []).includes("universe") ? "checked" : ""} ${writable ? "" : "disabled"}> ${tr("股票池（无额外日更组）", "Universe (no extra daily update groups)")}</label>
       </fieldset>
-      <label>日更时间（北京时间）<input id="schedule-daily-at" type="time" required value="${esc(value.daily_run_at)}" ${writable ? "" : "disabled"}></label>
-      <label class="ops-check"><input id="schedule-stale" type="checkbox" ${value.stale ? "checked" : ""} ${writable ? "" : "disabled"}> 收尾补抓（落后的快照）</label>
-      <label>补抓时间（北京时间）<input id="schedule-stale-at" type="time" required value="${esc(value.stale_run_at)}" ${writable ? "" : "disabled"}></label>
-      <label class="ops-check"><input id="schedule-backup" type="checkbox" ${value.backup ? "checked" : ""} ${disabled}> 每日数据备份（自然日）</label>
-      <label>备份时间（北京时间）<input id="schedule-backup-at" type="time" required value="${esc(value.backup_run_at || "23:00")}" ${disabled}></label>
-      <label>备份数据集<select id="schedule-backup-datasets" multiple size="4" ${disabled}>${datasets}</select><small class="muted">只复制所选已发布数据及对应元数据，不包含配置、凭据或完整运行数据库。</small></label>
-      <label>备份目录（绝对路径）<input id="schedule-backup-root" value="${esc(value.backup_root)}" ${disabled}><small class="muted">建议选择外部磁盘。备份占用空间，不自动删除旧备份。</small></label>
-      <label class="ops-check"><input id="schedule-events" type="checkbox" ${value.events ? "checked" : ""} ${disabled}> 独立事件流（含周末和节假日）</label>
-      <label>事件组<select id="schedule-events-group" ${disabled}><option value="">请选择</option>${eventGroups}</select></label>
-      <label>事件流间隔（分钟）<input id="schedule-events-interval" type="number" min="1" max="1440" required value="${esc(value.events_interval_minutes || 60)}" ${disabled}><small class="muted">按上次尝试开始时间计算间隔，任务占用时等待下一次检查。</small></label>
-      <div class="action-row"><button class="button button-primary" type="submit" ${writable ? "" : "disabled"}>预览定时设置</button><button class="button button-ghost" id="schedule-refresh" type="button">刷新状态</button></div>
+      <label>${tr("日更时间（北京时间）", "Daily update time (Beijing time)")}<input id="schedule-daily-at" type="time" required value="${esc(value.daily_run_at)}" ${writable ? "" : "disabled"}></label>
+      <label class="ops-check"><input id="schedule-stale" type="checkbox" ${value.stale ? "checked" : ""} ${writable ? "" : "disabled"}> ${tr("收尾补抓（落后的快照）", "Closing catch-up (lagging snapshots)")}</label>
+      <label>${tr("补抓时间（北京时间）", "Catch-up time (Beijing time)")}<input id="schedule-stale-at" type="time" required value="${esc(value.stale_run_at)}" ${writable ? "" : "disabled"}></label>
+      <label class="ops-check"><input id="schedule-backup" type="checkbox" ${value.backup ? "checked" : ""} ${disabled}> ${tr("每日数据备份（自然日）", "Daily data backup (calendar days)")}</label>
+      <label>${tr("备份时间（北京时间）", "Backup time (Beijing time)")}<input id="schedule-backup-at" type="time" required value="${esc(value.backup_run_at || "23:00")}" ${disabled}></label>
+      <label>${tr("备份数据集", "Backup datasets")}<select id="schedule-backup-datasets" multiple size="4" ${disabled}>${datasets}</select><small class="muted">${tr("只复制所选已发布数据及对应元数据，不包含配置、凭据或完整运行数据库。", "Copies only the selected published data and its metadata; excludes config, credentials, and the full run database.")}</small></label>
+      <label>${tr("备份目录（绝对路径）", "Backup directory (absolute path)")}<input id="schedule-backup-root" value="${esc(value.backup_root)}" ${disabled}><small class="muted">${tr("建议选择外部磁盘。备份占用空间，不自动删除旧备份。", "An external disk is recommended. Backups take space; old backups are not deleted automatically.")}</small></label>
+      <label class="ops-check"><input id="schedule-events" type="checkbox" ${value.events ? "checked" : ""} ${disabled}> ${tr("独立事件流（含周末和节假日）", "Standalone event stream (includes weekends and holidays)")}</label>
+      <label>${tr("事件组", "Event group")}<select id="schedule-events-group" ${disabled}><option value="">${tr("请选择", "Select…")}</option>${eventGroups}</select></label>
+      <label>${tr("事件流间隔（分钟）", "Event stream interval (minutes)")}<input id="schedule-events-interval" type="number" min="1" max="1440" required value="${esc(value.events_interval_minutes || 60)}" ${disabled}><small class="muted">${tr("按上次尝试开始时间计算间隔，任务占用时等待下一次检查。", "The interval counts from the last attempt's start; if the lake is busy, it waits for the next check.")}</small></label>
+      <div class="action-row"><button class="button button-primary" type="submit" ${writable ? "" : "disabled"}>${tr("预览定时设置", "Preview schedule")}</button><button class="button button-ghost" id="schedule-refresh" type="button">${tr("刷新状态", "Refresh status")}</button></div>
     </form><div id="schedule-preview"></div>`;
   const form = document.getElementById("schedule-fields");
   const target = document.getElementById("schedule-preview");
@@ -64,7 +70,7 @@ export async function renderSchedule(ctx, home, alive) {
   form.onsubmit = async (event) => {
     event.preventDefault();
     const current = ++previewGeneration;
-    target.innerHTML = `<p class="panel-note">正在预览…</p>`;
+    target.innerHTML = `<p class="panel-note">${tr("正在预览…", "Previewing…")}</p>`;
     const settings = {
       daily: document.getElementById("schedule-daily").checked,
       stale: document.getElementById("schedule-stale").checked,
@@ -85,13 +91,13 @@ export async function renderSchedule(ctx, home, alive) {
         body: JSON.stringify(settings),
       });
       if (!alive() || current !== previewGeneration) return;
-      target.innerHTML = `<p class="panel-note">${esc(preview.action)} · ${esc(preview.backend)}（时间均为北京时间）</p>
-        <ul class="ops-list"><li>日更：${preview.daily ? esc(preview.daily_run_at) : "关闭"}${preview.daily_packs?.length ? ` · 研究包 ${esc(preview.daily_packs.join("、"))}` : ""}；补抓：${preview.stale ? esc(preview.stale_run_at) : "关闭"}</li>
+      target.innerHTML = `<p class="panel-note">${esc(pick(preview, "action"))} · ${esc(preview.backend)}${tr("（时间均为北京时间）", " (all times are Beijing time)")}</p>
+        <ul class="ops-list"><li>${tr("日更：", "Daily update: ")}${preview.daily ? esc(preview.daily_run_at) : tr("关闭", "off")}${preview.daily_packs?.length ? ` · ${tr(`研究包 ${esc(preview.daily_packs.join("、"))}`, `research packs ${esc(preview.daily_packs.join(", "))}`)}` : ""}${tr("；补抓：", "; catch-up: ")}${preview.stale ? esc(preview.stale_run_at) : tr("关闭", "off")}</li>
         <li>${tr("每日备份", "Daily backup")}: ${preview.backup ? `${esc(preview.backup_run_at)} · ${esc((preview.backup_datasets || []).map(dsWithCode).join(", "))} → ${esc(preview.backup_root)}` : tr("关闭", "off")}</li>
-        <li>独立事件流：${preview.events ? `${esc(preview.events_group)} · 每 ${esc(preview.events_interval_minutes)} 分钟` : "关闭"}</li></ul>
-        <details><summary>查看系统任务定义</summary><pre class="ops-log">${esc(preview.artifact || "移除本页面创建的定时触发。")}</pre></details>
-        <label class="ops-check"><input id="schedule-ack" type="checkbox"> ${esc(preview.confirmation)}</label>
-        <div class="action-row"><button class="button button-primary" id="schedule-apply" type="button" disabled>确认${esc(preview.action)}</button></div>
+        <li>${tr("独立事件流：", "Standalone event stream: ")}${preview.events ? `${esc(preview.events_group)} · ${tr(`每 ${esc(preview.events_interval_minutes)} 分钟`, `every ${esc(preview.events_interval_minutes)} min`)}` : tr("关闭", "off")}</li></ul>
+        <details><summary>${tr("查看系统任务定义", "View system job definition")}</summary><pre class="ops-log">${esc(preview.artifact || tr("移除本页面创建的定时触发。", "Removes the schedule triggers this page created."))}</pre></details>
+        <label class="ops-check"><input id="schedule-ack" type="checkbox"> ${esc(pick(preview, "confirmation"))}</label>
+        <div class="action-row"><button class="button button-primary" id="schedule-apply" type="button" disabled>${tr(`确认${esc(preview.action)}`, esc(pick(preview, "action")))}</button></div>
         <p class="panel-note" id="schedule-note"></p>`;
       const button = document.getElementById("schedule-apply");
       document.getElementById("schedule-ack").onchange = (event) => { button.disabled = !event.target.checked; };
@@ -105,7 +111,7 @@ export async function renderSchedule(ctx, home, alive) {
           });
           if (alive()) await renderSchedule(ctx, home, pageAlive);
         } catch (err) {
-          if (alive()) document.getElementById("schedule-note").textContent = `${err.message} 请刷新状态并重新预览。`;
+          if (alive()) document.getElementById("schedule-note").textContent = tr(`${err.message} 请刷新状态并重新预览。`, `${err.message} Refresh the status and preview again.`);
         }
       };
     } catch (err) {

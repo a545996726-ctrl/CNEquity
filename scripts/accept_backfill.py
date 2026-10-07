@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-init / post-backfill acceptance checks (see docs/operations/runbook.md)."""
+"""Post-init / post-backfill acceptance checks (see docs/zh/operations/runbook.md)."""
 
 from __future__ import annotations
 
@@ -212,7 +212,7 @@ def cmd_check(cfg, compare_path: Path | None, start: str, end: str, symbol: str)
             errors.append(
                 'load(..., adjust="hfq"): empty — add "hfq" to [adj_factors].adjust_types and re-run derive'
             )
-            print("  empty (derive may only have qfq; see docs/operations/runbook.md)")
+            print("  empty (derive may only have qfq; see docs/zh/operations/runbook.md)")
         elif (
             "adj_close" in hfq.columns
             and "close" in hfq.columns

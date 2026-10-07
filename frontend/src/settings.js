@@ -1,5 +1,5 @@
 // Lake switches. A preview writes nothing; apply updates the config file only.
-import { tr } from "./i18n.js";
+import { pick, tr } from "./i18n.js";
 export async function renderSettings(ctx, home, alive, flash = "") {
   const { api, esc } = ctx;
   const host = document.getElementById("ops-settings");
@@ -21,12 +21,12 @@ export async function renderSettings(ctx, home, alive, flash = "") {
   const sections = (value.sections || [])
     .map((section) => {
       const fields = (section.settings || []).map((spec) => field(spec, disabled, esc)).join("");
-      return `<h3>${esc(section.title)}</h3>${fields}`;
+      return `<h3>${esc(pick(section, "title"))}</h3>${fields}`;
     })
     .join("");
   host.innerHTML = `<div class="panel-header"><h2>${tr("取数设置", "Fetch settings")}</h2></div>
-    <p class="panel-note">${esc(value.note || "")}</p>
-    ${value.push2_env_note ? `<p class="panel-note">${esc(value.push2_env_note)}</p>` : ""}
+    <p class="panel-note">${esc(pick(value, "note") || "")}</p>
+    ${value.push2_env_note ? `<p class="panel-note">${esc(pick(value, "push2_env_note"))}</p>` : ""}
     ${writable ? "" : `<p class="panel-note">${tr("当前模式不能修改这些设置。", "This mode cannot change these settings.")}</p>`}
     ${flash ? `<p class="panel-note" id="settings-saved">${esc(flash)}</p>` : `<p class="panel-note" id="settings-saved" hidden></p>`}
     <form id="settings-fields" class="ops-fields">${sections}
@@ -58,16 +58,16 @@ export async function renderSettings(ctx, home, alive, flash = "") {
       });
       if (!alive() || current !== previewGeneration) return;
       if (!preview.token) {
-        target.innerHTML = `<p class="panel-note">${esc(preview.note || tr("没有需要保存的改动。", "Nothing to save."))}</p>`;
+        target.innerHTML = `<p class="panel-note">${esc(pick(preview, "note") || tr("没有需要保存的改动。", "Nothing to save."))}</p>`;
         return;
       }
       const items = (preview.changes || [])
-        .map((change) => `<li>${esc(change.label)}：${esc(change.before_label)} → ${esc(change.after_label)}</li>`)
+        .map((change) => `<li>${esc(pick(change, "label"))}${tr("：", ": ")}${esc(pick(change, "before_label"))} → ${esc(pick(change, "after_label"))}</li>`)
         .join("");
-      target.innerHTML = `<p class="panel-note">${esc(preview.note || "")}</p>
+      target.innerHTML = `<p class="panel-note">${esc(pick(preview, "note") || "")}</p>
         ${preview.push2_env_note ? `<p class="panel-note">${esc(preview.push2_env_note)}</p>` : ""}
         <ul class="ops-list">${items}</ul>
-        <label class="ops-check"><input id="settings-ack" type="checkbox"> ${esc(preview.acknowledgement)}</label>
+        <label class="ops-check"><input id="settings-ack" type="checkbox"> ${esc(pick(preview, "acknowledgement"))}</label>
         <div class="action-row"><button class="button button-primary" id="settings-apply" type="button" disabled>${tr("保存设置", "Save settings")}</button></div>
         <p class="panel-note" id="settings-note"></p>`;
       const button = document.getElementById("settings-apply");
@@ -89,11 +89,14 @@ export async function renderSettings(ctx, home, alive, flash = "") {
               ctx,
               home,
               pageAlive,
-              `已保存。原文件备份为 ${saved.backup_name}。这次没有启动取数。`,
+              tr(
+                `已保存。原文件备份为 ${saved.backup_name}。这次没有启动取数。`,
+                `Saved. The original file was backed up as ${saved.backup_name}. No fetching was started.`,
+              ),
             );
           }
         } catch (err) {
-          if (alive()) document.getElementById("settings-note").textContent = `${err.message} 请重新预览。`;
+          if (alive()) document.getElementById("settings-note").textContent = tr(`${err.message} 请重新预览。`, `${err.message} Preview again.`);
         }
       };
     } catch (err) {
@@ -103,13 +106,13 @@ export async function renderSettings(ctx, home, alive, flash = "") {
 }
 
 function field(spec, disabled, esc) {
-  const scope = spec.scope ? `<small class="muted">${esc(spec.scope)}</small>` : "";
-  const help = spec.help ? `<small class="muted">${esc(spec.help)}</small>` : "";
+  const scope = spec.scope ? `<small class="muted">${esc(pick(spec, "scope"))}</small>` : "";
+  const help = spec.help ? `<small class="muted">${esc(pick(spec, "help"))}</small>` : "";
   if (spec.kind === "bool") {
-    return `<label class="ops-check"><input id="setting-${esc(spec.id)}" type="checkbox" ${spec.value ? "checked" : ""} ${disabled}> ${esc(spec.label)}</label>${help}${scope}`;
+    return `<label class="ops-check"><input id="setting-${esc(spec.id)}" type="checkbox" ${spec.value ? "checked" : ""} ${disabled}> ${esc(pick(spec, "label"))}</label>${help}${scope}`;
   }
   const options = (spec.choices || [])
-    .map((choice) => `<option value="${esc(choice.value)}" ${choice.value === spec.value ? "selected" : ""}>${esc(choice.label)}</option>`)
+    .map((choice) => `<option value="${esc(choice.value)}" ${choice.value === spec.value ? "selected" : ""}>${esc(pick(choice, "label"))}</option>`)
     .join("");
-  return `<label>${esc(spec.label)}<select id="setting-${esc(spec.id)}" ${disabled}>${options}</select></label>${help}${scope}`;
+  return `<label>${esc(pick(spec, "label"))}<select id="setting-${esc(spec.id)}" ${disabled}>${options}</select></label>${help}${scope}`;
 }

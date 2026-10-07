@@ -27,7 +27,7 @@ DEFAULT_DATA_VERSION = "v1"
 #
 # daily_bars v2: `volume` is 股 for every source. v1 rows are 手 from
 # tdx_protocol and sina, 股 from ths and baostock — see
-# `cnequity.domain.units` and docs/datasets/schema.md.
+# `cnequity.domain.units` and docs/zh/datasets/schema.md.
 DATASET_DATA_VERSION = {
     "daily_bars": "v2",
 }

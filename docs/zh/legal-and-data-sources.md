@@ -4,7 +4,7 @@
 
 ## 软件许可
 
-- 本仓库源代码以 [Apache License 2.0](../LICENSE) 发布（见 [NOTICE](../NOTICE)）。
+- 本仓库源代码以 [Apache License 2.0](../../LICENSE) 发布（见 [NOTICE](../../NOTICE)）。
 - 你可以对代码进行使用、修改、再分发（按 Apache-2.0 文本履行归属、变更声明与 NOTICE 保留等义务）。
 
 ## 数据不是随仓库附带的
@@ -57,7 +57,7 @@
 
 ## 安全问题
 
-漏洞请按 [SECURITY.md](../SECURITY.md) 私下报告，不要在公开 issue 中粘贴凭证或完整本地配置。
+漏洞请按 [SECURITY.md](../../SECURITY.md) 私下报告，不要在公开 issue 中粘贴凭证或完整本地配置。
 
 ## 与定位文档的关系
 

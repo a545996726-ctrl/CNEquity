@@ -6,10 +6,10 @@ CNEquity turns market prices, financial statements, corporate events and capital
 
 [![CI](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cnequity?logo=pypi&logoColor=white)](https://pypi.org/project/cnequity/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/getting-started/installation.md)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/en/getting-started/installation.md)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-[中文](README.md) · [Documentation](https://rootsunc.github.io/CNEquity/) · [Dataset catalog](docs/datasets/catalog.md) · [Changelog](CHANGELOG.md)
+[中文](README.md) · [Documentation](https://rootsunc.github.io/CNEquity/en/) · [Dataset catalog](docs/en/datasets/catalog.md) · [Changelog](CHANGELOG.md)
 </div>
 
 ![cne serve dashboard tour: lake status, coverage heatmap, daily-bar detail and quality audits](docs/assets/cne-serve-tour.gif)
@@ -34,7 +34,7 @@ cne serve --config configs/cnequity.demo.toml   # open the dashboard shown above
 claude mcp add cnequity -- cne mcp --config /abs/path/to/configs/cnequity.demo.toml
 ```
 
-See the [MCP guide](docs/reference/mcp.md#接入各家客户端) for every client; ChatGPT only reaches public URLs, so it connects through `cne mcp --http --token` and a tunnel. Then ask: "Which day had CATL's highest close in the last 30 trading days?"
+See the [MCP guide](docs/en/reference/mcp.md#connecting-clients) for every client; ChatGPT only reaches public URLs, so it connects through `cne mcp --http --token` and a tunnel. Then ask: "Which day had CATL's highest close in the last 30 trading days?"
 
 **③ Build the full lake.** Every Shanghai, Shenzhen and Beijing A-share, last 3 years:
 
@@ -50,11 +50,11 @@ bars = load("daily_bars", symbols=["600519.SH"])
 print(bars.tail())
 ```
 
-Then run `cne run daily` once a day to stay current. For longer history, or what `init` does step by step, see the [initialization guide](docs/getting-started/initialization.md).
+Then run `cne run daily` once a day to stay current. For longer history, or what `init` does step by step, see the [initialization guide](docs/en/getting-started/initialization.md).
 
 ## Data coverage
 
-The current development tree registers **55 datasets: 47 curated + 8 derived**, organized into L0–L9. See the [catalog](docs/datasets/catalog.md) and [source limitations](docs/datasets/sources.md).
+The current development tree registers **55 datasets: 47 curated + 8 derived**, organized into L0–L9. See the [catalog](docs/en/datasets/catalog.md) and [source limitations](docs/en/datasets/sources.md).
 
 | Tier | Research use | Representative datasets |
 |---|---|---|
@@ -84,7 +84,7 @@ The same equal-weight buy-and-hold strategy over the same dates produces a diffe
 
 ![Historical equal-weight results with delisted stocks versus survivors only](docs/assets/survivorship-gap.svg)
 
-*This historical sample illustrates universe selection. Its returns and stock counts do not describe current lake coverage or future investment performance. Delisted names are valued at their last available bar; see the [universe profiles](docs/reference/universe-profiles.md) for evidence limits.*
+*This historical sample illustrates universe selection. Its returns and stock counts do not describe current lake coverage or future investment performance. Delisted names are valued at their last available bar; see the [universe profiles](docs/en/reference/universe-profiles.md) for evidence limits.*
 
 CNEquity retains delisted identities and makes adjustment, historical membership and PIT semantics part of the query contract.
 
@@ -94,17 +94,17 @@ If this is infrastructure you keep rebuilding, [give CNEquity a ⭐ Star](https:
 
 | Question | Data and example | Check first |
 |---|---|---|
-| Returns across dividends and splits | `daily_bars` + `adj_factors` · [adjustment recipe](docs/recipes/research-baseline.md) | Use `adjust="hfq"` and `strict_adj=True` |
-| Financial facts visible on a rebalance date | `financial_statement_items` · [PIT recipe](docs/recipes/pit-rebalance.md) | Explicit `as_of` and `pit_mode="strict"`; backfilled history is not historical observation |
-| Historical universes and pre-delisting prices | `instruments`, `trading_status`, `delisting_events` · [profiles](docs/reference/universe-profiles.md) | Validate ST, delisting and price coverage |
-| Valuation, flows and sector rotation | Valuation, capital and structure datasets · [query guide](docs/datasets/query-guide.md) | Distinguish backfillable history from snapshots collected over time |
-| Futures curves, option chains and Greeks | Contract-level prices and derived datasets · [derivatives](docs/recipes/derivatives.md) | Opt in; verify exchange coverage and lifecycle evidence |
+| Returns across dividends and splits | `daily_bars` + `adj_factors` · [adjustment recipe](docs/en/recipes/research-baseline.md) | Use `adjust="hfq"` and `strict_adj=True` |
+| Financial facts visible on a rebalance date | `financial_statement_items` · [PIT recipe](docs/en/recipes/pit-rebalance.md) | Explicit `as_of` and `pit_mode="strict"`; backfilled history is not historical observation |
+| Historical universes and pre-delisting prices | `instruments`, `trading_status`, `delisting_events` · [profiles](docs/en/reference/universe-profiles.md) | Validate ST, delisting and price coverage |
+| Valuation, flows and sector rotation | Valuation, capital and structure datasets · [query guide](docs/en/datasets/query-guide.md) | Distinguish backfillable history from snapshots collected over time |
+| Futures curves, option chains and Greeks | Contract-level prices and derived datasets · [derivatives](docs/en/recipes/derivatives.md) | Opt in; verify exchange coverage and lifecycle evidence |
 
 ## Architecture
 
 ![CNEquity architecture from multiple sources through ingestion and a local Parquet lake to research consumers](docs/assets/architecture-diagram-v3.png)
 
-Adapters and batch orchestration collect data into staging; validated batches become curated or derived data. Quality checks, Python and SQL queries, the dashboard and MCP consume published data. The diagram explains responsibilities; see the [data flow](docs/architecture/data-flow.md) and [catalog](docs/datasets/catalog.md) for current source protocols and enabled datasets.
+Adapters and batch orchestration collect data into staging; validated batches become curated or derived data. Quality checks, Python and SQL queries, the dashboard and MCP consume published data. The diagram explains responsibilities; see the [data flow](docs/en/architecture/data-flow.md) and [catalog](docs/en/datasets/catalog.md) for current source protocols and enabled datasets.
 
 ## After init: daily updates
 
@@ -123,7 +123,7 @@ cne config upgrade
 
 `cne config upgrade` adds the schedule steps a new release introduced to your config and keeps a backup of the original.
 
-Continue with [initialization and recovery](docs/getting-started/initialization.md), then the [runbook](docs/operations/runbook.md). Detailed documentation is primarily in Chinese.
+Continue with [initialization and recovery](docs/en/getting-started/initialization.md), then the [runbook](docs/en/operations/runbook.md). Detailed documentation is primarily in Chinese.
 
 ## One lake for Python, SQL and AI agents
 
@@ -148,26 +148,26 @@ cne query --sql "SELECT symbol, max(trade_date) AS last_date FROM daily_bars GRO
 cne mcp --config /abs/path/to/cnequity.toml
 ```
 
-`load()` applies adjustment, PIT and universe semantics; `scan()` returns a raw LazyFrame. MCP defaults to reading the local lake through six tools for discovery, symbol resolution, prices, fundamentals, datasets and SQL. See [MCP setup](docs/reference/mcp.md) and the [Python API](docs/reference/python-api.md).
+`load()` applies adjustment, PIT and universe semantics; `scan()` returns a raw LazyFrame. MCP defaults to reading the local lake through six tools for discovery, symbol resolution, prices, fundamentals, datasets and SQL. See [MCP setup](docs/en/reference/mcp.md) and the [Python API](docs/en/reference/python-api.md).
 
 ## Fit and limits
 
-CNEquity fits repeated historical research, ongoing collection and self-hosted data operations. A direct source call is lighter for an occasional quote. Existing research and trading platforms can consume the lake; see [choosing a data workflow](docs/architecture/overview.md). How it differs from and works alongside AKShare and Tushare: [comparison](docs/architecture/comparison.md) (Chinese).
+CNEquity fits repeated historical research, ongoing collection and self-hosted data operations. A direct source call is lighter for an occasional quote. Existing research and trading platforms can consume the lake; see [choosing a data workflow](docs/en/architecture/overview.md). How it differs from and works alongside AKShare and Tushare: [comparison](docs/en/architecture/comparison.md).
 
 - The project is in **0.x development**. Repository documentation describes the current tree; the stable PyPI release may lag. Check `cne --version` and the [changelog](CHANGELOG.md).
 - Public-source connectivity, retention and publication schedules vary. Basic collection needs no token; some supplemental sources require your own credentials and permissions.
 - Fresh data does not establish complete historical coverage. Strict PIT may return no rows; strict universe queries may reject insufficient evidence.
-- CNEquity supplies data infrastructure, not a backtesting engine, trading signals or order execution. Code is [Apache-2.0](LICENSE); upstream data has [separate terms](docs/legal-and-data-sources.md). No data lake is distributed with the repository.
+- CNEquity supplies data infrastructure, not a backtesting engine, trading signals or order execution. Code is [Apache-2.0](LICENSE); upstream data has [separate terms](docs/en/legal-and-data-sources.md). No data lake is distributed with the repository.
 
 ## Documentation and contributions
 
 | Task | Read |
 |---|---|
-| Install and get a result | [Installation](docs/getting-started/installation.md) · [Quickstart](docs/getting-started/quickstart.md) |
-| Understand the data | [Catalog](docs/datasets/catalog.md) · [Schemas](docs/datasets/schema.md) · [Recipes](docs/recipes/README.md) |
-| Find a command | [CLI](docs/reference/cli.md) · [Options](docs/reference/cli-options.md) · [Network/write effects](docs/reference/cli-surface.md) |
-| Operate the lake | [Runbook](docs/operations/runbook.md) · [Fetch policy](docs/operations/fetch-policy.md) · [Troubleshooting](docs/operations/troubleshooting.md) |
-| Product direction and feedback | [Product overview](docs/architecture/overview.md) · [Upgrades and feedback](docs/getting-started/installation.md#升级与兼容性) |
+| Install and get a result | [Installation](docs/en/getting-started/installation.md) · [Quickstart](docs/en/getting-started/quickstart.md) |
+| Understand the data | [Catalog](docs/en/datasets/catalog.md) · [Schemas](docs/en/datasets/schema.md) · [Recipes](docs/en/recipes/README.md) |
+| Find a command | [CLI](docs/en/reference/cli.md) · [Options](docs/en/reference/cli-options.md) · [Network/write effects](docs/en/reference/cli-surface.md) |
+| Operate the lake | [Runbook](docs/en/operations/runbook.md) · [Fetch policy](docs/en/operations/fetch-policy.md) · [Troubleshooting](docs/en/operations/troubleshooting.md) |
+| Product direction and feedback | [Product overview](docs/en/architecture/overview.md) · [Upgrades and feedback](docs/en/getting-started/installation.md#upgrades-and-compatibility) |
 
 [Issues](https://github.com/rootSunc/CNEquity/issues) with minimal reproductions, documentation fixes and adapter PRs are welcome. Cite [CITATION.cff](CITATION.cff) for research; report vulnerabilities privately using the [security policy](SECURITY.md).
 

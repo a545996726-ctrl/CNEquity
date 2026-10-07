@@ -192,6 +192,18 @@ class ScheduleService:
                 "休眠期间不执行，恢复后再判断；日更与补抓最迟到下个交易日 09:15，备份只补当天，事件流不累积补跑。"
                 "这里只管理 Web 创建的任务，已有的脚本和其他系统任务请先核对，避免重复调度。"
             ),
+            "note_en": (
+                "Checked once a minute. The daily update and the catch-up are each tried once per trading "
+                "day; the catch-up handles snapshots only and waits until the daily update has run. A "
+                "backup is tried once per calendar day after its time; the event stream runs at its own "
+                "interval, weekends and holidays included. A busy lake means wait for the next check. "
+                "Schedules keep working after you close the page or stop serve. Windows and macOS need "
+                "the current user logged in; Linux needs the cron service running. Nothing runs while "
+                "the machine sleeps; on wake the check decides again. The daily update and catch-up are "
+                "retried until 09:15 on the next trading day, a backup only on its own day, and missed "
+                "event-stream runs do not pile up. Only schedules created on this page are managed "
+                "here; check existing scripts and other system jobs first to avoid running twice."
+            ),
         }
 
     def preview(
@@ -298,6 +310,7 @@ class ScheduleService:
             "token": token,
             "backend": self.backend.kind,
             "action": "启用 / 更新" if enabled else "暂停",
+            "action_en": "Enable / update" if enabled else "Pause",
             "daily": daily,
             "stale": stale,
             "daily_run_at": daily_run_at,
@@ -316,6 +329,20 @@ class ScheduleService:
             )
             if enabled
             else "停止后续定时触发，已在运行的任务继续执行。",
+            "confirmation_en": (
+                "The system will fetch or copy backups on schedule for the selected scope (backups keep "
+                "using disk space and are never deleted automatically); this continues after the web "
+                "service stops."
+                + (
+                    " The daily update runs only the schedule groups of research packs "
+                    + ", ".join(options["daily_packs"])
+                    + ", without the event stream. A missed snapshot day cannot be filled later."
+                    if options.get("daily_packs")
+                    else ""
+                )
+            )
+            if enabled
+            else "Stops future scheduled triggers; a job already running continues.",
         }
 
     def apply(self, token: str, *, acknowledged: bool, requested_by: str) -> dict:

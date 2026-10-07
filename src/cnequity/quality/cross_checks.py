@@ -1118,7 +1118,7 @@ def adj_factor_reconciliation_findings(
                     "Verified live against both tdx_protocol and the eastmoney backup: "
                     "neither serves corporate-action history for a name once it is gone "
                     "from their live symbol list. Not a market-id or filter bug — see "
-                    "docs/datasets/sources.md#corporate_actions."
+                    "docs/zh/datasets/sources.md#corporate_actions."
                     f"{repair_hint}{unsupported_hint}"
                 ),
                 "symbols_total": delisted.height,

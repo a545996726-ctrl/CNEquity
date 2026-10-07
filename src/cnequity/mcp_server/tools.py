@@ -43,7 +43,7 @@ MAX_LIMIT = 2000
 
 # Per-row provenance, folded into a summary instead of repeated. Kept as a tuple
 # rather than read from the schema because these three are the contract every
-# curated dataset shares (docs/datasets/catalog.md), not an accident of one.
+# curated dataset shares (docs/zh/datasets/catalog.md), not an accident of one.
 PROVENANCE_COLS = ("source", "data_version", "fetched_at")
 
 # The 15m/30m/60m datasets exist only after a user runs `cne derive` for them.

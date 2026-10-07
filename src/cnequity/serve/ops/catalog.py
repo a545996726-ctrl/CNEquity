@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from cnequity.domain.market_time import shanghai_today
+from cnequity.serve.labels_en import en
 
 # Targets ``cne derive`` accepts that the page may run. The command's other
 # names rewrite data only with ``--apply`` or have no schedule at all; those
@@ -575,19 +576,25 @@ def describe(config, *, setup: bool) -> list[dict[str, Any]]:
             {
                 "id": spec.id,
                 "title": spec.title,
+                "title_en": en(spec.title),
                 "summary": spec.summary,
+                "summary_en": en(spec.summary),
                 "group": spec.group,
+                "group_en": en(spec.group),
                 "command": command_template(spec),
                 "confirm": spec.confirm,
                 "result": spec.result,
                 "available": reason is None,
                 "unavailable_reason": reason,
+                "unavailable_reason_en": en(reason),
                 "params": [
                     {
                         "name": param.name,
                         "kind": param.kind,
                         "label": param.label,
+                        "label_en": en(param.label),
                         "help": param.help,
+                        "help_en": en(param.help),
                         "required": param.required,
                         "choices": _choice_list(param, config) or None,
                     }
@@ -802,9 +809,9 @@ def confirm_level(spec: OpSpec, params: dict[str, Any]) -> str:
 def acknowledgements(spec: OpSpec, level: str) -> list[dict[str, str]]:
     if level == "none":
         return []
-    items = [dict(STANDARD_ACK)]
+    items = [{**STANDARD_ACK, "text_en": en(STANDARD_ACK["text"])}]
     if level == "heavy" and spec.heavy_text:
-        items.append({"id": "heavy", "text": spec.heavy_text})
+        items.append({"id": "heavy", "text": spec.heavy_text, "text_en": en(spec.heavy_text)})
     return items
 
 
@@ -910,4 +917,5 @@ def prepared(spec: OpSpec, raw: dict[str, Any] | None, config) -> dict[str, Any]
         "config_path": str(path) if path is not None else None,
         "result": spec.result,
         "title": spec.title,
+        "title_en": en(spec.title),
     }

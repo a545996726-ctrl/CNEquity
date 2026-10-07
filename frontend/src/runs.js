@@ -1,7 +1,7 @@
 // Run history, plus the commands that write a manifest run.
 // The form is the operations page form: preview, then confirm, one job at a time.
 import { runGantt } from "./charts.js";
-import { statusText, tr } from "./i18n.js";
+import { pick, statusText, tr } from "./i18n.js";
 import { beginOps, mountOpForm, opsIsCurrent, runLauncherModel } from "./ops.js";
 import {
   NEEDS_ACTION,
@@ -155,7 +155,7 @@ function openRunForm(ctx, home, current, state, closeHref) {
   if (!card || !card.available || !home.mode?.ops_enabled) {
     const reason = !home.mode?.ops_enabled
       ? tr("当前模式不能从面板启动命令。", "This mode cannot start commands from the panel.")
-      : card?.unavailable_reason || tr("当前没有这项操作。", "This operation is not available.");
+      : pick(card, "unavailable_reason") || tr("当前没有这项操作。", "This operation is not available.");
     host.innerHTML = `<p class="panel-note">${ctx.esc(reason)}</p>`;
     return;
   }
@@ -215,7 +215,7 @@ export async function renderRuns(ctx) {
   const alerts = [];
   const slot = home?.occupancy?.slot;
   if (slot && (slot.state === "running" || slot.state === "starting")) {
-    alerts.push(`<li class="attention-row tone-info"><div class="attention-copy"><strong>${tr("正在执行", "Running")}</strong><p class="attention-detail">${ctx.esc(slot.title || slot.op || "")}</p></div><a class="button button-primary" href="#/ops/jobs/${encodeURIComponent(slot.job_id)}">${tr("查看任务", "Open job")}</a></li>`);
+    alerts.push(`<li class="attention-row tone-info"><div class="attention-copy"><strong>${tr("正在执行", "Running")}</strong><p class="attention-detail">${ctx.esc(pick(slot, "title") || slot.op || "")}</p></div><a class="button button-primary" href="#/ops/jobs/${encodeURIComponent(slot.job_id)}">${tr("查看任务", "Open job")}</a></li>`);
   }
   const pending = home?.occupancy?.incomplete_init;
   if (pending && !pending.running) {

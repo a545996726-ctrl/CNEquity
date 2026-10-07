@@ -6,7 +6,7 @@ column that mixes both is silently wrong by exactly 100× — large enough to
 destroy any turnover or liquidity factor, small enough that OHLC checks and
 row counts never notice.
 
-**The lake stores 股.** That is what ``docs/datasets/schema.md`` has always
+**The lake stores 股.** That is what ``docs/zh/datasets/schema.md`` has always
 promised, and it is the only choice that makes ``amount ≈ close × volume``
 hold, which in turn is what lets :mod:`cnequity.quality.unit_checks`
 detect a regression from the data alone.
@@ -32,7 +32,7 @@ The EastMoney reading is **not independently verified**: ``push2his`` is
 unreachable from the network this was measured on, and the only EastMoney rows
 in the lake are all-zero suspension placeholders. It is taken from the same
 endpoint and field index that ``commodity_bars`` already documents as 东财口径
-手 (``docs/datasets/schema.md``). If it is wrong, ``daily_bars_volume_unit``
+手 (``docs/zh/datasets/schema.md``). If it is wrong, ``daily_bars_volume_unit``
 fires the first time a real EastMoney row is curated, which is the point of
 that check.
 

@@ -253,6 +253,22 @@ scripts/migrations/migrate_daily_bars_volume_v2.py --config configs/cnequity.tom
 
 端到端冒烟：mock 或轻量配置下跑 miniature daily 路径，CI/本地回归用。
 
+## 文档同步与翻译
+
+### dev/sync_docs.py
+
+从代码重新生成文档里由代码决定的部分，中英文两套都包括：字段表、衍生品能力表、CLI 参数表、命令副作用清单，以及 PyPI 用的 README。`--check` 只检查不写入，CI 会跑。CLI 帮助和副作用说明的英文在 `scripts/dev/i18n/cli_help.en.yml` 和 `cli_surface.en.yml`；新增或改动帮助文字而没有对应英文时，检查失败。
+
+### dev/doc_translations.py
+
+列出落后于中文原文的英文页。每个英文页在 `scripts/dev/i18n/doc_sources.json` 记着所依据中文页的摘要；中文改了、英文没跟上，`tests/unit/test_docs_i18n.py` 就会失败。改完英文后登记：
+
+```bash
+python scripts/dev/doc_translations.py --mark reference/mcp.md
+```
+
+代码生成的表格不计入摘要，重新生成表格不会要求重译。
+
 ## launchd 模板
 
 `scripts/scheduler/launchd/com.cnequity.daily.plist.template`

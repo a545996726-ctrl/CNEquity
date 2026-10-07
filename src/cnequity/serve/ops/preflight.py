@@ -26,6 +26,7 @@ from cnequity.orchestrator.run_window import (
     pending_session,
 )
 from cnequity.orchestrator.scheduler_lock import lock_directory, scheduler_lock_holder
+from cnequity.serve.labels_en import en
 from cnequity.serve.ops.catalog import OpSpec
 from cnequity.serve.ops.records import live_holder, slot_path
 
@@ -215,6 +216,7 @@ def occupancy(config, *, storage_busy: bool) -> dict:
                 "job_id": holder.get("job_id"),
                 "op": holder.get("op"),
                 "title": holder.get("title"),
+                "title_en": en(holder.get("title")),
                 "state": holder.get("state"),
                 "command": holder.get("command"),
             }

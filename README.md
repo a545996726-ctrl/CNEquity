@@ -7,10 +7,10 @@ CNEquity 将股票行情、期货合约、财报、公司事件和资金面等�
 
 [![CI](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rootSunc/CNEquity/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cnequity?logo=pypi&logoColor=white)](https://pypi.org/project/cnequity/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/getting-started/installation.md)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/zh/getting-started/installation.md)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-[English](README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [数据集目录](docs/datasets/catalog.md) · [更新日志](CHANGELOG.md)
+[English](README.en.md) · [完整文档](https://rootsunc.github.io/CNEquity/) · [数据集目录](docs/zh/datasets/catalog.md) · [更新日志](CHANGELOG.md)
 </div>
 
 ![cne serve 控制台录屏：湖状态、覆盖热力、日线详情与质量审计](docs/assets/cne-serve-tour.zh.gif)
@@ -35,7 +35,7 @@ cne serve --config configs/cnequity.demo.toml   # 在浏览器里打开上面的
 claude mcp add cnequity -- cne mcp --config /abs/path/to/configs/cnequity.demo.toml
 ```
 
-各家客户端的写法见 [MCP 接入指南](docs/reference/mcp.md#接入各家客户端)；ChatGPT 只接公网网址，用 `cne mcp --http --token` 加隧道接入。然后直接问：「宁德时代最近 30 个交易日的最高收盘价是哪天？」
+各家客户端的写法见 [MCP 接入指南](docs/zh/reference/mcp.md#接入各家客户端)；ChatGPT 只接公网网址，用 `cne mcp --http --token` 加隧道接入。然后直接问：「宁德时代最近 30 个交易日的最高收盘价是哪天？」
 
 **③ 建正式湖。** 沪深京全市场、最近 3 年：
 
@@ -51,11 +51,11 @@ bars = load("daily_bars", symbols=["600519.SH"])
 print(bars.tail())
 ```
 
-之后每天运行一次 `cne run daily` 保持更新。想要更长的历史，或了解 `init` 具体做了什么，见[初始化指南](docs/getting-started/initialization.md)。
+之后每天运行一次 `cne run daily` 保持更新。想要更长的历史，或了解 `init` 具体做了什么，见[初始化指南](docs/zh/getting-started/initialization.md)。
 
 ## 数据范围
 
-当前开发树注册 **55 个数据集：47 个 curated + 8 个 derived**，按用途分为 L0–L9。完整字段、主键、历史起点和来源集中在[数据集目录](docs/datasets/catalog.md)与[数据源说明](docs/datasets/sources.md)。
+当前开发树注册 **55 个数据集：47 个 curated + 8 个 derived**，按用途分为 L0–L9。完整字段、主键、历史起点和来源集中在[数据集目录](docs/zh/datasets/catalog.md)与[数据源说明](docs/zh/datasets/sources.md)。
 
 | 层次 | 研究用途 | 代表数据集 |
 |---|---|---|
@@ -133,7 +133,7 @@ print(bars.tail())
 | `option_contracts` | L9 | futures_exchange | — |
 | `option_greeks` | L9 | derived | — |
 
-登记主备源是数据集元数据；日更 tip、历史回填和显式修复可能走不同路径。请结合[来源说明](docs/datasets/sources.md)使用。
+登记主备源是数据集元数据；日更 tip、历史回填和显式修复可能走不同路径。请结合[来源说明](docs/zh/datasets/sources.md)使用。
 
 </details>
 
@@ -151,7 +151,7 @@ print(bars.tail())
 
 ![含退市股与只留幸存者的历史等权持有结果对比](docs/assets/survivorship-gap.zh.svg)
 
-*历史样本仅用于说明股票池口径；图中收益和标的数量不代表当前湖覆盖或未来投资表现。退市股按最后一根可用行情计价，因子及退市覆盖限制见[股票池画像](docs/reference/universe-profiles.md)。*
+*历史样本仅用于说明股票池口径；图中收益和标的数量不代表当前湖覆盖或未来投资表现。退市股按最后一根可用行情计价，因子及退市覆盖限制见[股票池画像](docs/zh/reference/universe-profiles.md)。*
 
 CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口径进入查询契约，避免下游研究在无意中丢掉这些标的。
 
@@ -160,18 +160,18 @@ CNEquity 在数据层保留退市身份，并让复权、历史成分和 PIT 口
 
 | 你的问题 | 数据与入口 | 需要确认的口径 |
 |---|---|---|
-| 跨分红、送转后的历史收益 | `daily_bars` + `adj_factors` · [复权示例](docs/recipes/research-baseline.md) | `adjust="hfq"`，研究时开启 `strict_adj=True` |
-| 某个调仓日已经知道哪些财报信息 | `financial_statement_items` · [PIT 示例](docs/recipes/pit-rebalance.md) | 显式 `as_of` + `pit_mode="strict"`；新回填不等于当时可见 |
-| 历史股票池、退市前行情 | `instruments`、`trading_status`、`delisting_events` · [股票池画像](docs/reference/universe-profiles.md) | 历史 ST、退市和行情覆盖需另行核验 |
-| 估值、资金流、行业轮动 | `valuation_metrics`、资金面与结构数据 · [查询指南](docs/datasets/query-guide.md) | 分清可回补历史与启用后积累的快照 |
-| 期货期限结构、期权链与 Greeks | 逐合约行情和派生数据 · [衍生品指南](docs/recipes/derivatives.md) | 默认关闭，按交易所、合约生命周期与覆盖证据验收 |
+| 跨分红、送转后的历史收益 | `daily_bars` + `adj_factors` · [复权示例](docs/zh/recipes/research-baseline.md) | `adjust="hfq"`，研究时开启 `strict_adj=True` |
+| 某个调仓日已经知道哪些财报信息 | `financial_statement_items` · [PIT 示例](docs/zh/recipes/pit-rebalance.md) | 显式 `as_of` + `pit_mode="strict"`；新回填不等于当时可见 |
+| 历史股票池、退市前行情 | `instruments`、`trading_status`、`delisting_events` · [股票池画像](docs/zh/reference/universe-profiles.md) | 历史 ST、退市和行情覆盖需另行核验 |
+| 估值、资金流、行业轮动 | `valuation_metrics`、资金面与结构数据 · [查询指南](docs/zh/datasets/query-guide.md) | 分清可回补历史与启用后积累的快照 |
+| 期货期限结构、期权链与 Greeks | 逐合约行情和派生数据 · [衍生品指南](docs/zh/recipes/derivatives.md) | 默认关闭，按交易所、合约生命周期与覆盖证据验收 |
 
 
 ## 架构
 
 ![CNEquity 从多源采集、编排到本地 Parquet 湖及研究消费的架构图](docs/assets/architecture-diagram-v3.png)
 
-数据经适配器与批次编排进入 staging，校验后发布为 curated 或 derived 数据；质量审计、Python/SQL 查询、控制台和 MCP 围绕已发布数据工作。图示用于说明职责边界，具体来源协议与启用状态以[数据流说明](docs/architecture/data-flow.md)和[数据集目录](docs/datasets/catalog.md)为准。
+数据经适配器与批次编排进入 staging，校验后发布为 curated 或 derived 数据；质量审计、Python/SQL 查询、控制台和 MCP 围绕已发布数据工作。图示用于说明职责边界，具体来源协议与启用状态以[数据流说明](docs/zh/architecture/data-flow.md)和[数据集目录](docs/zh/datasets/catalog.md)为准。
 
 ## 初始化之后：每日更新
 
@@ -190,7 +190,7 @@ cne config upgrade
 
 `cne config upgrade` 把新版本加入的调度 step 补进你的配置，原文件自动备份。
 
-继续阅读：[初始化、范围与续跑](docs/getting-started/initialization.md) → [日常运维](docs/operations/runbook.md)。
+继续阅读：[初始化、范围与续跑](docs/zh/getting-started/initialization.md) → [日常运维](docs/zh/operations/runbook.md)。
 
 ## Python、SQL 和 AI agent 共用一份数据
 
@@ -215,26 +215,26 @@ cne query --sql "SELECT symbol, max(trade_date) AS last_date FROM daily_bars GRO
 cne mcp --config /abs/path/to/cnequity.toml
 ```
 
-`load()` 提供复权、PIT 和股票池语义；`scan()` 提供原始 LazyFrame。MCP 默认只读本地湖，提供描述、代码解析、行情、财报、通用数据集和 SQL 六类工具。客户端配置见 [MCP 指南](docs/reference/mcp.md)，查询边界见 [Python API](docs/reference/python-api.md)。
+`load()` 提供复权、PIT 和股票池语义；`scan()` 提供原始 LazyFrame。MCP 默认只读本地湖，提供描述、代码解析、行情、财报、通用数据集和 SQL 六类工具。客户端配置见 [MCP 指南](docs/zh/reference/mcp.md)，查询边界见 [Python API](docs/zh/reference/python-api.md)。
 
 ## 适合与边界
 
-**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](docs/architecture/overview.md)；和 AKShare、Tushare 的区别与配合见[对比说明](docs/architecture/comparison.md)。
+**适合**持续积累历史、反复查询、检查研究口径和自托管数据的工作。若只需偶尔取一个最新报价，直接调用取数接口通常更轻；已有研究或交易平台也可以把 CNEquity 放在数据层，见[选型说明](docs/zh/architecture/overview.md)；和 AKShare、Tushare 的区别与配合见[对比说明](docs/zh/architecture/comparison.md)。
 
 - 当前处于 **0.x 迭代阶段**。本仓库文档对应当前实现，PyPI 稳定版可能落后；升级前核对 `cne --version` 和[更新日志](CHANGELOG.md)。
 - 公共来源的网络可达性、历史深度和发布节奏会变化。基础采集无需 token，部分补充来源需要自备凭证；安装不代表获得所有上游权限。
 - `fresh` 表示新鲜度，不能单独证明历史完整或研究有效。严格 PIT 可能返回空结果，历史股票池可能因证据不足拒绝读取。
-- 项目提供数据基础设施，不含回测引擎、交易信号或下单功能。代码采用 [Apache-2.0](LICENSE)，数据另受[上游许可](docs/legal-and-data-sources.md)约束，仓库不附带数据湖。
+- 项目提供数据基础设施，不含回测引擎、交易信号或下单功能。代码采用 [Apache-2.0](LICENSE)，数据另受[上游许可](docs/zh/legal-and-data-sources.md)约束，仓库不附带数据湖。
 
 ## 文档与参与
 
 | 想做什么 | 从这里开始 |
 |---|---|
-| 安装、跑通首个查询 | [安装](docs/getting-started/installation.md) · [快速开始](docs/getting-started/quickstart.md) |
-| 找数据、确认口径 | [目录](docs/datasets/catalog.md) · [字段](docs/datasets/schema.md) · [研究示例](docs/recipes/README.md) |
-| 查命令、参数和副作用 | [CLI](docs/reference/cli.md) · [参数默认值](docs/reference/cli-options.md) · [联网与写入清单](docs/reference/cli-surface.md) |
-| 配调度、处理失败 | [运行手册](docs/operations/runbook.md) · [取数与源保护](docs/operations/fetch-policy.md) · [排障](docs/operations/troubleshooting.md) |
-| 理解产品方向与反馈问题 | [产品设计](docs/architecture/overview.md) · [升级与反馈](docs/getting-started/installation.md#升级与兼容性) |
+| 安装、跑通首个查询 | [安装](docs/zh/getting-started/installation.md) · [快速开始](docs/zh/getting-started/quickstart.md) |
+| 找数据、确认口径 | [目录](docs/zh/datasets/catalog.md) · [字段](docs/zh/datasets/schema.md) · [研究示例](docs/zh/recipes/README.md) |
+| 查命令、参数和副作用 | [CLI](docs/zh/reference/cli.md) · [参数默认值](docs/zh/reference/cli-options.md) · [联网与写入清单](docs/zh/reference/cli-surface.md) |
+| 配调度、处理失败 | [运行手册](docs/zh/operations/runbook.md) · [取数与源保护](docs/zh/operations/fetch-policy.md) · [排障](docs/zh/operations/troubleshooting.md) |
+| 理解产品方向与反馈问题 | [产品设计](docs/zh/architecture/overview.md) · [升级与反馈](docs/zh/getting-started/installation.md#升级与兼容性) |
 
 欢迎提交带最小复现的 [Issue](https://github.com/rootSunc/CNEquity/issues)、文档修正或数据适配 PR。研究引用见 [CITATION.cff](CITATION.cff)；安全问题请按[安全策略](SECURITY.md)私下报告。
 

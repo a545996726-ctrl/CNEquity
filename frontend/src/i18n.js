@@ -34,6 +34,13 @@ export function tr(zh, en) {
   return lang === "en" ? en : zh;
 }
 
+// Server payloads carry their display text in Chinese under `key` and, where a
+// translation exists, in English under `key_en`. Falls back to the Chinese.
+export function pick(obj, key) {
+  if (!obj) return "";
+  return lang === "en" ? (obj[`${key}_en`] ?? obj[key]) : obj[key];
+}
+
 export function setLang(next) {
   const value = next === "en" ? "en" : "zh";
   if (value === lang) return;

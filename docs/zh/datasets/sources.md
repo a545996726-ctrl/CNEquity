@@ -145,7 +145,7 @@
 | 组 | `derivatives`（日更，18:30；`[futures] enabled = true` 才取数） |
 | 主源 | **futures_exchange**：交易所官网的逐合约日行情文件。上期所 `data/tradedata/{future,option}/dailydata/kx{日期}.dat`（JSON，**同时含上期能源品种**）与 `busiparamdata/*/ContractBaseInfo{日期}.dat`；郑商所 2015-10 前 `cn/exchange/{年}/datadaily/{日期}.txt`（逗号分隔、无表头），之后 `DFSStaticFiles/{Future,Option}/…DataDaily.txt`（竖线分隔，表头改过名，编码 GBK→UTF-8）与参考 XML；广期所 `interfacesWebTiDayQuotes/loadList`（POST）与合约信息接口；中金所 `sj/hqsj/rtj/{月}/{日}/{日期}_1.csv` 与 `sj/jycs/{月}/{日}/index.xml` |
 | 覆盖 | 期货：上期所 2002-01-07 起（更早未测）、郑商所 2010-01-04 起（更早的 HTML 存档被 JS 挑战拦住）、中金所 2010-04-16 起、广期所 2022-12-22 起。期权：郑商所 2017-04-19、上期所 2018-09-21、中金所 2019-12-23、广期所 2022-12-23 起 |
-| 自洽校验 | 每个品种（郑商所期权为每个到期系列）的「小计」必须等于逐合约之和：量与持仓精确相等；郑商所、广期所成交额按行四舍五入到 0.01 万元，允许每行半分钱。对不上的文件整份拒收 |
+| 自洽校验 | 每个品种（郑商所期权为每个到期系列）的「小计」必须等于逐合约之和：量与持仓精确相等；郑商所、广期所成交额按行四舍五入到 0.01 万元，允许每行相差半个舍入单位（0.005 万元）。对不上的文件整份拒收 |
 | 无数据信号 | 休市日：中金所 302 跳转；上期所 404 HTML；郑商所 404「当日无数据」；广期所 200 但只有一行全零「总计」。大商所所有端点返回 412 JS 挑战，归为 blocked，不当作无数据，本项目也不绕过。连接被重置等网络层错误重试一次（间隔 2 秒），超时不重试 |
 | 部分失败 | 某一家没发布时照写其余交易所，缺的那家记 `futures_exchange_missing`，3 个交易日回看补回 |
 | 回填 | `cne backfill futures_bars --start 2010-04-16`、`cne backfill option_bars --start 2019-12-23`，之后 `cne backfill futures_contracts` / `option_contracts` 由 bars 重建合约表 |

@@ -46,6 +46,7 @@ function pageShell(content, active = "overview") {
     )
     .join("");
   const current = getLang();
+  const zhLabel = "中文"; // i18n-ignore
   return `<div class="app-shell">
     <header class="topbar">
       <a class="brand-lockup" href="#/" aria-label="${tr("返回概览", "Back to overview")}">
@@ -56,7 +57,7 @@ function pageShell(content, active = "overview") {
       <nav class="nav" aria-label="${tr("主导航", "Main")}">${nav}</nav>
       <div class="topbar-meta"><span class="console-mode">…</span>
         <div class="lang-switch" role="group" aria-label="${tr("界面语言", "Language")}">
-          <button class="lang-option${current === "zh" ? " on" : ""}" type="button" data-set-lang="zh" aria-pressed="${current === "zh"}">中文</button>
+          <button class="lang-option${current === "zh" ? " on" : ""}" type="button" data-set-lang="zh" aria-pressed="${current === "zh"}">${zhLabel}</button>
           <button class="lang-option${current === "en" ? " on" : ""}" type="button" data-set-lang="en" aria-pressed="${current === "en"}">EN</button>
         </div>
         <button class="button button-ghost" id="refresh-page" type="button">${tr("刷新", "Refresh")}</button>
@@ -337,7 +338,7 @@ async function renderOverview() {
     <section class="page-heading">
       <div class="eyebrow">${tr("数据湖控制台 / 概览", "Lake console / Overview")}</div>
       <div class="heading-row"><div><h1>${tr("湖状态", "Lake status")}</h1>
-        <p class="sub">${tr(`最后交易日 ${esc(h.anchor)} · ${h.datasets} 个注册数据集 · 审计快照 ${esc(h.audit_trade_date || "无")}`, `Last session ${esc(h.anchor)} · ${h.datasets} registered datasets · audit snapshot ${esc(h.audit_trade_date || "none")}`)}</p></div>
+        <p class="sub">${tr(`最后交易日 ${esc(h.anchor)} · ${h.datasets} 个注册数据集 · 审计快照 ${esc(h.audit_trade_date || tr("无", "none"))}`, `Last session ${esc(h.anchor)} · ${h.datasets} registered datasets · audit snapshot ${esc(h.audit_trade_date || "none")}`)}</p></div>
         <div class="action-row"><a class="button button-ghost" href="#/runs">${tr("查看跑批", "View runs")}</a><a class="button button-primary" href="${primaryHref}">${esc(primaryLabel)}</a></div>
       </div>
     </section>
@@ -564,7 +565,7 @@ function metaTab(d) {
     fact("fetch_semantics", d.fetch_semantics),
     fact("history_mode", d.history_mode),
     fact("PIT", yn(d.pit)),
-    fact("维护水位", yn(d.watermarked)),
+    fact(tr("维护水位", "Maintains watermark"), yn(d.watermarked)),
   ].join("");
   const sources = [
     fact(tr("回填源", "Backfill source"), d.backfill_source ? esc(d.backfill_source) : "-"),
@@ -935,7 +936,7 @@ async function route() {
     else await renderOverview();
     if (!location.hash.includes("?")) window.scrollTo(0, 0);
   } catch (err) {
-    if (String(err.message || "").includes("尚未配置")) {
+    if (String(err.message || "").includes("尚未配置")) { // i18n-ignore
       await renderOps({ api, setPage, esc, dataTable });
       return;
     }

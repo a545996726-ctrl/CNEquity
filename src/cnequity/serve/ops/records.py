@@ -19,6 +19,7 @@ from typing import Any
 
 from cnequity.file_lock import is_locked
 from cnequity.orchestrator.scheduler_lock import pid_alive
+from cnequity.serve.labels_en import en
 from cnequity.storage.atomic import write_json_atomic
 
 # Windows can deny an open that lands on the instant the job process replaces
@@ -55,6 +56,20 @@ LABELS = {
     "interrupted": "已中断",
     "complete": "完成",
     "lost": "已终止",
+}
+LABELS_EN = {
+    "starting": "Starting",
+    "running": "Running",
+    "rejected": "Rejected",
+    "succeeded": "Succeeded",
+    "partial": "Partly delivered",
+    "failed": "Failed",
+    "skipped": "Skipped",
+    "findings": "Did not pass",
+    "error": "Errored",
+    "interrupted": "Interrupted",
+    "complete": "Complete",
+    "lost": "Terminated",
 }
 WRITE_CLASSES = frozenset({"ingest-daily", "ingest-events", "lake-write", "init"})
 
@@ -218,6 +233,9 @@ def effective(config, record: dict) -> dict:
 def public_record(config, record: dict) -> dict:
     shown = effective(config, record)
     shown["label"] = LABELS.get(shown.get("state"), shown.get("state"))
+    shown["label_en"] = LABELS_EN.get(shown.get("state"), shown.get("state"))
+    # Older records predate title_en; the title is a catalog title either way.
+    shown["title_en"] = en(shown.get("title"))
     return shown
 
 

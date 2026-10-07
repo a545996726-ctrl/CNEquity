@@ -91,7 +91,7 @@ def test_documented_counts_match_the_registries():
     ]
     assert not placeholders, (
         f"{placeholders} are non-PIT but still carry pit_quality='strict'; "
-        "docs/datasets/contract.md says that fallback is gone"
+        "docs/zh/datasets/contract.md says that fallback is gone"
     )
 
 

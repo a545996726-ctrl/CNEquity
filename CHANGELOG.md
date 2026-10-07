@@ -1,6 +1,6 @@
 # 更新日志
 
-这里记录面向用户的主要功能、修复与兼容性变化。历史版本中的命令名反映当时的接口；当前用法以 [CLI 参考](docs/reference/cli.md)为准。升级前阅读[升级与兼容性](docs/getting-started/installation.md#升级与兼容性)。
+这里记录面向用户的主要功能、修复与兼容性变化。历史版本中的命令名反映当时的接口；当前用法以 [CLI 参考](docs/zh/reference/cli.md)为准。升级前阅读[升级与兼容性](docs/zh/getting-started/installation.md#升级与兼容性)。
 
 ## [Unreleased]
 
@@ -10,6 +10,8 @@
 - 修复 MCP 的 `run_sql` 在已发布不可变版本的数据集上一律报 `Permission Error`。查询沙箱此前只放行 `curated/` 和 `derived/`，而这类数据集的视图读的是 `meta/revisions/data/`；现在放行该目录，`meta/` 下的其他文件仍不可读。
 - `cne init --profile demo` / `sample` 结束时打印可直接复制的 MCP 接入命令（带配置的绝对路径），并当场生成度量表。此前用 `cne serve` 打开 demo 湖，概览显示 0 行，并把 demo 本来就不采的数据集标成「必需数据集为空」；现在面板与 `cne status` 一致，只评估 demo 湖实际持有的数据集。
 - 湖第一次成功建好时，在终端提示一次欢迎 Star；日志、管道和定时任务不会显示。
+- 控制台切到 English 后整页都是英文：操作页的卡片标题、说明、表单项和确认语句，取数设置、定时任务、数据备份、存储运维和首次配置页面，此前都有只显示中文的文字。服务端返回的报错和诊断说明仍是中文。
+- 文档分成中英文两套独立站点：中文仍在 https://rootsunc.github.io/CNEquity/ ，英文在 `/en/`，页眉可切换语言。源文件分别在 `docs/zh/` 和 `docs/en/`，中文页原有网址不变。两套页面一一对应，英文版的 CLI 参数表、命令副作用清单、字段表和衍生品能力表与中文版一样由代码生成，CLI 帮助的英文对照放在 `scripts/dev/i18n/`。「股票池画像」补上了中文版。中文页面改动后，若英文页没有同步更新，`tests/unit/test_docs_i18n.py` 会报出落后的页面；更新英文后用 `scripts/dev/doc_translations.py --mark` 登记。
 - MCP 指南新增 Claude Code、Claude Desktop、ChatGPT、Codex、Gemini CLI、Cursor、VS Code、Windsurf 等客户端的接入写法。
 
 ## [0.15.0] — 2026-10-07
@@ -126,7 +128,7 @@
 - 发布包补齐北交所历史代码映射，修复通过 wheel 安装后全湖审计与相关历史代码处理缺少资源文件的问题。
 - 合并退市行情补数入口到 `cne backfill daily_bars --profile delisted --start DATE`；旧 `cne delisted backfill` 停止执行并提示新写法，`cne delisted status` 保留。
 - 新增逐合约期货、期权、连续合约、希腊字母和期货分钟线；通过 `[futures] enabled = true` 显式启用，不进入默认初始化。
-- 衍生品与 A 股使用独立的证券身份、日期语义和覆盖检查。首次/末次行情观察不等于权威上市/到期日期；具体口径见[衍生品指南](docs/recipes/derivatives.md)。
+- 衍生品与 A 股使用独立的证券身份、日期语义和覆盖检查。首次/末次行情观察不等于权威上市/到期日期；具体口径见[衍生品指南](docs/zh/recipes/derivatives.md)。
 - 研究快照增加 `--research`，封装完整数据依赖、覆盖证据与非敏感读取配置；支持恢复与双湖差异比较。
 - `load(revision_map=...)` 固定数据及股票池、覆盖核验所用版本；显式版本不存在时直接失败。
 - 新增 `publication_gate` 发布前候选审计；`block` 可阻止有新增错误的候选发布，与发布后的运行状态门禁分开。
@@ -175,7 +177,7 @@
 - 新增 `cne run events`，支持非交易日的公告、新闻等事件更新。
 - 新增数据集契约、严格 PIT 模式、版本化股票池、数据 revision、快照及增量湖包。
 - 增加来源策略、SLO、稳定性检查和运行级数据收据；控制台展示版本与质量状态。
-- `trading_status` 将交易状态与 `risk_warning` 分列；旧数据升级方法见[字段说明](docs/datasets/schema.md)。
+- `trading_status` 将交易状态与 `risk_warning` 分列；旧数据升级方法见[字段说明](docs/zh/datasets/schema.md)。
 - 融资融券改用交易所来源；沪市 `short_balance` 在来源未提供时为空。
 - `cne sources` 改为命令组，探测入口为 `cne sources probe`；查询应显式选择股票池与 PIT 模式。
 - 修复密集公告分页、稀疏事件日、快照重述、回填失败状态与派生结果发布。
@@ -217,7 +219,7 @@
 
 - 增加可选 1m / 5m 分钟线、按证券回填与日内质量检查。
 - 增加对发布机构的核验、宏观修订检查，社会融资来源改为央行。
-- **单位变化：** `daily_bars.data_version=v2` 保证成交量为股；v1 按来源混用单位，升级需按[成交量迁移说明](docs/datasets/schema.md)处理。
+- **单位变化：** `daily_bars.data_version=v2` 保证成交量为股；v1 按来源混用单位，升级需按[成交量迁移说明](docs/zh/datasets/schema.md)处理。
 - 修复 M2 指标映射、零成交值和日内历史边界处理；移除 AkShare 运行时依赖。
 
 ## [0.3.1] — 2026-07-29

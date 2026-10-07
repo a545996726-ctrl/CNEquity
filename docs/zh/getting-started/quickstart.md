@@ -85,6 +85,8 @@ cne init --profile demo
 cne init --profile sample --data-root data/cnequity-sample --config-out configs/cnequity.sample.toml
 ```
 
+demo 结束时会打印一条带配置绝对路径的 `claude mcp add ...` 命令，复制即可把这个小湖接给 AI agent，其他客户端见 [MCP 接入](../reference/mcp.md)。用 `cne serve --config configs/cnequity.demo.toml` 可以在浏览器里查看它；面板只评估 demo 湖实际持有的数据集。
+
 接下来：[研究示例](../recipes/README.md) · [配置](configuration.md) · [运行手册](../operations/runbook.md) · [排障](../operations/troubleshooting.md)。
 
 执行结束不表示所有来源证据齐全；有效部分结果可发布，缺口保留。验收请用 `cne check`。参见[结果契约与升级](../reference/cli.md#命令结果与退出码)。

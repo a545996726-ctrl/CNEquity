@@ -33,6 +33,6 @@ def test_callable_default_is_not_evaluated():
 
 
 def test_reference_matches_registered_commands():
-    assert generator.render_cli_options() == (ROOT / "docs/reference/cli-options.md").read_text(
+    assert generator.render_cli_options() == (ROOT / "docs/zh/reference/cli-options.md").read_text(
         encoding="utf-8"
     )

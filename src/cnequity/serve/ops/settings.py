@@ -25,6 +25,7 @@ from cnequity.config import load_config
 from cnequity.config.loader import push2_paused_by_env
 from cnequity.config.upgrade import _table_span, tomllib
 from cnequity.file_lock import LockUnavailable, exclusive_lock
+from cnequity.serve.labels_en import en
 from cnequity.serve.ops.catalog import OpsError, config_file
 from cnequity.serve.ops.scheduler import replace_config, state_dir
 
@@ -102,6 +103,57 @@ def _futures_minute_scope(config) -> str:
         f"范围仍在配置文件里：品种 {products}，合约 {contracts}，"
         f"上限 {config.futures_minute_max_contracts}。"
     )
+
+
+def _listed_en(items, *, empty: str) -> str:
+    names = [str(item) for item in items if str(item).strip()]
+    if not names:
+        return empty
+    shown = ", ".join(names[:8])
+    if len(names) > 8:
+        shown += f" and {len(names) - 8} more"
+    return shown
+
+
+def _minute_scope_en(config) -> str:
+    freqs = _listed_en(config.minute_bars_frequencies, empty="no frequency set")
+    symbols = _listed_en(config.minute_bars_symbols, empty="")
+    extra = f", symbols {symbols}" if symbols else ""
+    return f"The scope stays in the config file: {config.minute_bars_scope}, frequencies {freqs}{extra}."
+
+
+def _ticks_scope_en(config) -> str:
+    symbols = _listed_en(config.trade_ticks_symbols, empty="no symbols listed")
+    return (
+        f"The scope stays in the config file: {config.trade_ticks_scope}, "
+        f"limit {config.trade_ticks_max_symbols}, symbols {symbols}."
+    )
+
+
+def _futures_scope_en(config) -> str:
+    exchanges = _listed_en(config.futures_exchanges, empty="every supported route")
+    options = "with options" if config.futures_options else "without options"
+    return (
+        f"The scope stays in the config file: exchanges {exchanges}, {options}, "
+        f"DCE route {config.futures_dce_route}."
+    )
+
+
+def _futures_minute_scope_en(config) -> str:
+    products = _listed_en(config.futures_minute_products, empty="no products listed")
+    contracts = _listed_en(config.futures_minute_contracts, empty="no contracts listed")
+    return (
+        f"The scope stays in the config file: products {products}, contracts {contracts}, "
+        f"limit {config.futures_minute_max_contracts}."
+    )
+
+
+_SCOPE_EN = {
+    "_minute_scope": _minute_scope_en,
+    "_ticks_scope": _ticks_scope_en,
+    "_futures_scope": _futures_scope_en,
+    "_futures_minute_scope": _futures_minute_scope_en,
+}
 
 
 _INGEST = (
@@ -439,13 +491,14 @@ def _backup(path: Path) -> Path:
 
 
 def _public(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            key: change[key]
-            for key in ("id", "label", "before", "after", "before_label", "after_label")
-        }
-        for change in changes
-    ]
+    keys = ("id", "label", "before", "after", "before_label", "after_label")
+    shown = []
+    for change in changes:
+        row = {key: change[key] for key in keys}
+        for key in ("label", "before_label", "after_label"):
+            row[f"{key}_en"] = en(change[key])
+        shown.append(row)
+    return shown
 
 
 class SettingsService:
@@ -476,21 +529,29 @@ class SettingsService:
                     "id": spec.id,
                     "kind": spec.kind,
                     "label": spec.label,
+                    "label_en": en(spec.label),
                     "help": spec.help,
+                    "help_en": en(spec.help),
                     "value": values[spec.id],
                     "scope": spec.scope(config) if spec.scope else None,
+                    "scope_en": _SCOPE_EN[spec.scope.__name__](config) if spec.scope else None,
                 }
                 if spec.choices:
                     item["choices"] = [
-                        {"value": value, "label": label} for value, label in spec.choices
+                        {"value": value, "label": label, "label_en": en(label)}
+                        for value, label in spec.choices
                     ]
                 items.append(item)
-            sections.append({"id": group_id, "title": title, "settings": items})
+            sections.append(
+                {"id": group_id, "title": title, "title_en": en(title), "settings": items}
+            )
         env = push2_paused_by_env()
         return {
             "note": HOME_NOTE,
+            "note_en": en(HOME_NOTE),
             "push2_env_paused": env,
             "push2_env_note": PUSH2_ENV_NOTE if env else None,
+            "push2_env_note_en": en(PUSH2_ENV_NOTE) if env else None,
             "sections": sections,
         }
 
@@ -507,8 +568,11 @@ class SettingsService:
             "token": None,
             "changes": _public(changes),
             "note": NOTE_CHANGED if changes else NOTE_UNCHANGED,
+            "note_en": en(NOTE_CHANGED if changes else NOTE_UNCHANGED),
             "acknowledgement": ACKNOWLEDGEMENT if changes else None,
+            "acknowledgement_en": en(ACKNOWLEDGEMENT) if changes else None,
             "push2_env_note": PUSH2_ENV_NOTE if env else None,
+            "push2_env_note_en": en(PUSH2_ENV_NOTE) if env else None,
         }
         if not changes:
             return payload

@@ -2,10 +2,14 @@
 import { renderSchedule } from "./schedule.js";
 import { renderBackups } from "./backups.js";
 import { renderSettings } from "./settings.js";
-import { choiceLabel, ds, locale, modeLabel, tr } from "./i18n.js";
+import { choiceLabel, ds, locale, modeLabel, pick, tr } from "./i18n.js";
 let generation = 0;
 let streams = [];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// Readiness rows carry the pack's Chinese title; the id names it in English.
+const PACK_TITLES_EN = { market: "Market data", fundamentals: "Fundamentals", universe: "Universe" };
+const packTitle = (row) => tr(row.title, PACK_TITLES_EN[row.id] || row.title);
 
 export function closeOps() {
   generation += 1;
@@ -165,24 +169,24 @@ function readForm(form, specs) {
 
 function control(spec, source) {
   const value = fieldValue(spec, source);
-  const help = spec.help ? `<small class="muted">${spec.help}</small>` : "";
+  const help = spec.help ? `<small class="muted">${pick(spec, "help")}</small>` : "";
   if (spec.kind === "bool") {
-    return `<label class="ops-check"><input type="checkbox" name="${spec.name}" ${value ? "checked" : ""}> ${spec.label}</label>${help}`;
+    return `<label class="ops-check"><input type="checkbox" name="${spec.name}" ${value ? "checked" : ""}> ${pick(spec, "label")}</label>${help}`;
   }
   if (spec.kind === "choice") {
     const options = (spec.choices || [])
       .map((choice) => `<option value="${esc(choice)}" ${choice === value ? "selected" : ""}>${esc(choiceLabel(spec.name, choice))}</option>`)
       .join("");
-    return `<label>${spec.label}<select name="${spec.name}"><option value="">${spec.required ? tr("请选择", "Select") : tr("不限", "Any")}</option>${options}</select></label>${help}`;
+    return `<label>${pick(spec, "label")}<select name="${spec.name}"><option value="">${spec.required ? tr("请选择", "Select") : tr("不限", "Any")}</option>${options}</select></label>${help}`;
   }
   if (spec.kind === "multi") {
     const options = (spec.choices || [])
       .map((choice) => `<option value="${esc(choice)}" ${value.includes(choice) ? "selected" : ""}>${esc(choiceLabel(spec.name, choice))}</option>`)
       .join("");
-    return `<label>${spec.label}<select name="${spec.name}" multiple size="${Math.min(6, (spec.choices || []).length || 1)}">${options}</select></label>${help}`;
+    return `<label>${pick(spec, "label")}<select name="${spec.name}" multiple size="${Math.min(6, (spec.choices || []).length || 1)}">${options}</select></label>${help}`;
   }
   const type = spec.kind === "date" ? "date" : "text";
-  return `<label>${esc(spec.label)}<input name="${esc(spec.name)}" type="${type}" value="${esc(value)}" ${spec.required ? "required" : ""}></label>${help}`;
+  return `<label>${esc(pick(spec, "label"))}<input name="${esc(spec.name)}" type="${type}" value="${esc(value)}" ${spec.required ? "required" : ""}></label>${help}`;
 }
 
 function scopes() {
@@ -260,8 +264,8 @@ export function runLauncherModel(home) {
     const card = home?.operations?.find((entry) => entry.id === id);
     const reason = !home
       ? tr("读不到操作状态。", "Operations status is unavailable.")
-      : blocked || (card?.available ? "" : card?.unavailable_reason || tr("当前没有这项操作。", "This operation is not available."));
-    return { id, label, preset, summary: card?.summary || "", disabled: !home || !enabled || !card?.available, reason };
+      : blocked || (card?.available ? "" : pick(card, "unavailable_reason") || tr("当前没有这项操作。", "This operation is not available."));
+    return { id, label, preset, summary: pick(card, "summary") || "", disabled: !home || !enabled || !card?.available, reason };
   };
   const items = [];
   if (!home || schedule.today_is_session !== false) {
@@ -399,7 +403,7 @@ function commandBlock(home, escapeHtml) {
         const copy = card.command
           ? `<button type="button" class="button button-ghost" data-copy-command="${escapeHtml(card.command)}">${tr("复制", "Copy")}</button>`
           : "";
-        return `<div class="ops-command"><div><strong>${escapeHtml(card.title)}</strong><div class="muted">${escapeHtml(card.summary)}</div><code>${escapeHtml(card.command || "")}</code></div>
+        return `<div class="ops-command"><div><strong>${escapeHtml(pick(card, "title"))}</strong><div class="muted">${escapeHtml(pick(card, "summary"))}</div><code>${escapeHtml(card.command || "")}</code></div>
           <div class="ops-actions">${copy}<button type="button" class="button button-ghost" data-op="${escapeHtml(card.id)}" ${disabled ? "disabled" : ""}>${tr("用这个", "Use this")}</button></div></div>`;
       })
       .join("");
@@ -446,7 +450,7 @@ export async function renderOps(ctx) {
   const commandOpen = selected && workflowOf(selected) === "commands" ? " open" : "";
   const alerts = (home.occupancy.hints || []).map((hint) => `<li>${esc(hint)}</li>`);
   if (slot) {
-    alerts.push(`<li>${tr("正在执行", "Running")} <a href="#/ops/jobs/${encodeURIComponent(slot.job_id)}">${esc(slot.title || slot.op)}</a></li>`);
+    alerts.push(`<li>${tr("正在执行", "Running")} <a href="#/ops/jobs/${encodeURIComponent(slot.job_id)}">${esc(pick(slot, "title") || slot.op)}</a></li>`);
   }
   if (!home.mode.ops_enabled) alerts.push(`<li>${tr("当前模式不能从面板启动命令。", "This mode cannot start commands from the panel.")}</li>`);
   const attention = alerts.length
@@ -489,7 +493,7 @@ export async function renderOps(ctx) {
       recent.innerHTML = `<section class="surface-panel report-panel ops-recent"><div class="panel-header"><h2>${tr("最近的任务", "Recent jobs")}</h2></div><ul class="ops-jobs">${jobs
         .map((job) => {
           const when = jobStamp(job);
-          return `<li><a href="#/ops/jobs/${encodeURIComponent(job.job_id)}">${esc(job.title || job.op)}</a><span class="muted">${esc(job.label || job.state)}${job.scheduled ? tr(" · 定时执行", " · scheduled") : ""}${when ? ` · ${esc(when)}` : ""}</span></li>`;
+          return `<li><a href="#/ops/jobs/${encodeURIComponent(job.job_id)}">${esc(pick(job, "title") || job.op)}</a><span class="muted">${esc(pick(job, "label") || job.state)}${job.scheduled ? tr(" · 定时执行", " · scheduled") : ""}${when ? ` · ${esc(when)}` : ""}</span></li>`;
         })
         .join("")}</ul></section>`;
     }
@@ -580,7 +584,7 @@ export function mountOpForm(ctx, home, opId, preset, host, current) {
   const sessionText = formNoteText(home.occupancy.schedule || {}, card.id, initial);
   const rangeNote = card.id === "daily.full" || card.id === "daily.group" ? `<p class="panel-note">${dailyRangeNote()}</p>` : "";
   host.innerHTML = `<section class="surface-panel report-panel ops-form">
-    <div class="panel-header"><div><h2>${ctx.esc(card.title)}</h2><p class="sub">${ctx.esc(card.summary)}</p></div></div>
+    <div class="panel-header"><div><h2>${ctx.esc(pick(card, "title"))}</h2><p class="sub">${ctx.esc(pick(card, "summary"))}</p></div></div>
     ${rangeNote}
     ${sessionText ? `<p class="panel-note" id="ops-session">${ctx.esc(sessionText)}</p>` : `<p class="panel-note" id="ops-session" hidden></p>`}
     <form id="ops-fields" class="ops-fields">${card.params.map((spec) => control(spec, preset)).join("")}
@@ -653,7 +657,7 @@ async function previewCard(ctx, home, card, params, current, target) {
   const checks = (body.acknowledgements || [])
     .map(
       (item) =>
-        `<label class="ops-check"><input type="checkbox" data-ack="${esc(item.id)}"> ${esc(item.text)}</label>`,
+        `<label class="ops-check"><input type="checkbox" data-ack="${esc(item.id)}"> ${esc(pick(item, "text"))}</label>`,
     )
     .join("");
   target.innerHTML = `<p class="panel-note">${tr("将执行", "Will run")} <code>${esc(body.command)}</code></p>
@@ -711,17 +715,17 @@ async function renderPackFinish(job, api, csrf) {
   }
   const packs = body.packs || [];
   host.innerHTML = `<section class="surface-panel report-panel ops-form">
-    <h2>研究包</h2>
-    ${packs.map((row) => `<p>${esc(row.title)}：${esc(row.detail)}${row.next_command ? `，下一步 <code>${esc(row.next_command)}</code>` : ""}</p>`).join("")}
+    <h2>${tr("研究包", "Research packs")}</h2>
+    ${packs.map((row) => `<p>${esc(packTitle(row))}${tr("：", ": ")}${esc(row.detail)}${row.next_command ? tr(`，下一步 <code>${esc(row.next_command)}</code>`, `; next: <code>${esc(row.next_command)}</code>`) : ""}</p>`).join("")}
     <p class="panel-note">${esc(body.note || "")}</p>
-    <label class="ops-check"><input id="pack-schedule-ack" type="checkbox"> 我知道定时日更只跑这些研究包，快照漏一天无法按日期补回，公告和资讯不在其中。</label>
-    <div class="action-row"><button class="button button-primary" id="pack-schedule" type="button">安装定时日更</button></div>
+    <label class="ops-check"><input id="pack-schedule-ack" type="checkbox"> ${tr("我知道定时日更只跑这些研究包，快照漏一天无法按日期补回，公告和资讯不在其中。", "I understand the scheduled daily update runs only these packs, a missed snapshot day cannot be backfilled by date, and announcements and news are not included.")}</label>
+    <div class="action-row"><button class="button button-primary" id="pack-schedule" type="button">${tr("安装定时日更", "Install scheduled daily update")}</button></div>
     <p class="panel-note" id="pack-schedule-note"></p>
   </section>`;
   document.getElementById("pack-schedule").addEventListener("click", async () => {
     const note = document.getElementById("pack-schedule-note");
     if (!document.getElementById("pack-schedule-ack").checked) {
-      note.textContent = "请先确认执行范围。";
+      note.textContent = tr("请先确认执行范围。", "Confirm the scope first.");
       return;
     }
     try {
@@ -743,7 +747,7 @@ async function renderPackFinish(job, api, csrf) {
         headers,
         body: JSON.stringify({ token: preview.token, acknowledged: true }),
       });
-      note.textContent = "已安装。";
+      note.textContent = tr("已安装。", "Installed.");
     } catch (error) {
       note.textContent = error.message;
     }
@@ -757,7 +761,7 @@ async function renderJob(ctx, current) {
     job = await api(`/api/ops/jobs/${encodeURIComponent(jobId)}`);
   } catch (err) {
     if (current === generation) {
-      setPage(`<section class="error-state"><h1>没有这个任务</h1><p class="sub err">${esc(err.message)}</p></section>`, "ops");
+      setPage(`<section class="error-state"><h1>${tr("没有这个任务", "Job not found")}</h1><p class="sub err">${esc(err.message)}</p></section>`, "ops");
     }
     return;
   }
@@ -771,17 +775,17 @@ async function renderJob(ctx, current) {
     )
     .join("");
   setPage(
-    `<section class="page-heading"><div class="eyebrow">数据湖控制台 / 操作 / 任务</div>
-      <div class="heading-row"><div><h1>${esc(job.title || job.op)}</h1><p class="sub"><span id="ops-job-state">${esc(job.label || job.state)}</span> · <code>${esc(job.command || "")}</code></p></div>
-      <div class="action-row"><a class="button button-ghost" href="#/ops">← 返回操作</a>
-        <button class="button button-danger" id="ops-cancel" type="button" ${job.state === "running" || job.state === "starting" ? "" : "disabled"}>取消</button></div></div></section>
+    `<section class="page-heading"><div class="eyebrow">${tr("数据湖控制台 / 操作 / 任务", "Lake console / Operations / Job")}</div>
+      <div class="heading-row"><div><h1>${esc(pick(job, "title") || job.op)}</h1><p class="sub"><span id="ops-job-state">${esc(pick(job, "label") || job.state)}</span> · <code>${esc(job.command || "")}</code></p></div>
+      <div class="action-row"><a class="button button-ghost" href="#/ops">${tr("← 返回操作", "← Back to operations")}</a>
+        <button class="button button-danger" id="ops-cancel" type="button" ${job.state === "running" || job.state === "starting" ? "" : "disabled"}>${tr("取消", "Cancel")}</button></div></div></section>
     <p class="panel-note" id="ops-job-note">${esc(job.outcome?.message || "")}</p>
     <p class="panel-note" id="ops-next" ${jobNextStep(job) ? "" : "hidden"}>${jobNextStep(job)}</p>
     <div id="ops-readiness"></div>
-    ${runs ? `<section class="surface-panel report-panel"><h2>关联 run</h2><ul class="ops-jobs">${runs}</ul></section>` : `<div id="ops-runs"></div>`}
-    <section class="surface-panel report-panel"><div class="panel-header"><h2>进度</h2><label class="ops-check"><input type="checkbox" id="ops-follow" checked> 跟随</label></div>
+    ${runs ? `<section class="surface-panel report-panel"><h2>${tr("关联 run", "Related runs")}</h2><ul class="ops-jobs">${runs}</ul></section>` : `<div id="ops-runs"></div>`}
+    <section class="surface-panel report-panel"><div class="panel-header"><h2>${tr("进度", "Progress")}</h2><label class="ops-check"><input type="checkbox" id="ops-follow" checked> ${tr("跟随", "Follow")}</label></div>
       <pre class="ops-log" id="ops-log"></pre></section>
-    <section class="surface-panel report-panel"><h2>命令输出</h2><pre class="ops-log" id="ops-out"></pre></section>`,
+    <section class="surface-panel report-panel"><h2>${tr("命令输出", "Command output")}</h2><pre class="ops-log" id="ops-out"></pre></section>`,
     "ops",
   );
   const log = document.getElementById("ops-log");
@@ -812,7 +816,7 @@ async function renderJob(ctx, current) {
     if (current !== generation) return;
     const latest = await api(`/api/ops/jobs/${encodeURIComponent(jobId)}`);
     const state = document.getElementById("ops-job-state");
-    if (state) state.textContent = latest.label || latest.state;
+    if (state) state.textContent = pick(latest, "label") || latest.state;
     const note = document.getElementById("ops-job-note");
     if (note) note.textContent = latest.outcome?.message || "";
     const next = document.getElementById("ops-next");
@@ -826,7 +830,7 @@ async function renderJob(ctx, current) {
     await renderPackFinish(latest, api, home.csrf_token);
     const host = document.getElementById("ops-runs");
     if (host && latest.runs?.length) {
-      host.innerHTML = `<section class="surface-panel report-panel"><h2>关联 run</h2><ul class="ops-jobs">${latest.runs
+      host.innerHTML = `<section class="surface-panel report-panel"><h2>${tr("关联 run", "Related runs")}</h2><ul class="ops-jobs">${latest.runs
         .map((run) => `<li><a href="#/runs/${encodeURIComponent(run.run_id)}">${esc(run.job_name)}</a> ${esc(run.status)}</li>`)
         .join("")}</ul></section>`;
     }
@@ -850,23 +854,23 @@ async function renderJob(ctx, current) {
 function renderWizard(ctx, home, current) {
   const { api, setPage, esc } = ctx;
   setPage(
-    `<section class="page-heading"><div class="eyebrow">首次配置</div><div class="heading-row"><div><h1>建立数据湖</h1><p class="sub">选定数据目录、历史起点和研究包。初始化仍下载固定的全市场行情主干。这一步只能在本机完成。</p></div></div></section>
+    `<section class="page-heading"><div class="eyebrow">${tr("首次配置", "First-time setup")}</div><div class="heading-row"><div><h1>${tr("建立数据湖", "Create the lake")}</h1><p class="sub">${tr("选定数据目录、历史起点和研究包。初始化仍下载固定的全市场行情主干。这一步只能在本机完成。", "Choose a data directory, history start and research packs. Initialization always downloads the fixed full-market market data core. This step can only be done on this machine.")}</p></div></div></section>
     <section class="surface-panel report-panel ops-form">
-      <label>数据目录<input id="setup-root" type="text" value="${esc(home.mode.suggested_data_root || "")}"></label>
-      <p class="panel-note">必须是绝对路径。缺少的目录会自动建立，已有上级目录必须可写。</p>
-      <div class="action-row"><button class="button button-ghost" id="setup-doctor" type="button">环境体检</button></div>
+      <label>${tr("数据目录", "Data directory")}<input id="setup-root" type="text" value="${esc(home.mode.suggested_data_root || "")}"></label>
+      <p class="panel-note">${tr("必须是绝对路径。缺少的目录会自动建立，已有上级目录必须可写。", "Must be an absolute path. Missing directories are created; existing parent directories must be writable.")}</p>
+      <div class="action-row"><button class="button button-ghost" id="setup-doctor" type="button">${tr("环境体检", "Environment check")}</button></div>
       <div id="setup-doctor-out"></div>
-      <label>历史深度<select id="setup-profile"><option value="quick">近 3 年</option><option value="full">从 2016-01-01 起的日线</option></select></label>
-      <label>历史起点（可选，覆盖深度）<input id="setup-since" type="date"></label>
+      <label>${tr("历史深度", "History depth")}<select id="setup-profile"><option value="quick">${tr("近 3 年", "Last 3 years")}</option><option value="full">${tr("从 2016-01-01 起的日线", "Daily bars since 2016-01-01")}</option></select></label>
+      <label>${tr("历史起点（可选，覆盖深度）", "History start (optional, overrides depth)")}<input id="setup-since" type="date"></label>
       <fieldset class="ops-fields">
-        <legend>研究包</legend>
-        <label class="ops-check"><input id="setup-pack-market" type="checkbox" checked disabled> 行情（初始化固定下载，日更更新这一组）</label>
-        <label class="ops-check"><input id="setup-pack-fundamentals" type="checkbox"> 基本面（日更再加财报和股本，不在这次初始化里下载）</label>
-        <label class="ops-check"><input id="setup-pack-universe" type="checkbox"> 股票池（结束后补历史 ST，不额外占用日更额度）</label>
+        <legend>${tr("研究包", "Research packs")}</legend>
+        <label class="ops-check"><input id="setup-pack-market" type="checkbox" checked disabled> ${tr("行情（初始化固定下载，日更更新这一组）", "Market data (always downloaded at initialization; the daily update refreshes this group)")}</label>
+        <label class="ops-check"><input id="setup-pack-fundamentals" type="checkbox"> ${tr("基本面（日更再加财报和股本，不在这次初始化里下载）", "Fundamentals (the daily update adds financial statements and share capital; not downloaded during this initialization)")}</label>
+        <label class="ops-check"><input id="setup-pack-universe" type="checkbox"> ${tr("股票池（结束后补历史 ST，不额外占用日更额度）", "Universe (backfills historical ST afterwards; uses no extra daily update quota)")}</label>
       </fieldset>
-      <p class="panel-note">定时日更只跑所选研究包。交易状态等快照漏掉当天无法按日期补回。公告和资讯要另外运行。</p>
-      <label class="ops-check"><input id="setup-ack" type="checkbox"> 我知道初始化会按所选深度请求数据源，可能持续数小时。</label>
-      <div class="action-row"><button class="button button-primary" id="setup-go" type="button" disabled>生成配置并开始初始化</button></div>
+      <p class="panel-note">${tr("定时日更只跑所选研究包。交易状态等快照漏掉当天无法按日期补回。公告和资讯要另外运行。", "The scheduled daily update runs only the selected packs. Snapshots such as trading status cannot be backfilled by date if a day is missed. Announcements and news run separately.")}</p>
+      <label class="ops-check"><input id="setup-ack" type="checkbox"> ${tr("我知道初始化会按所选深度请求数据源，可能持续数小时。", "I understand initialization queries the data sources for the selected depth and may take several hours.")}</label>
+      <div class="action-row"><button class="button button-primary" id="setup-go" type="button" disabled>${tr("生成配置并开始初始化", "Create config and start initialization")}</button></div>
       <p class="panel-note" id="setup-hint" hidden></p>
       <p class="panel-note" id="setup-command" hidden></p>
       <p class="panel-note" id="setup-note"></p>
@@ -988,12 +992,12 @@ function renderWizard(ctx, home, current) {
       return;
     }
     go.disabled = true;
-    note.textContent = "正在检查配置…";
+    note.textContent = tr("正在检查配置…", "Checking configuration…");
     try {
       let fresh = await api("/api/ops");
       if (current !== generation) return;
       if (fresh.mode.setup) {
-        note.textContent = "正在生成配置…";
+        note.textContent = tr("正在生成配置…", "Creating configuration…");
         const created = await api("/api/setup/config", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-CNE-CSRF": fresh.csrf_token },
@@ -1008,14 +1012,14 @@ function renderWizard(ctx, home, current) {
           hint.textContent = created.hint;
           document.getElementById("setup-root").disabled = true;
           go.textContent = tr("预览初始化", "Preview initialization");
-          note.textContent = "配置已生成。请先阅读上面的说明，再预览初始化命令。";
+          note.textContent = tr("配置已生成。请先阅读上面的说明，再预览初始化命令。", "Configuration created. Read the notes above, then preview the initialization command.");
           allowGo();
           return;
         }
       }
       document.getElementById("setup-root").disabled = true;
       go.textContent = tr("预览初始化", "Preview initialization");
-      note.textContent = "正在预览命令…";
+      note.textContent = tr("正在预览命令…", "Previewing command…");
       const preview = await api("/api/ops/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-CNE-CSRF": fresh.csrf_token },
@@ -1035,7 +1039,7 @@ function renderWizard(ctx, home, current) {
       };
       const command = document.getElementById("setup-command");
       command.hidden = false;
-      command.textContent = `将执行 ${preview.command}`;
+      command.textContent = tr(`将执行 ${preview.command}`, `Will run ${preview.command}`);
       go.textContent = tr("开始初始化", "Start initialization");
       note.textContent = tr("请核对上面的命令，再开始初始化。", "Check the command above, then start initialization.");
       allowGo();

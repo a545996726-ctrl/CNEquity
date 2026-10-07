@@ -14,7 +14,7 @@
 
 ## 控制台
 
-`cne serve` 查看已发布数据、水位和任务。回环地址上的操作页按白名单发起初始化、日更、补抓、巡检和数据备份；跑批页用手跑会留下 run 的命令，打开的是同一张预览表单。`--read-only` 关闭这些写入口。远程取数还要 `--allow-remote-ops`。MCP 不提供这些操作。步骤见[快速开始](../getting-started/quickstart.md#browser)和[运行手册](../operations/runbook.md)。
+`cne serve` 查看已发布数据、水位和任务。回环地址上的操作页按白名单发起初始化、日更、补抓、巡检和数据备份；跑批页也可以手动发起会留下 run 记录的命令（日更、调度组、补落后、事件流、回填、重算派生），打开的是同一张预览表单。`--read-only` 关闭这些写入口。远程取数还要 `--allow-remote-ops`。MCP 不提供这些操作。步骤见[快速开始](../getting-started/quickstart.md#browser)和[运行手册](../operations/runbook.md)。
 
 ## 查询与检查
 

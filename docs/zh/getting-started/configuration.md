@@ -252,7 +252,7 @@ weekday = 5          # 每周组在哪天之前的最后一个交易日跑，ISO
   总请求量基本不变，只是集中到一次。
 - **快照类数据集照常每天跑**，即使它所在的组是每周（资金流、热榜、ST/停牌状态等只有「今天」，
   漏一天就永久缺一天）；它们依赖的同组步骤（如 `trading_status` 需要当天的 `instruments`）也一起跑。
-  哪些是快照类看 `docs/datasets/sources.md` 或 `DatasetSpec.fetch_semantics`。
+  哪些是快照类看[数据源说明](../datasets/sources.md)或 `DatasetSpec.fetch_semantics`。
 - 每周组在当周最后一个交易日跑（不晚于 `weekday`）：周五休市就提前到周四，不会整周跳过。
 - 休息日整组没有要跑的步骤时，`cne run daily --group` 输出 `skipped_not_scheduled`，日更脚本记为 SKIPPED。
 - 新鲜度跟着频率走：只由每周组负责的历史数据集，按该组上次应跑的交易日判断是否过期，

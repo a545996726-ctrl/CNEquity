@@ -1,6 +1,6 @@
 """The published catalog must list what the registry actually holds.
 
-``docs/datasets/catalog.md`` carries per-dataset prose (主源, 备注) that has no
+``docs/zh/datasets/catalog.md`` carries per-dataset prose (主源, 备注) that has no
 home in ``DatasetSpec``, so the document is written by hand rather than
 generated. That leaves it free to drift: before this guard existed the L7 table
 was missing ``flash_news_wire`` and ``economic_calendar``, and ``industry_index``
@@ -12,19 +12,29 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from cnequity.domain.datasets import DATASETS, datasets_by_tier
 
-CATALOG = Path(__file__).resolve().parents[2] / "docs" / "datasets" / "catalog.md"
+DOCS = Path(__file__).resolve().parents[2] / "docs"
+CATALOG = DOCS / "zh" / "datasets" / "catalog.md"
+# The English catalog is a translation of the same tables; it drifts the same way.
+CATALOGS = [CATALOG, DOCS / "en" / "datasets" / "catalog.md"]
+# Where the measured source-history table starts and ends, per language.
+_HISTORY_BOUNDS = {
+    CATALOGS[0]: ("### 历史视野", "### `trade_ticks` 的容量"),
+    CATALOGS[1]: ("### History horizon", "### `trade_ticks` capacity"),
+}
 
 _SECTION = re.compile(r"^##\s+(L[0-9])\b")
 _ROW = re.compile(r"^\|\s*([a-z][a-z0-9_]*)\s*\|")
 
 
-def _documented_by_tier() -> dict[str, list[str]]:
+def _documented_by_tier(catalog: Path) -> dict[str, list[str]]:
     """Dataset names appearing in each ``## L<n>`` section's tables."""
     documented: dict[str, list[str]] = {}
     tier: str | None = None
-    for line in CATALOG.read_text(encoding="utf-8").splitlines():
+    for line in catalog.read_text(encoding="utf-8").splitlines():
         if line.startswith("## "):
             match = _SECTION.match(line)
             # Any other h2 (采集模式, 主备配置, Step → 数据集映射) closes the
@@ -39,8 +49,9 @@ def _documented_by_tier() -> dict[str, list[str]]:
     return documented
 
 
-def test_catalog_tier_tables_match_the_registry():
-    documented = _documented_by_tier()
+@pytest.mark.parametrize("catalog", CATALOGS, ids=["zh", "en"])
+def test_catalog_tier_tables_match_the_registry(catalog):
+    documented = _documented_by_tier(catalog)
     registered = {tier: names for tier, names in datasets_by_tier().items() if names}
 
     assert set(documented) == set(registered), "catalog tier sections differ from registry tiers"
@@ -51,10 +62,12 @@ def test_catalog_tier_tables_match_the_registry():
         )
 
 
-def test_catalog_history_floor_table_has_no_duplicate_datasets():
+@pytest.mark.parametrize("catalog", CATALOGS, ids=["zh", "en"])
+def test_catalog_history_floor_table_has_no_duplicate_datasets(catalog):
     """The measured source-history table must not repeat a dataset row."""
-    text = CATALOG.read_text(encoding="utf-8")
-    history = text.split("### 历史视野", 1)[1].split("### `trade_ticks` 的容量", 1)[0]
+    start, end = _HISTORY_BOUNDS[catalog]
+    text = catalog.read_text(encoding="utf-8")
+    history = text.split(start, 1)[1].split(end, 1)[0]
     names = [
         match.group(1) for match in re.finditer(r"^\|\s*([a-z][a-z0-9_]*)\s*\|", history, re.M)
     ]
@@ -67,7 +80,7 @@ def test_catalog_history_floor_table_has_no_duplicate_datasets():
 # core@16:30 and margin_trading signals@17:00 when both run in capital — and one
 # of them had been wrong since before the start times moved at all.
 
-SOURCES = Path(__file__).resolve().parents[2] / "docs" / "datasets" / "sources.md"
+SOURCES = Path(__file__).resolve().parents[2] / "docs" / "zh" / "datasets" / "sources.md"
 _GROUP_ROW = re.compile(r"\|\s*分组\s*\|\s*([^|]+?)\s*\|")
 
 

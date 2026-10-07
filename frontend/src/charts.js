@@ -195,6 +195,9 @@ export function heatmap(el, data) {
 
 // --- provenance over time ----------------------------------------------------
 
+// Bucket key for folded sources; the displayed name is translated separately.
+const OTHER_SOURCE = "其他"; // i18n-ignore
+
 /**
  * Source mix as it moved, stacked.
  *
@@ -206,7 +209,7 @@ export function provenanceSeries(el, data) {
   const t = tokens();
   const points = data.points;
   if (!points.length) {
-    el.innerHTML = '<p class="muted">没有溯源度量。先跑 <code>cne stats rebuild</code>。</p>';
+    el.innerHTML = `<p class="muted">${tr("没有溯源度量。先跑 <code>cne stats rebuild</code>。", "No provenance metrics. Run <code>cne stats rebuild</code> first.")}</p>`;
     return null;
   }
 
@@ -214,11 +217,12 @@ export function provenanceSeries(el, data) {
   const named = [...new Set(points.map((p) => p.source))].sort();
   const shown = named.slice(0, t.series.length);
   const folded = named.slice(t.series.length);
-  const keys = folded.length ? [...shown, "其他"] : shown;
+  const keys = folded.length ? [...shown, OTHER_SOURCE] : shown;
+  const label = (key) => (key === OTHER_SOURCE ? tr("其他", "Other") : key);
 
   const bucket = new Map();
   for (const p of points) {
-    const key = shown.includes(p.source) ? p.source : "其他";
+    const key = shown.includes(p.source) ? p.source : OTHER_SOURCE;
     bucket.set(`${p.period_start}|${key}`, (bucket.get(`${p.period_start}|${key}`) || 0) + p.row_count);
   }
 
@@ -232,10 +236,10 @@ export function provenanceSeries(el, data) {
       backgroundColor: t.surface,
       borderColor: t.line,
       textStyle: { color: t.ink, fontSize: 12 },
-      valueFormatter: (v) => (v ? v.toLocaleString() + " 行" : "-"),
+      valueFormatter: (v) => (v ? tr(`${v.toLocaleString()} 行`, `${v.toLocaleString()} rows`) : "-"),
     },
     legend: {
-      data: keys,
+      data: keys.map(label),
       bottom: 0,
       textStyle: { color: t.muted, fontSize: 11 },
       itemWidth: 10,
@@ -259,10 +263,10 @@ export function provenanceSeries(el, data) {
       },
     },
     series: keys.map((key, i) => ({
-      name: key,
+      name: label(key),
       type: "bar",
       stack: "rows",
-      color: key === "其他" ? t.other : t.series[i],
+      color: key === OTHER_SOURCE ? t.other : t.series[i],
       // 2px of surface between stacked segments so adjacent hues never touch.
       itemStyle: { borderColor: t.surface, borderWidth: 1 },
       barMaxWidth: 40,

@@ -285,7 +285,6 @@ bars_30m = resample_minute_history(load("minute_bars", **window),
 
 - [Python API 参考](../reference/python-api.md)
 - [产品边界](../architecture/overview.md)
-- [产品边界](../architecture/overview.md)
 
 ## 衍生品研究
 
